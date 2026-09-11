@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Keyboard-Center
+Name[ru]=Keyboard-Center
+GenericName=Keyboard Configuration
+GenericName[ru]=Настройка клавиатуры
+Comment=Configure AULA and Ajazz mechanical keyboards
+Comment[ru]=Настройка механических клавиатур AULA и Ajazz
+Exec=keyboard-center
+Icon=keyboard-center
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;GTK;
+Keywords=keyboard;keycap;rgb;keyboard-center;aula;ajazz;mechanical;
+X-GNOME-UsesNotifications=true

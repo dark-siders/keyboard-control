@@ -1,0 +1,80 @@
+# --- udev-правила для Keyboard-Center ---
+# Дают доступ пользователю к HIDRAW-устройствам механических клавиатур
+# без root-прав. Установка:
+#   sudo cp 99-keyboard-center.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# VID/PID для 3 режимов подключения (USB / 2.4G Dongle / Bluetooth)
+# могут отличаться в зависимости от ревизии. Если клавиатура
+# не определяется — добавьте PID из вывода `lsusb` / `udevadm monitor`.
+
+# --- Общие переменные ---
+# Общая группа для доступа к HIDRAW (в NixOS:-users = "users", убедитесь что
+# пользователь состоит в ней). Группу можно сменить на свою, например "keyboard".
+GROUP="plugdev"
+MODE="0664"
+
+# ============================================================
+# Ajazz AK820 Pro
+# ============================================================
+
+# USB
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", ATTR{idProduct}=="8207", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# 2.4 GHz Dongle
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", ATTR{idProduct}=="8208", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# Bluetooth HID (ChromeOS / HID-over-GATT)
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", ATTR{idProduct}=="8209", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# ============================================================
+# AULA F75
+# ============================================================
+
+# USB
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004b", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# 2.4 GHz Dongle
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004c", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# Bluetooth
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004d", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# Ревизия «BY Tech Gaming Keyboard» (USB, PID 010C)
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="010c", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# ============================================================
+# AULA F99
+# ============================================================
+
+# USB
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004e", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# 2.4 GHz Dongle
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004f", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# Bluetooth
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="0050", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# ============================================================
+# Fallback: правила для NixOS udev с подстановкой переменных
+# Универсальное правило для поддерживаемых VID (ремако на случай
+# неизвестных ревизий PID).
+# ============================================================
+
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
