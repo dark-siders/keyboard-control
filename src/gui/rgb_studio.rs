@@ -96,9 +96,16 @@ pub fn build_rgb_studio(
     live_label.add_css_class("heading");
     live_label.set_halign(gtk::Align::Start);
 
-    let live_color_btn = gtk::ColorDialogButton::builder().build();
-    live_color_btn.set_rgba(&gdk::RGBA::new(1.0, 0.0, 0.0, 1.0));
-    live_color_btn.set_halign(gtk::Align::Start);
+    let live_entry = gtk::Entry::builder()
+        .text("#FF0000")
+        .placeholder_text("#RRGGBB")
+        .halign(gtk::Align::Start)
+        .width_chars(9)
+        .build();
+
+    // Палитра быстрого выбора (без системного цветопикера/portal).
+    let palette_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    palette_row.set_halign(gtk::Align::Start);
 
     let live_on = gtk::Button::with_label("Включить цвет");
     live_on.add_css_class("suggested-action");
@@ -106,6 +113,11 @@ pub fn build_rgb_studio(
 
     let live_off = gtk::Button::with_label("Выключить свет");
     live_off.set_halign(gtk::Align::Start);
+
+    let live_status = gtk::Label::new(Some("Подключите клавиатуру: Устройства → Открыть"));
+    live_status.add_css_class("dim-label");
+    live_status.set_halign(gtk::Align::Start);
+    live_status.set_wrap(true);
 
     // Текущий таймер потока кадров + текущий цвет.
     let live_timer: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
@@ -123,9 +135,11 @@ pub fn build_rgb_studio(
     panel.append(&apply);
     panel.append(&save_to_board);
     panel.append(&live_label);
-    panel.append(&live_color_btn);
+    panel.append(&live_entry);
+    panel.append(&palette_row);
     panel.append(&live_on);
     panel.append(&live_off);
+    panel.append(&live_status);
 
     // --- Обработчики ---------------------------------------------------------
     let fetcher2 = fetcher.clone();
@@ -157,48 +171,99 @@ pub fn build_rgb_studio(
 
     // --- Живой цвет: обработчики ---------------------------------------
     let frame_capacity = crate::devices::aula_f75::RGB_LED_COUNT;
-    let fetcher4 = fetcher.clone();
-    let fetcher5 = fetcher.clone();
-    let timer_a = live_timer.clone();
-    let color_a = live_color.clone();
-    let color_btn_a = live_color_btn.clone();
-    live_on.connect_clicked(move |_| {
-        let rgba = color_btn_a.rgba();
-        let color = Color::new(
-            (rgba.red() * 255.0).round() as u8,
-            (rgba.green() * 255.0).round() as u8,
-            (rgba.blue() * 255.0).round() as u8,
-        );
-        let Some(dev) = fetcher4() else { return };
-        // Останавливаем предыдущий поток.
-        if let Some(id) = timer_a.borrow_mut().take() {
-            id.remove();
-        }
-        let frame = vec![color; frame_capacity];
-        if dev.render_frame(&frame).is_err() {
-            return;
-        }
-        *color_a.borrow_mut() = Some(color);
-        // Запускаем keepalive: поток кадров каждые 400 мс.
-        let timer_b = timer_a.clone();
-        let color_b = color_a.clone();
-        let dev_fetch = fetcher5.clone();
-        *timer_b.borrow_mut() = Some(gtk::glib::timeout_add_local(
-            std::time::Duration::from_millis(400),
-            move || {
-                let Some(c) = color_b.borrow().as_ref().copied() else {
-                    return glib::ControlFlow::Break;
-                };
-                let Some(dev) = dev_fetch() else {
-                    return glib::ControlFlow::Break;
-                };
-                if dev.render_frame(&vec![c; frame_capacity]).is_err() {
-                    return glib::ControlFlow::Break;
-                }
-                glib::ControlFlow::Continue
-            },
-        ));
-    });
+
+    // Общий «включить текущий цвет из поля ввода» (палитра и кнопка).
+    let apply_cur: Rc<dyn Fn()> = {
+        let entry_a = live_entry.clone();
+        let fetcher_a = fetcher.clone();
+        let timer_a = live_timer.clone();
+        let color_a = live_color.clone();
+        let status_a = live_status.clone();
+        Rc::new(move || {
+            let text = entry_a.text().to_string();
+            let Some(color) = Color::from_hex_checked(text.trim()) else {
+                status_a.set_text(&format!("Неверный цвет: «{text}» (ожидается #RRGGBB)"));
+                return;
+            };
+            let Some(dev) = fetcher_a() else {
+                status_a.set_text("Устройство не подключено: откройте его на вкладке «Устройства»");
+                return;
+            };
+            // Останавливаем предыдущий поток.
+            if let Some(id) = timer_a.borrow_mut().take() {
+                id.remove();
+            }
+            let frame = vec![color; frame_capacity];
+            if let Err(e) = dev.render_frame(&frame) {
+                status_a.set_text(&format!("Ошибка отправки кадра: {e}"));
+                return;
+            }
+            *color_a.borrow_mut() = Some(color);
+            status_a.set_text(&format!("Кадр #{:06X} отправлен ({frame_capacity} LED)…", color.to_argb() & 0xFF_FFFF));
+            // Запускаем keepalive: поток кадров каждые 400 мс.
+            let timer_b = timer_a.clone();
+            let color_b = color_a.clone();
+            let dev_fetch = fetcher_a.clone();
+            *timer_b.borrow_mut() = Some(gtk::glib::timeout_add_local(
+                std::time::Duration::from_millis(400),
+                move || {
+                    let Some(c) = color_b.borrow().as_ref().copied() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    let Some(dev) = dev_fetch() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    if dev.render_frame(&vec![c; frame_capacity]).is_err() {
+                        return glib::ControlFlow::Break;
+                    }
+                    glib::ControlFlow::Continue
+                },
+            ));
+        })
+    };
+
+    let apply_cur2 = apply_cur.clone();
+    live_on.connect_clicked(move |_| apply_cur2());
+
+    // Палитра: кнопка ставит цвет в поле и сразу применяет.
+    for (rgb, name) in [
+        (0xFF0000u32, "Красный"),
+        (0x00FF00u32, "Зелёный"),
+        (0x0000FFu32, "Синий"),
+        (0xFFFFFFu32, "Белый"),
+        (0xFF8000u32, "Оранжевый"),
+    ] {
+        let btn = gtk::Button::with_label(name);
+        btn.add_css_class("flat");
+        let entry_b = live_entry.clone();
+        let apply_b = apply_cur.clone();
+        let hex = format!("#{:06X}", rgb & 0xFF_FFFF);
+        btn.connect_clicked(move |_| {
+            entry_b.set_text(&hex);
+            apply_b();
+        });
+        palette_row.append(&btn);
+    }
+
+    // Пресеты: выбор в списке сразу ставит цвет в поле ввода и применяет.
+    {
+        let preset_entry = live_entry.clone();
+        let preset_apply = apply_cur.clone();
+        preset_dd.connect_selected_notify(move |dd| {
+            let hex = match dd.selected() {
+                1 => Some("#FFFFFF"), // Static
+                2 => Some("#00A8FF"), // Дыхание
+                3 => Some("#FF8000"), // Волна
+                4 => Some("#FF0066"), // Спектр
+                5 => Some("#78C8FF"), // Дождь
+                _ => None, // «—»
+            };
+            if let Some(h) = hex {
+                preset_entry.set_text(h);
+                preset_apply();
+            }
+        });
+    }
 
     let timer_c = live_timer.clone();
     let color_c = live_color.clone();

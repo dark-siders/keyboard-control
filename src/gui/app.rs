@@ -332,26 +332,16 @@ fn make_fetcher(slot: DeviceSlot) -> impl Fn() -> Option<Rc<dyn KeyboardDevice>>
 }
 
 /// Открытие устройства по полям из найденной строки.
+/// Путь из списка игнорируется: HidBridge::open сам выбирает командный
+/// интерфейс с вендорским usage page (у AULA это hidraw6), а не клавиатурный.
 fn connect_selected(
     device_slot: &DeviceSlot,
     info: &crate::devices::DeviceInfo,
-    path: Option<&str>,
+    _path: Option<&str>,
 ) -> anyhow::Result<String> {
     let api = hidapi::HidApi::new()?;
-    let device = match path {
-        Some(p) => {
-            let cstr = std::ffi::CString::new(p)?;
-            api.open_path(&cstr)
-        }
-        None => api.open(info.vid, info.pid),
-    };
-    let device = device.map_err(|_| anyhow::anyhow!("ошибка открытия HID-устройства"))?;
-    let bridge = crate::devices::hid::HidBridge {
-        device,
-        vid: info.vid,
-        pid: info.pid,
-        connection: info.connection,
-    };
+    let bridge = crate::devices::hid::HidBridge::open(&api, info.vid, info.pid)
+        .map_err(|_| anyhow::anyhow!("ошибка открытия HID-устройства"))?;
 
     let opened: Box<dyn KeyboardDevice> = match (info.vid, info.pid) {
         (0x0328, _) => Box::new(crate::devices::ajazz_ak820::AjazzAk820::open(bridge)),

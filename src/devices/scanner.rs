@@ -65,7 +65,10 @@ impl Scanner {
     pub fn scan(&self) -> Result<Vec<FoundDevice>, Box<dyn std::error::Error>> {
         let devices = self.api.device_list();
         let mut found = Vec::new();
-        let mut seen: Vec<(Option<String>, u16, u16)> = Vec::new();
+        // Дедупликация по (VID, PID): у AULA F75 два HID-интерфейса
+        // (hidraw5 — клавиатура, hidraw6 — вендорский канал), оба с одним PID.
+        // В списке должна быть одна карточка на устройство.
+        let mut seen: Vec<(u16, u16)> = Vec::new();
 
         for dev in devices {
             let vid = dev.vendor_id();
@@ -73,18 +76,16 @@ impl Scanner {
             if !self.supported.contains(&(vid, pid)) {
                 continue;
             }
+            if seen.contains(&(vid, pid)) {
+                continue;
+            }
+            seen.push((vid, pid));
             let c = dev.path();
             let path = if c.is_empty() {
                 None
             } else {
                 Some(c.to_string_lossy().to_string())
             };
-            // Пропускаем одинаковые (VID,PID) если интерфейс отличается —
-            // берём только usage Generic Desktop / Keyboard, чтобы не дублировать.
-            if seen.contains(&(path.clone(), vid, pid)) {
-                continue;
-            }
-            seen.push((path.clone(), vid, pid));
             found.push(FoundDevice {
                 info: find_device_info(vid, pid).expect("известный VID/PID"),
                 path,
