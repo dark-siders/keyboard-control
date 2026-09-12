@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 
 use adw::prelude::*;
 use gtk::glib;
@@ -60,7 +61,10 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&device_page, Some("devices"), "Устройства");
 
     // Страницы функций
-    let rgb_page = rgb_studio::build_rgb_studio(make_fetcher(device_slot.clone()));
+    let rgb_page = rgb_studio::build_rgb_studio(
+        make_fetcher(device_slot.clone()),
+        make_reconnect(device_slot.clone()),
+    );
     let km_page = keymap_editor::build_keymap_editor(make_fetcher(device_slot.clone()));
     let screen_page = screen_manager::build_screen_manager(make_fetcher(device_slot.clone()));
     let settings_page = settings_panel::build_settings_panel(make_fetcher(device_slot.clone()));
@@ -339,11 +343,23 @@ fn connect_selected(
     info: &crate::devices::DeviceInfo,
     _path: Option<&str>,
 ) -> anyhow::Result<String> {
+    open_device(device_slot, info.vid, info.pid)
+}
+
+/// Последний открытый VID/PID — для переоткрытия после кика (когда write
+/// заставляет клавиатуру пересоздать hidraw-узлы, старый handle умирает).
+fn last_dev_slot() -> &'static Mutex<Option<(u16, u16)>> {
+    static SLOT: OnceLock<Mutex<Option<(u16, u16)>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Открыть устройство по VID/PID напрямую и положить в слот.
+fn open_device(device_slot: &DeviceSlot, vid: u16, pid: u16) -> anyhow::Result<String> {
     let api = hidapi::HidApi::new()?;
-    let bridge = crate::devices::hid::HidBridge::open(&api, info.vid, info.pid)
+    let bridge = crate::devices::hid::HidBridge::open(&api, vid, pid)
         .map_err(|_| anyhow::anyhow!("ошибка открытия HID-устройства"))?;
 
-    let opened: Box<dyn KeyboardDevice> = match (info.vid, info.pid) {
+    let opened: Box<dyn KeyboardDevice> = match (vid, pid) {
         (0x0328, _) => Box::new(crate::devices::ajazz_ak820::AjazzAk820::open(bridge)),
         (0x258A, 0x004B..=0x004D | 0x010C) => Box::new(crate::devices::aula_f75::AulaF75::open(bridge)),
         (0x258A, 0x004E..=0x0050) => Box::new(crate::devices::aula_f99::AulaF99::open(bridge)),
@@ -352,5 +368,19 @@ fn connect_selected(
     let name = opened.name().to_string();
     let opened: Rc<dyn KeyboardDevice> = Rc::from(opened);
     *device_slot.borrow_mut() = Some(opened);
+    *last_dev_slot().lock().unwrap() = Some((vid, pid));
     Ok(name)
+}
+
+/// Переоткрыть последнее устройство (после кика/пересоздания hidraw).
+fn reopen_last(device_slot: &DeviceSlot) -> anyhow::Result<String> {
+    match *last_dev_slot().lock().unwrap() {
+        Some((vid, pid)) => open_device(device_slot, vid, pid),
+        None => Err(anyhow::anyhow!("устройство ещё не открывалось")),
+    }
+}
+
+/// Обёртка для RGB-студии: переоткрть последнее устройство после кика.
+fn make_reconnect(device_slot: DeviceSlot) -> impl Fn() -> anyhow::Result<String> {
+    move || reopen_last(&device_slot)
 }

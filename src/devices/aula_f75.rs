@@ -35,6 +35,27 @@ pub const KEY_COUNT: u16 = 84;
 /// Количество светодиодов в матрице подсветки (см. OpenRGB, модель 0xCD).
 pub const RGB_LED_COUNT: usize = 90;
 
+/// Аппаратные эффекты прошивки — селектор `data[10]` в конфиг-регионе.
+/// Коды собраны эмпирически на железе: переключение Fn+`\` на клавиатуре
+/// меняет `data[10]` и сохраняет его в память (сессия 2026-09-12).
+/// Порядок в цикле клавиатуры: 08 → 0B → 02 → 03 → 04 → 05 → 06 → 07 → 08 → 0A → 0B.
+pub const HW_EFFECTS: &[(u8, &str)] = &[
+    (0x02, "Дыхание"),
+    (0x03, "Мерцание / смена цветов"),
+    (0x04, "Реактивная (вспышка при наборе)"),
+    (0x05, "Падающие блоки"),
+    (0x06, "Радуга с пульсацией"),
+    (0x07, "Диско (волна вправо-влево)"),
+    (0x08, "Радуга (пульсирующая)"),
+    (0x0A, "Змейка по рядам"),
+    (0x0B, "Перелив-волна"),
+];
+
+/// Найти имя аппаратного эффекта по коду (для отладки/GUI).
+pub fn hw_effect_name(code: u8) -> Option<&'static str> {
+    HW_EFFECTS.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
+}
+
 /// Номер Feature-репорта главного канала.
 const REPORT_FEATURE: u8 = 0x06;
 /// Длина пакета (без report id).
@@ -68,6 +89,22 @@ impl AulaF75 {
             return Err(Error::Protocol("пустой ответ конфига".into()));
         }
         Ok(report)
+    }
+
+    /// Записать конфиг-регион (128 байт с маркером 5A A5 на конце) в память
+    /// клавиатуры. Пакет — 06 04 00 00 01 00 80 00 + data + пад до 520.
+    /// После записи клавиатура перезапускается (кик) — это и есть commit
+    /// (журнал 10.24/10.25: readback подтверждает хранение, свет применяется).
+    fn write_config(&self, data: &[u8]) -> Result<()> {
+        if data.len() != 128 {
+            return Err(Error::Protocol(
+                "write_config: нужен ровно 128 байт конфига (с маркером 5A A5)".into(),
+            ));
+        }
+        let mut buf = Self::packet(&[0x04, 0x00, 0x00, 0x01, 0x00, 0x80, 0x00]);
+        buf[8..136].copy_from_slice(data);
+        self.bridge.send_feature(&buf)?;
+        Ok(())
     }
 
     /// Название режима подсветки по индексу из эффект-таблицы (приблизительно).
@@ -285,11 +322,215 @@ impl KeyboardDevice for AulaF75 {
     }
 
     // --- EEPROM ---------------------------------------------------------
-    fn save_profile_to_eeprom(&self, profile_id: u8) -> Result<()> {
-        self.cmd(0xF0, &[profile_id])
+    // РЕАЛЬНАЯ запись конфига в память клавиатуры (эксперимент 10.24/10.25):
+    // снимаем снимок конфига, включаем подсветку (data[76]=09 — свет вкл по
+    // умолчанию, байт яркости найден в 10.28), пишем обратно через
+    // write_config(). Кик/перезапуск клавы и есть commit: после него подсветка
+    // держится БЕЗ запущенного приложения.
+    fn save_profile_to_eeprom(&self, _profile_id: u8) -> Result<()> {
+        let snap = self.read_config()?;
+        if snap.len() < 136 {
+            return Err(Error::Protocol("снимок конфига неполный".into()));
+        }
+        let mut data = vec![0u8; 128];
+        data.copy_from_slice(&snap[8..136]);
+        // data[76]: яркость активного эффекта (эмпирика 2026-09-12: 00 = свет
+        // выключен, 09 = полная яркость; единственный отличающийся байт между
+        // снимками «погашено Fn+Вниз» и «яркость макс. Fn+Вверх»).
+        data[76] = 0x09; // свет включён по умолчанию
+        self.write_config(&data)?;
+        Ok(())
     }
 
-    fn load_profile_from_eeprom(&self, profile_id: u8) -> Result<()> {
-        self.cmd(0xF1, &[profile_id])
+    fn load_profile_from_eeprom(&self, _profile_id: u8) -> Result<()> {
+        // Отдельного load-протокола нет: клавиатура сама загружает конфиг из
+        // памяти при старте (после кика). Отдельная команда — не нужна (10.25).
+        Err(Error::Unsupported("load-profile: конфиг читается из памяти при старте"))
     }
+
+    // Аппаратный эффект прошивки (селектор data[10]): пишем код эффекта
+    // и включаем свет — эффект держится в памяти и применяется сам после
+    // перезапуска/переподключения, без приложения (по Fn+\\ 2026-09-12).
+    fn save_hardware_effect(&self, effect: u8) -> Result<()> {
+        let snap = self.read_config()?;
+        if snap.len() < 136 {
+            return Err(Error::Protocol("снимок конфига неполный".into()));
+        }
+        let mut data = vec![0u8; 128];
+        data.copy_from_slice(&snap[8..136]);
+        data[10] = effect; // селектор активного эффекта (эмпирика: 02/03/04/05/06/07/08/0A/0B)
+        data[76] = 0x09;   // свет включаем полной яркостью (байт яркости, 10.28)
+        self.write_config(&data)?;
+        Ok(())
+    }
+
+    // Состояние подсветки в памяти (data[76]): 0x09 = вкл (полная яркость),
+    // 0x00 = выкл при старте. Найден эмпирически (журнал 10.28): «погашено
+    // Fn+Вниз» ↔ «яркость макс Fn+Вверх» отличаются ТОЛЬКО этим байтом.
+    fn save_hardware_light(&self, on: bool) -> Result<()> {
+        let snap = self.read_config()?;
+        if snap.len() < 136 {
+            return Err(Error::Protocol("снимок конфига неполный".into()));
+        }
+        let mut data = vec![0u8; 128];
+        data.copy_from_slice(&snap[8..136]);
+        data[76] = if on { 0x09 } else { 0x00 };
+        self.write_config(&data)?;
+        Ok(())
+    }
+}
+
+// ============================================================================
+//  HOST-ДВИЖОК ЭФФЕКТОВ (host-rendering)
+// ============================================================================
+//  Аппаратные эффекты на F75 latch'а не имеют (журнал 10.14/10.16), поэтому
+//  эффекты рендерим НА ХОСТЕ и шлём через подтверждённый render_frame()
+//  direct-канал (06 08 … 7A 01, keepalive ~0.5–1с). Так эффекты/яркость/
+//  скорость работают как в Windows-софте — на любом подключении (USB/2.4G/BT),
+//  потому что host-рендеринг не зависит от аппаратной таблицы эффектов.
+//
+//  Это чистые функции: `mode` описано в types::RgbMode, кадр — Vec<Color>.
+//  Никаких выдуманных cmd-id — только render_frame().
+
+/// Параметры host-эффекта.
+#[derive(Debug, Clone, Copy)]
+pub struct HostEffectParams {
+    /// Режим (из types::RgbMode).
+    pub mode: RgbMode,
+    /// Базовый цвет (для Static/Breathing/Custom).
+    pub base: Color,
+    /// Яркость 0..=255.
+    pub brightness: u8,
+    /// Скорость 1..=255.
+    pub speed: u8,
+}
+
+impl Default for HostEffectParams {
+    fn default() -> Self {
+        Self {
+            mode: RgbMode::Static,
+            base: Color::new(255, 90, 0),
+            brightness: 200,
+            speed: 60,
+        }
+    }
+}
+
+/// Один кадр host-эффекта: `Vec<Color>` длиной RGB_LED_COUNT.
+/// `t` — время в условных тиках (растёт со скоростью keepalive).
+///
+/// Эффекты реализованы как host-аналоги Windows-пресетов:
+///   Static       — все LED = base (с учётом brightness).
+///   Breathing    — синусоидальная модуляция яркости по времени.
+///   Wave         — бегущая волна: hue смещается по матрице по X.
+///   SpectrumCycle— «радуга»: hue бежит циклически по всем LED.
+///   Ripple       — расширяющееся кольцо от центра раскладки.
+///   Rain         — «дождь»: случайные LED вспыхивают и гаснут.
+///   Reactive     — «отклик»: капля, растекающаяся по матрице.
+pub fn host_frame(p: &HostEffectParams, t: u32) -> Vec<Color> {
+    let led = RGB_LED_COUNT;
+    let mut out = Vec::with_capacity(led);
+    let bright_k = p.brightness.max(1) as f32 / 255.0;
+
+    // Фаза с нормализацией скорости (фикс 10.22): при speed=255 полный
+    // цикл эффекта занимает ~1500 мс. Раньше формула t*speed/360*TAU при
+    // 500-мс тике и speed>=57 давала прыжок фазы больше полного оборота —
+    // эффект «телепортировался» и скорость визуально не воспринималась.
+    let phase = p.speed as f32 / 255.0 * std::f32::consts::TAU * t as f32 / 1500.0;
+
+    for i in 0..led {
+        let c = match p.mode {
+            RgbMode::Static => scale_c(p.base, bright_k),
+            RgbMode::Breathing => {
+                // Мягкое «дыхание»: синус яркости по времени.
+                let k = 0.3 + 0.7 * (0.5 + 0.5 * phase.sin());
+                scale_c(p.base, k * bright_k)
+            }
+            RgbMode::Wave => {
+                // Волна hue по X-координате клавиши (i % COLS).
+                let col = (i % RGB_COLS) as f32;
+                let h = ((col / RGB_COLS as f32) * 360.0 + phase.to_degrees()) % 360.0;
+                hsl(h, 1.0, 0.5, bright_k)
+            }
+            RgbMode::SpectrumCycle => {
+                // Спектр-цикл: hue одинаково движется для всех.
+                let h = (phase.to_degrees() + (i as f32) * 2.0) % 360.0;
+                hsl(h, 1.0, 0.5, bright_k)
+            }
+            RgbMode::Ripple => {
+                // Кольцевая волна от центра 75% матрицы.
+                let cx = RGB_COLS as f32 * 0.5;
+                let cy = (RGB_LED_COUNT / RGB_COLS) as f32 * 0.5;
+                let x = (i % RGB_COLS) as f32;
+                let y = (i / RGB_COLS) as f32;
+                let ring = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                let k = ((ring - phase).sin() * 0.5 + 0.5).powi(2);
+                scale_c(p.base, k * bright_k)
+            }
+            RgbMode::Rain => {
+                // «Дождь»: детерминированный псевдослучайный мерцания по фазе.
+                let h = (i as u32).wrapping_mul(0x9E37).wrapping_add(t.wrapping_mul(p.speed as u32));
+                let on = (h & 0x0FF) < 0x20;
+                if on {
+                    scale_c(p.base, (1.0 - (h as f32 * 0.001).fract() * 0.5) * bright_k)
+                } else {
+                    scale_c(p.base, 0.02)
+                }
+            }
+            RgbMode::Reactive => {
+                // «Отклик»: капля у индекса фазы, растекается вокруг.
+                let cx = (phase * RGB_LED_COUNT as f32) as usize % RGB_LED_COUNT;
+                let dist = (i as i32 - cx as i32).unsigned_abs() as f32;
+                let k = (1.0 - dist / 12.0).max(0.0).powi(2);
+                scale_c(p.base, k * bright_k)
+            }
+            RgbMode::Custom => scale_c(p.base, bright_k),
+        };
+        out.push(c);
+    }
+    out
+}
+
+// (конец host-движка)
+
+// ============================================================================
+//  HOST-ДВИЖОК ЭФФЕКТОВ (host-rendering, работает на железе).
+// ============================================================================
+//  Latch/commit на проводном F75 НЕ найдены (журнал 10.14/10.16), поэтому
+//  живые эффекты делаем на хосте: считаем кадр по (mode, brightness, speed,
+//  phase) и шлём через render_frame() — тот самый keepalive-канал direct.
+//  Всё ниже — чистая математика кадров, HID не трогает.
+
+/// Количество колонок в 75% раскладке (для host-эффектов волны).
+pub const RGB_COLS: usize = 22; // примерное число колонок в 75% (без NumPad).
+
+/// Масштабировать цвет с коэффициентом (для host-эффектов).
+#[inline]
+fn scale_c(c: Color, k: f32) -> Color {
+    Color::new(
+        ((c.r as f32) * k).clamp(0.0, 255.0) as u8,
+        ((c.g as f32) * k).clamp(0.0, 255.0) as u8,
+        ((c.b as f32) * k).clamp(0.0, 255.0) as u8,
+    )
+}
+
+/// HSL → RGB (h в градусах, s,l в [0,1]).
+pub fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let h = h.rem_euclid(360.0) / 360.0;
+    let a = s * l.min(1.0 - l);
+    let f = |n: f32| {
+        let k = (n + h * 12.0) % 12.0;
+        l - a * (k - 3.0).max(-1.0).min(9.0 - 3.0).clamp(-1.0, 1.0)
+    };
+    let r = (f(0.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let g = (f(8.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let b = (f(4.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (r, g, b)
+}
+
+/// HSL → RGB c учётом яркости.
+#[inline]
+fn hsl(h: f32, s: f32, l: f32, bright_k: f32) -> Color {
+    let (r, g, b) = hsl_to_rgb(h, s, l);
+    scale_c(Color::new(r, g, b), bright_k)
 }

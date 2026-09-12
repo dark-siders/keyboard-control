@@ -137,6 +137,23 @@ pub trait KeyboardDevice: Send {
     fn save_profile_to_eeprom(&self, profile_id: u8) -> Result<()>;
     /// Загрузить профиль из слота памяти устройства.
     fn load_profile_from_eeprom(&self, profile_id: u8) -> Result<()>;
+    /// Сохранить аппаратный эффект из встроенной таблицы прошивки в память
+    /// (AULA F75: код селектора data[10], см. `aula_f75::HW_EFFECTS`).
+    /// Эффект держится в памяти и применяется после перезапуска клавиатуры,
+    /// без запущенного приложения. Прочие устройства — Unsupported.
+    fn save_hardware_effect(&self, _effect: u8) -> Result<()> {
+        Err(Error::Unsupported(
+            "аппаратный эффект (save_hardware_effect) не поддерживается этим устройством",
+        ))
+    }
+    /// Сохранить состояние подсветки «включена/выключена» в память устройства
+    /// (AULA F75: data[18], 1=свет вкл при старте, 0=выкл). После перезапуска
+    /// держится. Прочие устройства — Unsupported.
+    fn save_hardware_light(&self, _on: bool) -> Result<()> {
+        Err(Error::Unsupported(
+            "сохранение света в память (save_hardware_light) не поддерживается этим устройством",
+        ))
+    }
 }
 
 /// Карточка устройства для реестра (VID/PID → модель).

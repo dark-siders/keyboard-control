@@ -21,31 +21,38 @@ impl HidBridge {
     /// иначе открываем первый попавшийся.
     pub fn open(api: &HidApi, vid: u16, pid: u16) -> hidapi::HidResult<Self> {
         let device: HidDevice = {
+            // Для AULA F75/F99 оба hidraw (клавиатура + командный) могут иметь
+            // usage page 0x0001 (проверено на 258A:010C, журнал 10.20) — тогда
+            // критерий usage_page>=0xFF00 отпадает. Надёжный маркер командного
+            // канала: interface_number >= 1 (input1 = hidraw6).
             let mut vendor: Option<HidDevice> = None;
+            let mut iface1: Option<HidDevice> = None;
             for d in api.device_list() {
                 if d.vendor_id() != vid || d.product_id() != pid {
                     continue;
                 }
+                let p = d.path();
+                if p.is_empty() {
+                    continue;
+                }
+                let cstr = match std::ffi::CString::new(p.to_bytes()) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let opened = match api.open_path(&cstr) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
                 if d.usage_page() >= 0xFF00 {
-                    let p = d.path();
-                    if p.is_empty() {
-                        continue;
-                    }
-                    let cstr = match std::ffi::CString::new(p.to_bytes()) {
-                        Ok(c) => c,
-                        // Путь с NUL невозможен для hidraw; просто пропускаем.
-                        Err(_) => continue,
-                    };
-                    match api.open_path(&cstr) {
-                        Ok(h) => {
-                            vendor = Some(h);
-                            break;
-                        }
-                        Err(_) => continue,
-                    }
+                    vendor = Some(opened);
+                    break;
+                }
+                // Запоминаем первый не-клавиатурный интерфейс (interface 1+).
+                if d.interface_number() >= 1 && iface1.is_none() {
+                    iface1 = Some(opened);
                 }
             }
-            match vendor {
+            match vendor.or(iface1) {
                 Some(h) => h,
                 None => api.open(vid, pid)?,
             }

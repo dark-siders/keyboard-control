@@ -52,6 +52,9 @@ enum Commands {
     Time(DeviceArg),
     /// Уровень заряда батареи
     Battery(DeviceArg),
+    /// Записать текущий конфиг подсветки в память клавиатуры
+    /// (свет будет гореть без запущенного приложения)
+    Save(SaveArgs),
     /// Установить частоту опроса
     SetPoll(SetRate),
     /// Установить задержку дребезга
@@ -208,6 +211,17 @@ struct HexArg {
     hex: String,
 }
 
+#[derive(Args)]
+struct SaveArgs {
+    /// VID:PID например 258A:010C
+    #[arg(value_name = "VID:PID")]
+    device: String,
+    /// Код аппаратного эффекта (hex, например 0B) — сохранение эффекта
+    /// прошивки в память. Без флага — сохранить конфиг без смены эффекта.
+    #[arg(long)]
+    effect: Option<String>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match exec(cli.command) {
@@ -241,6 +255,7 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
             }
             Ok(0)
         }
+        Commands::Save(a) => cmd_save(a),
         Commands::SetPoll(a) => {
             let (vid, pid) = parse_id(&a.device)?;
             let dev = open(vid, pid)?;
@@ -374,8 +389,16 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
             println!("keepalive: отправлено {sent} кадров за {hold} мс");
         }
     }
-    if let Some(mode) = &args.mode {
-        let m = match mode.to_lowercase().as_str() {
+    //
+    // Параметры режима/яркости/скорости → host-движок (журнал 10.18).
+    // Аппаратной эффект-таблицы у F75 нет (latch эмпирически не найден,
+    // журнал 10.14/10.16), поэтому ЛЮБОЙ режим/яркость/скорость рендерим
+    // НА ХОСТЕ и гоним кадрами через подтверждённый render_frame()-канал
+    // с keepalive — пока CLI жив (Ctrl-C = выход).
+    //
+    if args.mode.is_some() || args.brightness.is_some() || args.speed.is_some() {
+        use keyboard_center::devices::aula_f75::{host_frame, HostEffectParams};
+        let mode = match args.mode.as_deref().unwrap_or("static").to_lowercase().as_str() {
             "static" => RgbMode::Static,
             "breathing" => RgbMode::Breathing,
             "wave" => RgbMode::Wave,
@@ -384,18 +407,50 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
             "rain" => RgbMode::Rain,
             "reactive" => RgbMode::Reactive,
             "custom" => RgbMode::Custom,
-            _ => return Err(anyhow::anyhow!("неизвестный режим: {mode}")),
+            _ => return Err(anyhow::anyhow!("неизвестный режим: {}", args.mode.as_deref().unwrap())),
         };
-        dev.set_rgb_mode(m)?;
-        println!("режим: {mode}");
+        let base = match &args.color {
+            Some(color) => keyboard_center::types::Color::from_hex_checked(color)
+                .ok_or_else(|| anyhow::anyhow!("неверный цвет: {color} (ожидается RRGGBB)"))?,
+            None => keyboard_center::types::Color::new(255, 90, 0),
+        };
+        let params = HostEffectParams {
+            mode,
+            base,
+            brightness: args.brightness.unwrap_or(255),
+            speed: args.speed.unwrap_or(60),
+        };
+        println!("host-эффект: {mode:?} яркость={} скорость={} — keepalive до Ctrl-C",
+                 params.brightness, params.speed);
+        let mut t_ms = 0u32;
+        loop {
+            let frame = host_frame(&params, t_ms);
+            dev.render_frame(&frame)?;
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            t_ms += 500;
+        }
     }
-    if let Some(b) = args.brightness {
-        dev.set_rgb_brightness(b)?;
-        println!("яркость: {b}");
-    }
-    if let Some(s) = args.speed {
-        dev.set_rgb_speed(s)?;
-        println!("скорость: {s}");
+    Ok(0)
+}
+
+fn cmd_save(a: SaveArgs) -> anyhow::Result<u8> {
+    let (vid, pid) = parse_id(&a.device)?;
+    let dev = open(vid, pid)?;
+    match &a.effect {
+        Some(e) => {
+            let hex = e.trim_start_matches("0x").trim_start_matches("0X");
+            let code =
+                u8::from_str_radix(hex, 16).map_err(|_| anyhow::anyhow!("неверный код эффекта: {e} (hex)"))?;
+            dev.save_hardware_effect(code)?;
+            println!(
+                "аппаратный эффект 0x{code:02X} ({:?}) записан в память клавиатуры",
+                keyboard_center::devices::aula_f75::hw_effect_name(code)
+            );
+        }
+        None => {
+            dev.save_profile_to_eeprom(0)?;
+            println!("конфиг подсветки записан в память клавиатуры (свет включён, держится без приложения)");
+        }
     }
     Ok(0)
 }
@@ -525,7 +580,10 @@ fn cmd_raw(a: RawArgs) -> anyhow::Result<u8> {
         Some(p) => p.clone(),
         None => {
             let ifaces = hidshell::list_interfaces(&api, vid, pid);
-            if let Some(it) = ifaces.first() {
+            // Командный канал AULA — интерфейс с вендорским usage page (≥0xFF00,
+            // материал: /dev/hidraw6), а не клавиатурный (hidraw5).
+            let it = ifaces.iter().find(|i| i.usage_page >= 0xFF00).or_else(|| ifaces.first());
+            if let Some(it) = it {
                 it.path.clone()
             } else {
                 return Err(anyhow::anyhow!(
