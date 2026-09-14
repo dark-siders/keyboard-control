@@ -125,6 +125,8 @@ impl Scanner {
             (0x258A, 0x004B..=0x004D) | (0x258A, 0x010C) => Ok(Box::new(AulaF75::open(bridge))),
             // AULA F99 PID: 4E, 4F, 50
             (0x258A, 0x004E..=0x0050) => Ok(Box::new(AulaF99::open(bridge))),
+            // 2.4G-ресивер Compx (3554:FA09) — общий для F75/F99
+            (0x3554, 0xFA09) => Ok(Box::new(AulaF75::open(bridge))),
             _ => Err("неподдерживаемое VID/PID".into()),
         }
     }

@@ -21,39 +21,43 @@ impl HidBridge {
     /// иначе открываем первый попавшийся.
     pub fn open(api: &HidApi, vid: u16, pid: u16) -> hidapi::HidResult<Self> {
         let device: HidDevice = {
-            // Для AULA F75/F99 оба hidraw (клавиатура + командный) могут иметь
-            // usage page 0x0001 (проверено на 258A:010C, журнал 10.20) — тогда
-            // критерий usage_page>=0xFF00 отпадает. Надёжный маркер командного
-            // канала: interface_number >= 1 (input1 = hidraw6).
-            let mut vendor: Option<HidDevice> = None;
-            let mut iface1: Option<HidDevice> = None;
+            // Командный канал — интерфейс с ВЕНДОРСКИМ usage page:
+            //   - ресивер 2.4G (3554:FA09): строго 0xFF02 (dnviti), клавиатурный
+            //     hidraw имеет 0xFF04 (0x13-репорт живёт только там, PROTOCOL.md);
+            //   - AULA F75/F99 USB: ≥0xFF00 (hidraw6), либо interface_number>=1
+            //     (оба USB-интерфейса могут иметь usage page 0x0001, журнал 10.20).
+            // Три уровня предпочтения: точный 0xFF02 → ≥0xFF00 → iface≥1.
+            // Сначала выбираем путь-победителя (ранг), затем открываем его —
+            // чтобы не делить одну HidDevice между слотами (двигается).
+            let mut best_rank = 0u8; // 0 = ничего не выбрано
+            let mut best_path: Option<Vec<u8>> = None;
             for d in api.device_list() {
                 if d.vendor_id() != vid || d.product_id() != pid {
                     continue;
                 }
                 let p = d.path();
-                if p.is_empty() {
+                if p.to_bytes().is_empty() {
                     continue;
                 }
-                let cstr = match std::ffi::CString::new(p.to_bytes()) {
-                    Ok(c) => c,
-                    Err(_) => continue,
+                let rank = match d.usage_page() {
+                    // Точный командный канал ресивера / вендорских коллекций.
+                    0xFF02 => 3,
+                    // Вендорский (командный hidraw6 у AULA USB).
+                    pp if pp >= 0xFF00 => 2,
+                    // Первый не-клавиатурный живой интерфейс (interface 1+).
+                    _ if d.interface_number() >= 1 => 1,
+                    _ => 0,
                 };
-                let opened = match api.open_path(&cstr) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-                if d.usage_page() >= 0xFF00 {
-                    vendor = Some(opened);
-                    break;
-                }
-                // Запоминаем первый не-клавиатурный интерфейс (interface 1+).
-                if d.interface_number() >= 1 && iface1.is_none() {
-                    iface1 = Some(opened);
+                if rank > best_rank {
+                    best_rank = rank;
+                    best_path = Some(p.to_bytes().to_vec());
                 }
             }
-            match vendor.or(iface1) {
-                Some(h) => h,
+            match best_path {
+                Some(bytes) => match std::ffi::CString::new(bytes) {
+                    Ok(cstr) => api.open_path(&cstr)?,
+                    Err(_) => api.open(vid, pid)?,
+                },
                 None => api.open(vid, pid)?,
             }
         };
@@ -68,6 +72,8 @@ impl HidBridge {
             0x004D | 0x0050 => ConnectionType::Bluetooth,
             // Ревизия «BY Tech Gaming Keyboard» — USB
             0x010C => ConnectionType::Usb,
+            // 2.4G-ресивер Compx (3554:FA09) — wireless-канал клавиатуры
+            0xFA09 => ConnectionType::Wireless2_4G,
             _ => ConnectionType::Usb,
         };
         Ok(Self {
@@ -104,6 +110,14 @@ impl HidBridge {
         self.device.read_timeout(buf, timeout_ms)
     }
 }
+
+// HidBridge передаётся между фоновым потоком (открытие после кика клавиатуры)
+// и главным GTK-потоком через mpsc-канал (фикс 2026-09-13: блокирующее
+// hidapi-открытие в главном потоке вешало UI на время пересоздания hidraw).
+// HidDevice — обёртка над дескриптором hidraw; устройством не пользуются два
+// потока ОДНОВРЕМЕННО (в фоне создаётся и отдаётся, в главном — хранится и
+// используется в кнопках), поэтому перенос между потоками безопасен.
+unsafe impl Send for HidBridge {}
 
 /// Разбить строку SSTRL/SSND в байты (для прямых HID-команд).
 #[allow(dead_code)]

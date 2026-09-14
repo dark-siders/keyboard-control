@@ -1,7 +1,7 @@
 // --- Главное приложение Keyboard-Center (GUI) ---
 // AdwApplication + главное окно с сайдбаром и стеком страниц.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 
@@ -61,9 +61,10 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&device_page, Some("devices"), "Устройства");
 
     // Страницы функций
-    let rgb_page = rgb_studio::build_rgb_studio(
+    let (rgb_page, persist_probe) = rgb_studio::build_rgb_studio(
         make_fetcher(device_slot.clone()),
-        make_reconnect(device_slot.clone()),
+        make_set_device(device_slot.clone()),
+        make_last_vidpid(),
     );
     let km_page = keymap_editor::build_keymap_editor(make_fetcher(device_slot.clone()));
     let screen_page = screen_manager::build_screen_manager(make_fetcher(device_slot.clone()));
@@ -81,7 +82,109 @@ fn build_ui(app: &adw::Application) {
 
     toolbar.set_content(Some(&root));
     win.set_content(Some(&toolbar));
+    // Автосохранение при закрытии: докинуть последнее состояние (свет выкл /
+    // выбранный эффект) в память клавиатуры, чтобы оно держалось без приложения.
+    setup_close_autosave(&win, persist_probe, make_last_vidpid());
     win.present();
+}
+
+/// Автосохранение состояния подсветки при закрытии окна.
+///
+/// Проблема (жалоба владельца): «Выключить свет» гасило LED, но пользователь
+/// закрывал приложение — запись во флеш либо не успевала завершиться в фоновом
+/// потоке, либо вообще не дожималась кнопкой «Записать в память», и после
+/// отключения/переподключения клавиатуры свет возвращался. Решение: `close-request`
+/// перед закрытием сам спрашивает probe (rgb_studio::PersistProbe) и, если есть
+/// что зафиксировать, запускает фоновую запись в память и НЕ закрывает окно,
+/// пока она не завершится (потом закрывает сам).
+fn setup_close_autosave(
+    win: &adw::ApplicationWindow,
+    probe: Rc<dyn Fn() -> Option<rgb_studio::SaveKind>>,
+    last_vidpid: impl Fn() -> Option<(u16, u16)> + 'static,
+) {
+    // Защита от зацикливания: close-request срабатывает повторно, когда мы сами
+    // зовём win.close() после завершения записи.
+    let saving = Rc::new(RefCell::new(false));
+
+    // Канал из фонового потока записи (опрашивается по таймеру, UI не блокирует).
+    let result_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<Result<(), String>>>>> =
+        Rc::new(RefCell::new(None));
+
+    // last_vidpid — не-Clone closure, а он нужен в move-замыкании close-request
+    // и в потоке записи; оборачиваем в Rc<dyn Fn>.
+    let last: Rc<dyn Fn() -> Option<(u16, u16)>> = Rc::new(last_vidpid);
+
+    win.connect_close_request(move |win| {
+        // Уже сохраняли по этому закрытию — разрешаем окну закрыться.
+        if *saving.borrow() {
+            return glib::Propagation::Proceed;
+        }
+        // Нечего сохранять (свет горит и эффект не выбран) — просто закрываем.
+        let Some(action) = probe() else {
+            return glib::Propagation::Proceed;
+        };
+        // Клавиатура не была открыта — нечего и во что писать.
+        let Some((vid, pid)) = last() else {
+            return glib::Propagation::Proceed;
+        };
+
+        *saving.borrow_mut() = true;
+
+        // Запись во флеш содержит блокирующие hidapi-вызовы (read_config +
+        // write_config + кик клавиатуры) — выполняем в отдельном потоке на
+        // независимом handle (open_vidpid), чтобы не вешать закрытие/UI.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res: Result<(), String> = (|| {
+                let dev = crate::devices::open_vidpid(vid, pid)
+                    .map_err(|e| format!("не удалось открыть устройство: {e}"))?;
+                match action {
+                    rgb_studio::SaveKind::Effect(code) => {
+                        dev.save_hardware_effect(code).map_err(|e| e.to_string())?
+                    }
+                    rgb_studio::SaveKind::LightOff => {
+                        dev.save_hardware_light(false).map_err(|e| e.to_string())?
+                    }
+                    rgb_studio::SaveKind::Config => {
+                        dev.save_profile_to_eeprom(0).map_err(|e| e.to_string())?
+                    }
+                }
+                Ok(())
+            })();
+            let _ = tx.send(res);
+        });
+        *result_rx.borrow_mut() = Some(rx);
+
+        // Откладываем закрытие: ждём завершения записи, не блокируя главный
+        // поток (опрашиваем канал короткими паузами). Страховка от зависания:
+        // после 200 попыток (~30 с) принудительно закрываем окно.
+        let win_c = win.clone();
+        let rx_guard = result_rx.clone();
+        let attempts = Rc::new(Cell::new(0u32));
+        glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+            if attempts.get() >= 200 {
+                *rx_guard.borrow_mut() = None;
+                win_c.close();
+                return glib::ControlFlow::Break;
+            }
+            attempts.set(attempts.get() + 1);
+            let done = {
+                let b = rx_guard.borrow();
+                b.as_ref().map(|rx| rx.try_recv())
+            };
+            match done {
+                Some(Ok(Ok(()))) | Some(Ok(Err(_))) | Some(Err(_)) => {
+                    *rx_guard.borrow_mut() = None;
+                    win_c.close();
+                    glib::ControlFlow::Break
+                }
+                _ => glib::ControlFlow::Continue,
+            }
+        });
+
+        // Останавливаем закрытие — вернёмся в него сами после записи.
+        glib::Propagation::Stop
+    });
 }
 
 /// Сайдбар с навигацией. Переключает страницы стека.
@@ -355,16 +458,9 @@ fn last_dev_slot() -> &'static Mutex<Option<(u16, u16)>> {
 
 /// Открыть устройство по VID/PID напрямую и положить в слот.
 fn open_device(device_slot: &DeviceSlot, vid: u16, pid: u16) -> anyhow::Result<String> {
-    let api = hidapi::HidApi::new()?;
-    let bridge = crate::devices::hid::HidBridge::open(&api, vid, pid)
-        .map_err(|_| anyhow::anyhow!("ошибка открытия HID-устройства"))?;
+    let opened = crate::devices::open_vidpid(vid, pid)
+        .map_err(|e| anyhow::anyhow!("ошибка открытия HID-устройства: {e}"))?;
 
-    let opened: Box<dyn KeyboardDevice> = match (vid, pid) {
-        (0x0328, _) => Box::new(crate::devices::ajazz_ak820::AjazzAk820::open(bridge)),
-        (0x258A, 0x004B..=0x004D | 0x010C) => Box::new(crate::devices::aula_f75::AulaF75::open(bridge)),
-        (0x258A, 0x004E..=0x0050) => Box::new(crate::devices::aula_f99::AulaF99::open(bridge)),
-        _ => return Err(anyhow::anyhow!("неподдерживаемое устройство")),
-    };
     let name = opened.name().to_string();
     let opened: Rc<dyn KeyboardDevice> = Rc::from(opened);
     *device_slot.borrow_mut() = Some(opened);
@@ -372,15 +468,20 @@ fn open_device(device_slot: &DeviceSlot, vid: u16, pid: u16) -> anyhow::Result<S
     Ok(name)
 }
 
-/// Переоткрыть последнее устройство (после кика/пересоздания hidraw).
-fn reopen_last(device_slot: &DeviceSlot) -> anyhow::Result<String> {
-    match *last_dev_slot().lock().unwrap() {
-        Some((vid, pid)) => open_device(device_slot, vid, pid),
-        None => Err(anyhow::anyhow!("устройство ещё не открывалось")),
-    }
+/// Последний открытый VID/PID (для фоновой записи в RGB-студии).
+fn make_last_vidpid() -> impl Fn() -> Option<(u16, u16)> {
+    move || *last_dev_slot().lock().unwrap()
 }
 
-/// Обёртка для RGB-студии: переоткрть последнее устройство после кика.
-fn make_reconnect(device_slot: DeviceSlot) -> impl Fn() -> anyhow::Result<String> {
-    move || reopen_last(&device_slot)
+/// Положить готовое устройство в слот (переподключение после кика).
+/// Вызывается в главном GTK-потоке: hidraw переоткрывает фоновый поток
+/// (спавен в rgb_studio), а сюда кладётся уже собранный `Box<dyn
+/// KeyboardDevice>` — без блокирующих HID-вызовов (фикс 2026-09-13).
+fn make_set_device(device_slot: DeviceSlot) -> impl Fn(Box<dyn KeyboardDevice>) -> String {
+    move |dev| {
+        let name = dev.name().to_string();
+        let dev: Rc<dyn KeyboardDevice> = Rc::from(dev);
+        *device_slot.borrow_mut() = Some(dev);
+        name
+    }
 }

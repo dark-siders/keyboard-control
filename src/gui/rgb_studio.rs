@@ -10,7 +10,88 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::devices::KeyboardDevice;
-use crate::types::{Color, KeyId, RgbMode};
+use crate::types::{Color, ConnectionType, KeyId, RgbMode};
+
+// --- Фоновое переподключение HID-канала после кика -------------------
+// write в память «кикает» клавиатуру: она пересоздаёт hidraw-узлы ~1-2 с.
+// Блокирующее hidapi-открытие в главном GTK-потоке на этот период вешало
+// UI навсегда (фикс 2026-09-13). Поэтому открытие выполняется фоновым
+// потоком, а главный опрашивает канал и лишь кладёт готовое устройство
+// в слот (без HID-вызовов).
+type ReopenRx = std::sync::mpsc::Receiver<std::result::Result<crate::devices::HidBridge, String>>;
+type ReopenStore = Rc<RefCell<Option<ReopenRx>>>;
+
+/// Запустить фоновое переподключение HID-канала (если ещё не бежит).
+/// Блокирующий hidapi выполняется в потоке; результат — по каналу.
+fn ensure_reopen(store: &ReopenStore, vid: u16, pid: u16) {
+    if store.borrow().is_none() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // После кика узлы появляются в течение ~1-2 с; перебираем до 18 с.
+            for _ in 0..60 {
+                match crate::devices::open_bridge(vid, pid) {
+                    Ok(bridge) => {
+                        let _ = tx.send(Ok(bridge));
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(300)),
+                }
+            }
+            let _ = tx.send(Err("не удалось переподключить клавиатуру".to_string()));
+        });
+        *store.borrow_mut() = Some(rx);
+    }
+}
+
+/// Принять готовый HID-мост из фонового потока и положить живое устройство
+/// в слот. Неблокирующая (try_recv) — вызывается из главного потока.
+/// Возвращает имя устройства при успешном переподключении.
+fn drain_reopen(
+    store: &ReopenStore,
+    set_device: &dyn Fn(Box<dyn KeyboardDevice>) -> String,
+) -> Option<String> {
+    let mut b = store.borrow_mut();
+    let Some(rx) = b.as_ref() else {
+        return None;
+    };
+    match rx.try_recv() {
+        Ok(Ok(bridge)) => {
+            match crate::devices::build_device(bridge) {
+                Ok(dev) => {
+                    let name = set_device(dev);
+                    *b = None;
+                    Some(name)
+                }
+                Err(_) => {
+                    *b = None;
+                    None
+                }
+            }
+        }
+        Ok(Err(_)) => {
+            *b = None;
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// ПОЧЕМУ НЕЛЬЗЯ ИСПОЛЬЗОВАТЬ `SourceId::remove()` (фикс 10.37/10.39):
+///
+/// glib-0.20.12: `SourceId::remove()` возвращает `()` и ПАНИКУЕТ ВНУТРИ себя
+/// (`source.rs:41 unwrap`), если source уже завершился сам — например
+/// reconnect/keepalive-таймер вернул `ControlFlow::Break`, а в слоте остался
+/// его stale-`SourceId`. Повторный `remove()` на таком ID → паника в функции,
+/// которая не может unwind (вызвана из сигнального обработчика GTK) → abort.
+/// Поэтому `SourceId::remove()` в этом коде НЕ используется вообще: остановку
+/// таймера выполняет «поколение кадров» (см. `frame_gen`) — прежние замыкания
+/// сами завершаются на следующем тике, сверив несовпавшее поколение.
+
+/// Поколение потокового таймера (кадры/переподключение).
+/// Каждый новый запуск кадрового потока инкрементирует его; все прежние
+/// замыкания на следующем тике видят несовпадение со своим захваченным
+/// поколением и возвращают `ControlFlow::Break` (завершаются сами).
+type FrameGen = Rc<Cell<u64>>;
 
 /// Собрать выпадающий список режимов подсветки.
 pub fn populate_modes(dropdown: &gtk::DropDown) {
@@ -42,16 +123,85 @@ pub fn mode_from_index(idx: u32) -> RgbMode {
     }
 }
 
+/// Что сохранить в память клавиатуры (выбор делается ДО запуска потока —
+/// в обработчик виджетов нельзя класть Rc-виджеты, но enum из u8 — можно).
+pub enum SaveKind {
+    /// Аппаратный эффект прошивки (селектор `data[10]`) + свет вкл (`a=09`).
+    Effect(u8),
+    /// Свет выключен: `a=00` во всех слотах эффектов (`data[58..96]`).
+    LightOff,
+    /// Текущий аппаратный конфиг (свет вкл, эффект не меняется).
+    Config,
+}
+
+/// Probe последнего состояния для автосохранения при закрытии приложения:
+/// возвращает действие, если в памяти надо что-то зафиксировать.
+pub type PersistProbe = Rc<dyn Fn() -> Option<SaveKind>>;
+
+/// Задача для ресивера 2.4G: persistent-запись RGB или света в память.
+/// Параметры — только примитивные/Send типы (RgbMode/Color/числа), поэтому
+/// можно уводить в поток. Устройство в потоке открывается своим честным
+/// handle'ом (`open_vidpid`), GUI-слот не трогаем (фикс 10.34).
+enum WlTask {
+    Rgb {
+        mode: RgbMode,
+        color: Option<Color>,
+        brightness: u8,
+        speed: u8,
+    },
+    Light {
+        on: bool,
+    },
+}
+
+/// Выполнить `WlTask` в отдельном потоке; вернуть канал с результатом
+/// `Result<имя_устройства, строка_ошибки>`. Главный поток опрашивает канал
+/// коротким одноразовым таймером — UI не блокируется блокирующим hidapi.
+fn spawn_wl_task(vid: u16, pid: u16, task: WlTask) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res: Result<String, String> = (|| {
+            let dev = crate::devices::open_vidpid(vid, pid)
+                .map_err(|e| format!("не удалось открыть устройство: {e}"))?;
+            let ok = match task {
+                WlTask::Rgb {
+                    mode,
+                    color,
+                    brightness,
+                    speed,
+                } => dev
+                    .apply_rgb_persistent(mode, color, brightness, speed)
+                    .map_err(|e| e.to_string())?,
+                WlTask::Light { on } => dev
+                    .apply_light_persistent(on)
+                    .map_err(|e| e.to_string())?,
+            };
+            match ok {
+                true => Ok(dev.name().to_string()),
+                false => Err("устройство не поддерживает запись в память".to_string()),
+            }
+        })();
+        let _ = tx.send(res);
+    });
+    rx
+}
+
 /// Собрать панель RGB-студии.
-/// `device_fetcher` отдаёт текущее открытое устройство; `reconnect` переоткрывает
-/// его после кика (write заставляет клавиатуру пересоздать hidraw, старый handle
-/// умирает) — используется после «Записать в память» и для продолжения гашения.
+/// `device_fetcher` отдаёт текущее открытое устройство; `set_device` кладёт
+/// в слот устройство, построенное из HID-моста фонового переподключения
+/// (без блокирующих hidapi-вызовов в главном потоке — фикс 2026-09-13);
+/// `last_vidpid` отдаёт последний открытый VID/PID — по ним фоновый поток
+/// открывает независимый handle для записи в память (фикс 10.34).
+/// Возвращает панель и `PersistProbe` — по нему app.rs при закрытии окна
+/// автосохраняет последнее состояние (выключенный свет / выбранный эффект).
 pub fn build_rgb_studio(
     device_fetcher: impl Fn() -> Option<Rc<dyn KeyboardDevice>> + 'static,
-    reconnect: impl Fn() -> anyhow::Result<String> + 'static,
-) -> gtk::Box {
+    set_device: impl Fn(Box<dyn KeyboardDevice>) -> String + 'static,
+    last_vidpid: impl Fn() -> Option<(u16, u16)> + 'static,
+) -> (gtk::Box, PersistProbe) {
     let fetcher: std::rc::Rc<dyn Fn() -> Option<Rc<dyn KeyboardDevice>>> = std::rc::Rc::new(device_fetcher);
-    let reconnect: Rc<dyn Fn() -> anyhow::Result<String>> = Rc::new(reconnect);
+    let set_device: Rc<dyn Fn(Box<dyn KeyboardDevice>) -> String> = Rc::new(set_device);
+    let vidpid: Rc<dyn Fn() -> Option<(u16, u16)>> = Rc::new(last_vidpid);
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.set_margin_top(8);
 
@@ -123,6 +273,33 @@ pub fn build_rgb_studio(
     let hw_label = gtk::Label::new(Some("Аппаратный эффект (сохраняется в память)"));
     hw_label.set_halign(gtk::Align::Start);
     let hw_dd = gtk::DropDown::builder().build();
+    // Клон для live_off: там сбрасываем выбор эффекта на «—» (фикс 10.35).
+    let hw_dd_for_off = hw_dd.clone();
+    // Клон для PersistProbe: hw_dd уезжает в кнопочное замыкание (move), а probe
+    // живёт дальше и должен читать выбор эффекта при закрытии окна (автосейв).
+    let hw_dd_for_probe = hw_dd.clone();
+    // Какая модель эффектов сейчас в списке «Аппаратный эффект»: false = USB
+    // (HW_EFFECTS, селектор data[10]), true = ресивер (WL_EFFECTS, led[10]).
+    // Список подстраивается под подключённое устройство (см. rebuild при
+    // отображении панели); коды НЕ синонимичны, поэтому клики сохраняют
+    // код из таблицы, соответствующей текущей модели.
+    let hw_is_wl: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
+    // Перестроить список эффектов под ресивер/USB: модели HW_EFFECTS (USB,
+    // селектор data[10]) и WL_EFFECTS (ресивер, led[10]) НЕ синонимичны, поэтому
+    // список «Аппаратный эффект» подстраивается под подключённое устройство.
+    fn rebuild_hw_model(dd: &gtk::DropDown, is_wl: bool) {
+        let effects: &[(u8, &str)] = if is_wl {
+            crate::devices::aula_f75::WL_EFFECTS
+        } else {
+            crate::devices::aula_f75::HW_EFFECTS
+        };
+        let mut names = vec!["— (не менять эффект)"];
+        names.extend(effects.iter().map(|(_, n)| *n));
+        let model = gtk::StringList::new(&names);
+        dd.set_model(Some(&model));
+        dd.set_selected(0);
+    }
     {
         use crate::devices::aula_f75::HW_EFFECTS;
         let mut names = vec!["— (не менять эффект)"];
@@ -183,12 +360,17 @@ pub fn build_rgb_studio(
     live_status.set_halign(gtk::Align::Start);
     live_status.set_wrap(true);
 
-    // Текущий таймер потока кадров + текущий цвет.
-    let live_timer: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
+    // Поколение потоковых таймеров (кадры, keepalive, reconnect).
+    // Каждый новый запуск потока инкрементирует его; активные замыкания
+    // сверяют захваченное поколение на каждом тике и сами завершаются
+    // (ControlFlow::Break), если поколение устарело. Это заменяет удаление
+    // `SourceId::remove()`, которое в glib-0.20.12 ПАНИКУЕТ на уже
+    // завершившемся таймере (source.rs:41 unwrap) и роняет GUI (10.39).
+    let frame_gen: FrameGen = Rc::new(Cell::new(0));
     let live_color: Rc<RefCell<Option<Color>>> = Rc::new(RefCell::new(None));
     // Признак «свет погашен host-кадром»: влияет на «Записать в память» без
     // выбранного аппаратного эффекта — в этом случае пишем свет ВЫКЛЮЧЕННЫМ
-    // (data[76]=00), а не «свет вкл» (фикс 10.31).
+    // (a=00 во всех слотах эффектов data[58..96]), а не «свет вкл».
     let light_off: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     // --- Сборка ------------------------------------------------------------
@@ -212,8 +394,27 @@ pub fn build_rgb_studio(
     panel.append(&live_off);
     panel.append(&live_status);
 
+    // --- Перестройка списка эффектов под подключённое устройство -----------
+    // USB (HW_EFFECTS, селектор data[10]) и ресивер (WL_EFFECTS, led[10]) —
+    // РАЗНЫЕ наборы кодов с разными названиями. При показе RGB-страницы
+    // сверяемся с подключённым устройством и перестраиваем список.
+    let hw_dd_sync = hw_dd.clone();
+    let hw_flag_sync = hw_is_wl.clone();
+    let fetcher_sync = fetcher.clone();
+    panel.connect_map(move |_| {
+        let is_wl = fetcher_sync()
+            .map(|d| d.connection_type() == ConnectionType::Wireless2_4G)
+            .unwrap_or(false);
+        if is_wl != hw_flag_sync.get() {
+            hw_flag_sync.set(is_wl);
+            rebuild_hw_model(&hw_dd_sync, is_wl);
+        }
+    });
+
     // --- Обработчики ---------------------------------------------------------
     let fetcher2 = fetcher.clone();
+    let vidpid_a = vidpid.clone();
+    let status_a0 = live_status.clone();
     apply.connect_clicked(clone!(
         #[strong]
         mode_dd,
@@ -224,42 +425,110 @@ pub fn build_rgb_studio(
         #[strong]
         live_entry,
         #[strong]
-        live_timer,
+        frame_gen,
         #[strong]
         light_off,
         #[strong]
         fetcher2,
         move |_| {
-            if fetcher2().is_some() {
-                // Свет включён host-эффектом — снимаем флаг «погашено» (10.31).
+            if let Some(dev) = fetcher2() {
+                // Свет включён host-эффектом/цветом — снимаем флаг «погашено» (10.31).
                 light_off.set(false);
-                // Host-движок (10.18): аппаратной эффект-таблицы у F75 нет,
-                // поэтому режим/яркость/скорость рендерим НА ХОСТЕ и гоним
-                // кадрами через подтверждённый render_frame()-канал с keepalive,
-                // пока GUI жив.
-                use crate::devices::aula_f75::{host_frame, HostEffectParams};
                 let mode = mode_from_index(mode_dd.selected());
                 let base = Color::from_hex_checked(live_entry.text().trim())
                     .unwrap_or(Color::new(255, 90, 0));
+                let brightness = bright_scale.value().round() as u8;
+                let speed = speed_scale.value().round() as u8;
+                // Ресивер 2.4G: эффект/цвет/яркость/скорость пишутся СРАЗУ во
+                // флеш (протокол 0x13) — host-keepalive не нужен, эффект
+                // держится без приложения. Запись выполняем в отдельном потоке
+                // (persistent-хук через независимый handle), чтобы блокирующий
+                // hidapi не вешал GUI, а результат читаем коротким опросом.
+                if dev.connection_type() == ConnectionType::Wireless2_4G {
+                    let Some((vid, pid)) = vidpid_a() else {
+                        status_a0.set_text(
+                            "Устройство не подключено: откройте его на вкладке «Устройства»",
+                        );
+                        return;
+                    };
+                    frame_gen.set(frame_gen.get().wrapping_add(1));
+                    let st = status_a0.clone();
+                    let gen = frame_gen.clone();
+                    let my_gen = gen.get();
+                    let rx = spawn_wl_task(
+                        vid,
+                        pid,
+                        WlTask::Rgb {
+                            mode,
+                            color: Some(base),
+                            brightness,
+                            speed,
+                        },
+                    );
+                    // Опрос канала короткими тиками (одноразовый, по поколению).
+                    gtk::glib::timeout_add_local(
+                        std::time::Duration::from_millis(150),
+                        move || {
+                            if gen.get() != my_gen {
+                                return glib::ControlFlow::Break;
+                            }
+                            match rx.try_recv() {
+                                Ok(Ok(_name)) => {
+                                    st.set_text(&format!(
+                                        "Ресивер 2.4G: {mode:?}, яркость={brightness}, \
+                                         скорость={speed} сохранены в память — держатся \
+                                         без приложения"
+                                    ));
+                                    glib::ControlFlow::Break
+                                }
+                                Ok(Err(e)) => {
+                                    st.set_text(&format!(
+                                        "{e} (клавиатура спит на линке — нажмите клавишу и \
+                                         повторите)"
+                                    ));
+                                    glib::ControlFlow::Break
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    glib::ControlFlow::Continue
+                                }
+                                Err(_) => {
+                                    st.set_text("Сбой потока записи (канал закрыт)");
+                                    glib::ControlFlow::Break
+                                }
+                            }
+                        },
+                    );
+                    return;
+                }
+                // USB: host-rendering (аппаратной эффект-таблицы у F75 нет,
+                // latch не найден) — режим/яркость/скорость рендерим НА ХОСТЕ
+                // и гоним кадрами через render_frame()-канал с keepalive.
+                use crate::devices::aula_f75::{host_frame, HostEffectParams};
                 let params = HostEffectParams {
                     mode,
                     base,
-                    brightness: bright_scale.value().round() as u8,
-                    speed: speed_scale.value().round() as u8,
+                    brightness,
+                    speed,
                 };
                 // ВАЖНО (фикс 10.21): при повторном «Применить» НАДО
                 // останавливать прежний keepalive-поток и запускать новый,
                 // иначе новые режим/яркость/скорость не применятся (старый
-                // таймер продолжал гнать старые кадры).
-                let timer_dst = live_timer.clone();
-                if let Some(id) = timer_dst.borrow_mut().take() {
-                    id.remove();
-                }
+                // таймер продолжал гнать старые кадры). Остановку делаем через
+                // инкремент поколения — прежний таймер завершится сам на
+                // следующем тике (удаление SourceId паникует, фикс 10.39).
+                frame_gen.set(frame_gen.get().wrapping_add(1));
+                let my_gen = frame_gen.get();
                 let dev_fetch = fetcher2.clone();
+                let gen_f = frame_gen.clone();
                 let mut t_ms = 0u32;
-                *timer_dst.borrow_mut() = Some(gtk::glib::timeout_add_local(
+                gtk::glib::timeout_add_local(
                     std::time::Duration::from_millis(500),
                     move || {
+                        // Поколение устарело — была нажата другая кнопка/запущен
+                        // новый поток: этот таймер больше не нужен, завершаемся.
+                        if gen_f.get() != my_gen {
+                            return glib::ControlFlow::Break;
+                        }
                         let frame = host_frame(&params, t_ms);
                         t_ms += 500;
                         if let Some(dev) = dev_fetch() {
@@ -269,95 +538,236 @@ pub fn build_rgb_studio(
                         }
                         glib::ControlFlow::Continue
                     },
-                ));
+                );
             }
         }
     ));
 
     let fetcher3 = fetcher.clone();
     let status_s = live_status.clone();
-    let timer_s = live_timer.clone();
+    let frame_gen_s = frame_gen.clone();
     let color_s = live_color.clone();
     let off_s = light_off.clone();
-    let reconnect_s = reconnect.clone();
+    let set_dev = set_device.clone();
+    let vidpid_f = vidpid.clone();
+    let hw_wl_save = hw_is_wl.clone();
     save_to_board.connect_clicked(move |_| {
         // Фикс 10.27: СНАЧАЛА останавливаем host-поток кадров, иначе keepalive
-        // (каждые 400 мс) перезапишет LED и «съест» применённый аппаратный
-        // эффект/выключение. Именно это было: записали — клава потухла и
-        // через секунду вернулась к host-статике.
-        if let Some(id) = timer_s.borrow_mut().take() {
-            id.remove();
-        }
+        // (каждые 400 мс) перезапишет LED и «съест» сохранённый аппаратный
+        // эффект/выключение. Остановка — через инкремент поколения (прежние
+        // таймеры завершатся сами; удаление SourceId паникует, фикс 10.39).
+        frame_gen_s.set(frame_gen_s.get().wrapping_add(1));
         color_s.borrow_mut().take();
-        let Some(dev) = fetcher3() else {
+
+        // Что сохраняем: аппаратный эффект (USB: селектор data[10]; ресивер:
+        // led[10]) / выключенный свет (слои эффектов a=00) / текущий конфиг.
+        // Тип выбираем ДО потока — здесь используются GUI-виджеты (Rc), их
+        // нельзя уводить в thread. Список кодов — по текущей модели списка
+        // «Аппаратный эффект» (hw_is_wl: ресивер vs USB).
+        let sel = hw_dd.selected();
+        let was_off = off_s.get();
+        let is_wl = hw_wl_save.get();
+        let effects: &[(u8, &str)] = if is_wl {
+            crate::devices::aula_f75::WL_EFFECTS
+        } else {
+            crate::devices::aula_f75::HW_EFFECTS
+        };
+        let kind = if sel > 0 && (sel as usize) <= effects.len() {
+            SaveKind::Effect(effects[(sel - 1) as usize].0)
+        } else if was_off {
+            SaveKind::LightOff
+        } else {
+            SaveKind::Config
+        };
+
+        let Some((vid, pid)) = vidpid_f() else {
             status_s.set_text("Устройство не подключено: откройте его на вкладке «Устройства»");
             return;
         };
-        // Если выбран аппаратный эффект — пишем его селектор data[10] в память
-        // (AULA F75): эффект + свет вкл (данные[76]=09), держится без приложения.
-        // Если эффект не выбран, но свет был погашен host-кадром — сохраняем
-        // свет ВЫКЛЮЧЕННЫМ (data[76]=00), а не «свет вкл» (фикс 10.31).
-        // Иначе — просто сохраняем текущий конфиг со светом-вкл.
-        let sel = hw_dd.selected();
-        let was_off = off_s.get();
-        let res = if sel > 0 && sel as usize <= crate::devices::aula_f75::HW_EFFECTS.len() {
-            let code = crate::devices::aula_f75::HW_EFFECTS[(sel - 1) as usize].0;
-            dev.save_hardware_effect(code)
-        } else if was_off {
-            dev.save_hardware_light(false)
-        } else {
-            dev.save_profile_to_eeprom(0)
-        };
-        match res {
-            Ok(()) => {
-                // write кикает клавиатуру (пересоздание hidraw) — старый handle
-                // мёртв. Переоткрываем устройство, чтобы продолжать работать.
-                // (фикс 10.31)
-                if let Err(e) = reconnect_s() {
-                    status_s.set_text(&format!("Конфиг записан, но переоткрытие устройства не удалось: {e}"));
-                    return;
-                }
-                if was_off && sel == 0 {
-                    // Свет остаётся погашенным: перезапускаем чёрный keepalive
-                    // (после кика клавиатура стартует с RAM-подсветкой; флеш
-                    // data[76]=00 применится только при полном отключении).
-                    let black = vec![Color::new(0, 0, 0); crate::devices::aula_f75::RGB_LED_COUNT];
-                    if let Some(dev) = fetcher3() {
-                        let _ = dev.render_frame(&black);
-                    }
-                    let timer_d = timer_s.clone();
-                    let dev_fetch = fetcher3.clone();
-                    *timer_d.borrow_mut() = Some(gtk::glib::timeout_add_local(
-                        std::time::Duration::from_millis(400),
-                        move || {
-                            let Some(dev) = dev_fetch() else {
-                                return glib::ControlFlow::Break;
-                            };
-                            if dev.render_frame(&black).is_err() {
-                                return glib::ControlFlow::Break;
-                            }
-                            glib::ControlFlow::Continue
-                        },
-                    ));
-                    status_s.set_text(
-                        "Свет выключен и сохранён в память (после перезапуска клавиатуры не \
-                         включится). Сейчас подсветка погашена до закрытия приложения.",
-                    );
-                } else if sel == 0 {
-                    status_s.set_text(
-                        "Записан текущий аппаратный конфиг (свет вкл). ВАЖНО: статические \
-                         цвета и host-эффекты в память не сохраняются — они работают, пока \
-                         приложение открыто.",
-                    );
-                } else {
-                    status_s.set_text(
-                        "Конфиг записан в память клавиатуры. Эффект/свет включится сам при \
-                         старте, без запущенного приложения.",
-                    );
-                }
-            }
-            Err(e) => status_s.set_text(&format!("Ошибка записи конфига: {e}")),
+
+        // Ресивер 2.4G: если не выбран эффект и свет не погашен — сохранять
+        // нечего (0x13 не пишет «текущий конфиг», в отличие от USB data[10]).
+        if is_wl && matches!(kind, SaveKind::Config) {
+            status_s.set_text(
+                "Ресивер 2.4G: выберите аппаратный эффект (или «Выключить свет»), \
+                 а затем «Записать в память» — запись текущего конфига на ресивере \
+                 не поддерживается.",
+            );
+            frame_gen_s.set(frame_gen_s.get().wrapping_add(1));
+            return;
         }
+
+        // Фикс 10.34: запись в память содержит блокирующие hidapi-вызовы
+        // (read_config + write_config + кик клавиатуры) — выполняем их в
+        // ОТДЕЛЬНОМ потоке через независимый handle (open_vidpid), чтобы
+        // главный GTK-поток не зависал. GUI-слот не трогаем.
+        status_s.set_text("Запись в память… клавиатура может переподключиться");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res: Result<String, String> = (|| {
+                let dev = crate::devices::open_vidpid(vid, pid)
+                    .map_err(|e| format!("не удалось открыть устройство: {e}"))?;
+                match kind {
+                    SaveKind::Effect(code) => {
+                        dev.save_hardware_effect(code).map_err(|e| e.to_string())?
+                    }
+                    SaveKind::LightOff => {
+                        dev.save_hardware_light(false).map_err(|e| e.to_string())?
+                    }
+                    SaveKind::Config => {
+                        dev.save_profile_to_eeprom(0).map_err(|e| e.to_string())?
+                    }
+                }
+                Ok(dev.name().to_string())
+            })();
+            let _ = tx.send(res);
+        });
+
+        // Ждём результат из потока, не блокируя UI (одноразовый таймер опрашивает
+        // mpsc-канал короткими паузами). Таймер живёт по поколению: нажатие любой
+        // другой кнопки инкрементит frame_gen — прежний опрос/keepalive/reconnect
+        // завершатся сами на следующем тике (без паникующего SourceId::remove).
+        let st = status_s.clone();
+        let gen_r = frame_gen_s.clone();
+        let dev_fetch = fetcher3.clone();
+        let black = Rc::new(vec![
+            Color::new(0, 0, 0);
+            crate::devices::aula_f75::RGB_LED_COUNT
+        ]);
+        let need_off = was_off && sel == 0;
+        // Отдельный клон set_device для вложенных timer-замыканий: Rc не Copy,
+        // move-внутрь таймера нельзя прямо из внешнего Fn-closeure (E0507).
+        // Каждый вызов внешнего клика даёт свежий клон — внутренние таймеры
+        // получают собственный Rc и не «съедают» внешний.
+        let sd = set_dev.clone();
+        let my_gen = gen_r.get();
+        gtk::glib::timeout_add_local(
+            std::time::Duration::from_millis(150),
+            move || {
+                // Поколение устарело — была нажата другая кнопка: останавливаем
+                // и текущий опрос, и всё, что он мог запустить ниже.
+                if gen_r.get() != my_gen {
+                    return glib::ControlFlow::Break;
+                }
+                let res = match rx.try_recv() {
+                    Ok(r) => r,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        return glib::ControlFlow::Continue
+                    }
+                    Err(_) => {
+                        st.set_text("Сбой потока записи (канал закрыт)");
+                        return glib::ControlFlow::Break;
+                    }
+                };
+                match res {
+                    Err(e) => {
+                        st.set_text(&format!("Ошибка записи в память: {e}"));
+                        return glib::ControlFlow::Break;
+                    }
+                    Ok(_name) => {
+                        // Запись успешна. write кикает клавиатуру (пересоздание
+                        // hidraw) — старый handle мёртв, новые узлы появляются
+                        // ~1–2 с. 
+                        if need_off {
+                            // Свет сохраняется погашенным: включаем ПОСТОЯННЫЙ
+                            // чёрный keepalive с авто-восстановлением канала —
+                            // каждый тик шлёт чёрный кадр; при ошибке (канал
+                            // пересоздаётся/открылся не тот интерфейс) сразу
+                            // переоткрываем устройство и продолжаем. Пока ПК и
+                            // приложение открыты — свет не вернётся. Флеш
+                            // (a=00 во всех слотах данных[58..96]) применится
+                            // сам при полном отключении.
+                            st.set_text(
+                                "Свет выключен и сохранён в память. Удерживаю гашение \
+                                 авто-переподключением… ВАЖНО: клавиатура применяет \
+                                 сохранённый конфиг только при полном отключении от \
+                                 питания (отключите USB на пару секунд/перезагрузите ПК) \
+                                 — тогда свет не включится и без приложения.",
+                            );
+                            let fetch_k = dev_fetch.clone();
+                            let set_k = sd.clone();
+                            let rx_store = Rc::new(RefCell::new(None));
+                            let rx_s = rx_store.clone();
+                            let black2 = black.clone();
+                            let gen_k = gen_r.clone();
+                            gtk::glib::timeout_add_local(
+                                std::time::Duration::from_millis(400),
+                                move || {
+                                    if gen_k.get() != my_gen {
+                                        return glib::ControlFlow::Break;
+                                    }
+                                    // Фоновое переподключение: забираем готовый
+                                    // HID-мост и кладём живое устройство в слот.
+                                    drain_reopen(&rx_s, &*set_k);
+                                    match fetch_k() {
+                                        Some(dev) => {
+                                            if dev.render_frame(&black2).is_err() {
+                                                // канал переживает пересоздание либо
+                                                // открылся не тот интерфейс — фон
+                                                // сам переоткроет и гаснуть продолжим
+                                                ensure_reopen(&rx_s, vid, pid);
+                                            }
+                                        }
+                                        None => ensure_reopen(&rx_s, vid, pid),
+                                    }
+                                    glib::ControlFlow::Continue
+                                },
+                            );
+                        } else {
+                            // Эффект/конфиг (свет вкл): переподключение через
+                            // фоновый поток — блокирующее hidapi в главный поток
+                            // не попадает, UI не вешается (фикс 2026-09-13).
+                            st.set_text(
+                                "Конфиг записан в память (эффект/свет вкл после \
+                                 переподключения клавиатуры). Переподключаюсь…",
+                            );
+                            let set_k = sd.clone();
+                            let rx_store = Rc::new(RefCell::new(None));
+                            ensure_reopen(&rx_store, vid, pid);
+                            let rx_s = rx_store.clone();
+                            let st_k = st.clone();
+                            let attempts = Rc::new(Cell::new(0u32));
+                            let gen_r2 = gen_r.clone();
+                            gtk::glib::timeout_add_local(
+                                std::time::Duration::from_millis(600),
+                                move || {
+                                    if gen_r2.get() != my_gen {
+                                        return glib::ControlFlow::Break;
+                                    }
+                                    if attempts.get() >= 20 {
+                                        st_k.set_text(
+                                            "Конфиг записан в память. Переподключение не \
+                                             удалось — нажмите «Устройства → Открыть».",
+                                        );
+                                        return glib::ControlFlow::Break;
+                                    }
+                                    attempts.set(attempts.get() + 1);
+                                    match drain_reopen(&rx_s, &*set_k) {
+                                        Some(_name) => {
+                                            st_k.set_text(
+                                                "Конфиг записан в память клавиатуры. \
+                                                 Эффект/свет включится сам при старте.",
+                                            );
+                                            glib::ControlFlow::Break
+                                        }
+                                        None => glib::ControlFlow::Continue,
+                                    }
+                                },
+                            );
+                        }
+                        if sel == 0 && !was_off {
+                            st.set_text(
+                                "Записан текущий аппаратный конфиг (свет вкл). ВАЖНО: \
+                                 статические цвета и host-эффекты в память не сохраняются \
+                                 — они работают, пока приложение открыто.",
+                            );
+                        }
+                        glib::ControlFlow::Break
+                    }
+                }
+            },
+        );
     });
 
     // --- Живой цвет: обработчики ---------------------------------------
@@ -367,10 +777,11 @@ pub fn build_rgb_studio(
     let apply_cur: Rc<dyn Fn()> = {
         let entry_a = live_entry.clone();
         let fetcher_a = fetcher.clone();
-        let timer_a = live_timer.clone();
+        let gen_c = frame_gen.clone();
         let color_a = live_color.clone();
         let status_a = live_status.clone();
         let off_a = light_off.clone();
+        let vidpid_c = vidpid.clone();
         Rc::new(move || {
             let text = entry_a.text().to_string();
             let Some(color) = Color::from_hex_checked(text.trim()) else {
@@ -383,9 +794,67 @@ pub fn build_rgb_studio(
             };
             // Свет включён host-цветом — снимаем флаг «погашено» (10.31).
             off_a.set(false);
-            // Останавливаем предыдущий поток.
-            if let Some(id) = timer_a.borrow_mut().take() {
-                id.remove();
+            // Останавливаем предыдущий поток через инкремент поколения — прежний
+            // keepalive завершится сам на следующем тике (удаление SourceId
+            // паникует в glib-0.20.12, фикс 10.39).
+            gen_c.set(gen_c.get().wrapping_add(1));
+            let my_gen = gen_c.get();
+            // Ресивер 2.4G: статичный цвет пишется СРАЗУ в память (0x13) — без
+            // host-keepalive, держится без приложения. Запись — отдельным
+            // потоком (persistent-хук), результат — коротким опросом.
+            if dev.connection_type() == ConnectionType::Wireless2_4G {
+                let Some((vid, pid)) = vidpid_c() else {
+                    status_a.set_text(
+                        "Устройство не подключено: откройте его на вкладке «Устройства»",
+                    );
+                    return;
+                };
+                let rx = spawn_wl_task(
+                    vid,
+                    pid,
+                    WlTask::Rgb {
+                        mode: RgbMode::Static,
+                        color: Some(color),
+                        brightness: 255,
+                        speed: 1,
+                    },
+                );
+                let st = status_a.clone();
+                let gen = gen_c.clone();
+                let my_gen = gen.get();
+                gtk::glib::timeout_add_local(
+                    std::time::Duration::from_millis(150),
+                    move || {
+                        if gen.get() != my_gen {
+                            return glib::ControlFlow::Break;
+                        }
+                        match rx.try_recv() {
+                            Ok(Ok(_name)) => {
+                                st.set_text(&format!(
+                                    "Ресивер 2.4G: статичный цвет #{:06X} сохранён в память \
+                                     (держится без приложения)",
+                                    color.to_argb() & 0xFF_FFFF
+                                ));
+                                glib::ControlFlow::Break
+                            }
+                            Ok(Err(e)) => {
+                                st.set_text(&format!(
+                                    "{e} (клавиатура спит на линке — нажмите клавишу и \
+                                     повторите)"
+                                ));
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                glib::ControlFlow::Continue
+                            }
+                            Err(_) => {
+                                st.set_text("Сбой потока записи (канал закрыт)");
+                                glib::ControlFlow::Break
+                            }
+                        }
+                    },
+                );
+                return;
             }
             let frame = vec![color; frame_capacity];
             if let Err(e) = dev.render_frame(&frame) {
@@ -395,12 +864,15 @@ pub fn build_rgb_studio(
             *color_a.borrow_mut() = Some(color);
             status_a.set_text(&format!("Кадр #{:06X} отправлен ({frame_capacity} LED)…", color.to_argb() & 0xFF_FFFF));
             // Запускаем keepalive: поток кадров каждые 400 мс.
-            let timer_b = timer_a.clone();
+            let gen_k = gen_c.clone();
             let color_b = color_a.clone();
             let dev_fetch = fetcher_a.clone();
-            *timer_b.borrow_mut() = Some(gtk::glib::timeout_add_local(
+            gtk::glib::timeout_add_local(
                 std::time::Duration::from_millis(400),
                 move || {
+                    if gen_k.get() != my_gen {
+                        return glib::ControlFlow::Break;
+                    }
                     let Some(c) = color_b.borrow().as_ref().copied() else {
                         return glib::ControlFlow::Break;
                     };
@@ -412,7 +884,7 @@ pub fn build_rgb_studio(
                     }
                     glib::ControlFlow::Continue
                 },
-            ));
+            );
         })
     };
 
@@ -465,24 +937,78 @@ pub fn build_rgb_studio(
         });
     }
 
-    let timer_c = live_timer.clone();
+    let gen_off = frame_gen.clone();
     let color_c = live_color.clone();
     let fetcher6 = fetcher.clone();
     let status_off = live_status.clone();
     let off_c = light_off.clone();
+    let hw_dd_off = hw_dd_for_off.clone();
+    let vidpid_off = vidpid.clone();
     live_off.connect_clicked(move |_| {
-        // Останавливаем host-поток (иначе он же и перезажжёт свет).
-        if let Some(id) = timer_c.borrow_mut().take() {
-            id.remove();
-        }
+        // Свет погашен host-кадром — запоминаем (10.31): «Записать в память»
+        // без выбранного эффекта сохранит свет ВЫКЛЮЧЕННЫМ (a=00 во всех слотах
+        // эффектов data[58..96]).
+        off_c.set(true);
+        // Гашение = чистое «выключено». Сбрасываем выбор аппаратного эффекта,
+        // иначе «Записать в память» сохранит эффект со светом вкл (все a=09)
+        // и свет вернётся после перезагрузки клавиатуры (фикс 10.35).
+        hw_dd_off.set_selected(0);
+        // Останавливаем host-поток (иначе он же и перезажжёт свет) через
+        // инкремент поколения — прежний keepalive завершится сам (10.39).
+        gen_off.set(gen_off.get().wrapping_add(1));
+        let my_gen = gen_off.get();
         color_c.borrow_mut().take();
         let Some(dev) = fetcher6() else {
             status_off.set_text("Устройство не подключено: откройте его на вкладке «Устройства»");
             return;
         };
-        // Свет погашен host-кадром — запоминаем (10.31): «Записать в память»
-        // без выбранного эффекта сохранит свет ВЫКЛЮЧЕННЫМ (data[76]=00).
-        off_c.set(true);
+        // Ресивер 2.4G: свет выключается АППАРАТНО в память (яркость LED
+        // config = 0, протокол 0x13) — держится без приложения, host-keepalive
+        // не нужен. Запись — отдельным потоком (persistent-хук), результат —
+        // коротким опросом.
+        if dev.connection_type() == ConnectionType::Wireless2_4G {
+            let Some((vid, pid)) = vidpid_off() else {
+                status_off.set_text(
+                    "Устройство не подключено: откройте его на вкладке «Устройства»",
+                );
+                return;
+            };
+            let rx = spawn_wl_task(vid, pid, WlTask::Light { on: false });
+            let st = status_off.clone();
+            let gen = gen_off.clone();
+            let my_gen = gen.get();
+            gtk::glib::timeout_add_local(
+                std::time::Duration::from_millis(150),
+                move || {
+                    if gen.get() != my_gen {
+                        return glib::ControlFlow::Break;
+                    }
+                    match rx.try_recv() {
+                        Ok(Ok(_name)) => {
+                            st.set_text(
+                                "Ресивер 2.4G: свет ВЫКЛЮЧЕН и сохранён в память (держится \
+                                 без приложения). Включить обратно: «Применить» или \
+                                 «Включить цвет».",
+                            );
+                            glib::ControlFlow::Break
+                        }
+                        Ok(Err(e)) => {
+                            st.set_text(&format!(
+                                "{e} (клавиатура спит на линке — нажмите клавишу и \
+                                 повторите)"
+                            ));
+                            glib::ControlFlow::Break
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                        Err(_) => {
+                            st.set_text("Сбой потока записи (канал закрыт)");
+                            glib::ControlFlow::Break
+                        }
+                    }
+                },
+            );
+            return;
+        }
         // Чёрный кадр гасит все LED сейчас.
         let black = vec![Color::new(0, 0, 0); frame_capacity];
         if let Err(e) = dev.render_frame(&black) {
@@ -496,11 +1022,14 @@ pub fn build_rgb_studio(
         // Запись же в память делаем отдельной кнопкой («Записать в память»),
         // т.к. write кикает клавиатуру и она стартует с RAM-подсветкой
         // (флеш применяется только при полном отключении питания, 10.28).
-        let timer_d = timer_c.clone();
+        let gen_k = gen_off.clone();
         let dev_fetch = fetcher6.clone();
-        *timer_d.borrow_mut() = Some(gtk::glib::timeout_add_local(
+        gtk::glib::timeout_add_local(
             std::time::Duration::from_millis(400),
             move || {
+                if gen_k.get() != my_gen {
+                    return glib::ControlFlow::Break;
+                }
                 let Some(dev) = dev_fetch() else {
                     return glib::ControlFlow::Break;
                 };
@@ -509,16 +1038,43 @@ pub fn build_rgb_studio(
                 }
                 glib::ControlFlow::Continue
             },
-        ));
+        );
         status_off.set_text(
-            "Свет выключен (host-кадр, свет не включится, пока приложение открыто). ВАЖНО: \
-             host-гашение в память не пишется — после выключения/переподключения клавиатуры \
-             свет вернётся. Чтобы он не включался после перезапуска — выберите аппаратный \
-             эффект и нажмите «Записать в память».",
+            "Свет выключен (host-кадр, не включится, пока приложение открыто). Выбор \
+             аппаратного эффекта сброшен — при закрытии приложения состояние «свет \
+             выключен» сохранится автоматически (а=00 во всех слотах эффектов). \
+             Хотите эффект в память — выберите его в списке и нажмите «Записать \
+             в память».",
         );
     });
 
-    panel
+    // --- Probe для автосохранения при закрытии окна (app.rs) ---------------
+    // Возвращает действие, которое нужно зафиксировать во флеш, если пользователь
+    // закрыл окно: свет выключен (а=00 во всех слотах) или выбран аппаратный
+    // эффект (data[10] + свет вкл). Ничего не возвращает, если нечего
+    // сохранять (свет горит и эффект не выбирался — менять память не нужно).
+    let probe_hw = hw_dd_for_probe.clone();
+    let probe_off = light_off.clone();
+    let probe_wl = hw_is_wl.clone();
+    let probe: PersistProbe = Rc::new(move || {
+        if probe_off.get() {
+            return Some(SaveKind::LightOff);
+        }
+        let sel = probe_hw.selected();
+        // Список кодов эффектов соответствует текущей модели списка
+        // (ресивер = WL_EFFECTS/led[10], USB = HW_EFFECTS/data[10]).
+        let effects: &[(u8, &str)] = if probe_wl.get() {
+            crate::devices::aula_f75::WL_EFFECTS
+        } else {
+            crate::devices::aula_f75::HW_EFFECTS
+        };
+        if sel > 0 && (sel as usize) <= effects.len() {
+            return Some(SaveKind::Effect(effects[(sel - 1) as usize].0));
+        }
+        None
+    });
+
+    (panel, probe)
 }
 
 /// Цветовой пикер: покраска выбранных клавиш в макете одним цветом.

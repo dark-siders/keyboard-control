@@ -27,7 +27,7 @@ use std::process::ExitCode;
 
 use keyboard_center::devices::hidshell;
 use keyboard_center::devices::scanner::Scanner;
-use keyboard_center::devices::{KeyboardDevice, RgbMode};
+use keyboard_center::devices::{ConnectionType, KeyboardDevice, RgbMode};
 
 const LOGO: &str = "Keyboard-Center kbc";
 
@@ -94,6 +94,12 @@ struct RgbArgs {
     /// Удерживать поток кадров N мс после отправки (direct-режим требует keepalive)
     #[arg(long, value_name = "ms")]
     hold: Option<u64>,
+    /// [2.4G] Выключить свет в память ресивера (останется выключенным без приложения)
+    #[arg(long)]
+    light_off: bool,
+    /// [2.4G] Включить свет в память ресивера (полной яркостью)
+    #[arg(long)]
+    light_on: bool,
 }
 
 #[derive(Args)]
@@ -251,6 +257,9 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
             let dev = open(vid, pid)?;
             match dev.get_battery_level()? {
                 Some(l) => println!("батарея: {l}%"),
+                None if dev.connection_type() == ConnectionType::Wireless2_4G => {
+                    println!("батарея: нет ответа (клавиатура спит на линке — нажмите клавишу и повторите)");
+                }
                 None => println!("батарея не поддерживается устройством"),
             }
             Ok(0)
@@ -360,7 +369,42 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
     let (vid, pid) = parse_id(&args.device)?;
     let dev = open(vid, pid)?;
 
-    if let Some(color) = &args.color {
+    // Канал света (вкл/выкл) в память: ресивер 2.4G отвечает Ok(true);
+    // USB — не умеет через CLI (в GUI — RGB-студия → «Выключить свет»).
+    if args.light_off {
+        return cmd_light_persistent(&*dev, false);
+    }
+    if args.light_on {
+        return cmd_light_persistent(&*dev, true);
+    }
+
+    // Ресивер 2.4G (3554:FA09): RGB записывается СРАЗУ во флеш (протокол
+    // 0x13, журнал 10.42) — host-keepalive не нужен, эффект/цвет/яркость/
+    // скорость держатся без приложения. Контракт хука: Ok(true) = применено
+    // аппаратно; Ok(false) = устройство не умеет (внизу — host-рендеринг).
+    if dev.connection_type() == ConnectionType::Wireless2_4G {
+        let mode = parse_rgb_mode(args.mode.as_deref())?;
+        let color = match &args.color {
+            Some(c) => Some(
+                keyboard_center::types::Color::from_hex_checked(c)
+                    .ok_or_else(|| anyhow::anyhow!("неверный цвет: {c} (ожидается RRGGBB)"))?,
+            ),
+            None => None,
+        };
+        let brightness = args.brightness.unwrap_or(128);
+        let speed = args.speed.unwrap_or(60);
+        return match dev.apply_rgb_persistent(mode, color, brightness, speed)? {
+            true => {
+                println!(
+                    "2.4G: режим {mode:?}, яркость={brightness}, скорость={speed} записаны в память ресивера (держится без приложения)"
+                );
+                Ok(0)
+            }
+            false => Err(anyhow::anyhow!(
+                "ресивер не поддерживает запись эффекта в память"
+            )),
+        };
+    } else if let Some(color) = &args.color {
         let c = keyboard_center::types::Color::from_hex_checked(color)
             .ok_or_else(|| anyhow::anyhow!("неверный цвет: {color} (ожидается RRGGBB)"))?;
         // Прямой (host-rendering) кадр: заливает ВСЕ LED заданным цветом.
@@ -398,17 +442,7 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
     //
     if args.mode.is_some() || args.brightness.is_some() || args.speed.is_some() {
         use keyboard_center::devices::aula_f75::{host_frame, HostEffectParams};
-        let mode = match args.mode.as_deref().unwrap_or("static").to_lowercase().as_str() {
-            "static" => RgbMode::Static,
-            "breathing" => RgbMode::Breathing,
-            "wave" => RgbMode::Wave,
-            "spectrum" | "spectrum-cycle" => RgbMode::SpectrumCycle,
-            "ripple" => RgbMode::Ripple,
-            "rain" => RgbMode::Rain,
-            "reactive" => RgbMode::Reactive,
-            "custom" => RgbMode::Custom,
-            _ => return Err(anyhow::anyhow!("неизвестный режим: {}", args.mode.as_deref().unwrap())),
-        };
+        let mode = parse_rgb_mode(args.mode.as_deref())?;
         let base = match &args.color {
             Some(color) => keyboard_center::types::Color::from_hex_checked(color)
                 .ok_or_else(|| anyhow::anyhow!("неверный цвет: {color} (ожидается RRGGBB)"))?,
@@ -431,6 +465,43 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
         }
     }
     Ok(0)
+}
+
+/// Парсер host-режима подсветки из строки CLI (общий для USB и 2.4G).
+fn parse_rgb_mode(s: Option<&str>) -> anyhow::Result<RgbMode> {
+    let s = s.unwrap_or("static").to_lowercase();
+    let m = match s.as_str() {
+        "static" => RgbMode::Static,
+        "breathing" => RgbMode::Breathing,
+        "wave" => RgbMode::Wave,
+        "spectrum" | "spectrum-cycle" => RgbMode::SpectrumCycle,
+        "ripple" => RgbMode::Ripple,
+        "rain" => RgbMode::Rain,
+        "reactive" => RgbMode::Reactive,
+        "custom" => RgbMode::Custom,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "неизвестный режим: {s} (static/breathing/wave/spectrum/ripple/rain/reactive/custom)"
+            ))
+        }
+    };
+    Ok(m)
+}
+
+/// [2.4G] Включить/выключить свет в память ресивера через apply_light_persistent.
+fn cmd_light_persistent(dev: &dyn KeyboardDevice, on: bool) -> anyhow::Result<u8> {
+    match dev.apply_light_persistent(on)? {
+        true => {
+            println!(
+                "2.4G: свет {} в память ресивера (держится без приложения)",
+                if on { "включён" } else { "выключен" }
+            );
+            Ok(0)
+        }
+        false => Err(anyhow::anyhow!(
+            "USB-устройство не поддерживает запись света в память через CLI (в GUI: RGB-студия → «Выключить свет»)"
+        )),
+    }
 }
 
 fn cmd_save(a: SaveArgs) -> anyhow::Result<u8> {

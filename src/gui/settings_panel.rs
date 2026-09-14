@@ -94,11 +94,19 @@ pub fn build_settings_panel(
         move |_| {
         if let Some(dev) = fetcher2() {
             let mut levels = "нет".to_string();
-            if let Ok(Some(l)) = dev.get_battery_level() {
-                levels = format!("{l}%");
-                battery_label.set_text(&format!("Батарея: {levels}"));
-            } else {
-                battery_label.set_text("Батарея: не поддерживается");
+            match dev.get_battery_level() {
+                Ok(Some(l)) => {
+                    levels = format!("{l}%");
+                    battery_label.set_text(&format!("Батарея: {levels}"));
+                }
+                Ok(None) if dev.connection_type() == crate::types::ConnectionType::Wireless2_4G => {
+                    battery_label.set_text("Батарея: нет ответа (клавиатура спит на линке)");
+                    status.set_text("Нажмите клавишу на клавиатуре и обновите снова");
+                    return;
+                }
+                _ => {
+                    battery_label.set_text("Батарея: не поддерживается");
+                }
             }
             status.set_text(&format!("Обновлено. Заряд: {}", levels));
         } else {

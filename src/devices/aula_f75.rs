@@ -29,6 +29,7 @@
 use super::hid::HidBridge;
 use super::{Error, KeyboardDevice, Result};
 use crate::types::*;
+use std::cell::Cell;
 
 /// Количество клавиш в 75% раскладке F75 (без NumPad).
 pub const KEY_COUNT: u16 = 84;
@@ -49,11 +50,42 @@ pub const HW_EFFECTS: &[(u8, &str)] = &[
     (0x08, "Радуга (пульсирующая)"),
     (0x0A, "Змейка по рядам"),
     (0x0B, "Перелив-волна"),
+    // 0x0C — встречен в дефолтном конфиге на железе (2026-09-13, идёт после
+    // Fn+` перещёлкивания 0B→0C→0A). Название не выяснено.
+    (0x0C, "Эффект 0C (имя не выяснено)"),
+];
+
+/// Аппаратные эффекты РЕСИВЕРА 2.4G — селектор `led[10]` в LED config (0x13).
+/// Эмпирическая карта, снята на железе 2026-09-15 (прогон всех кодов серией,
+/// владелец описал визуально). Коды НЕ совпадают с dnviti-PROTOCOL.md (тот — для
+/// другого чипа) и НЕ синонимичны USB-кодам `data[10]` из `HW_EFFECTS`.
+/// `led[1]` селектором НЕ является (запись туда визуально ничего не меняла).
+/// Пишутся через 0x04 сразу во флеш — держатся без приложения.
+pub const WL_EFFECTS: &[(u8, &str)] = &[
+    (0x01, "Радужная статика"),
+    (0x03, "Смена цветов (статично)"),
+    (0x04, "Линия"),
+    (0x05, "Дождь"),
+    (0x06, "Дыхание"),
+    (0x07, "Мерцание разных букв"),
+    (0x08, "Змейка"),
+    (0x0A, "Пульсация из центра по сторонам"),
+    (0x0D, "Ободок по периметру"),
+    (0x0F, "Волны между рядами (сверху вниз)"),
+    (0x10, "Волны вправо-влево от центра"),
+    (0x11, "Эффект 0x11 (не выяснен)"),
+    (0x12, "Эффект 0x12 (не выяснен)"),
+    (0x13, "Выкл (нет подсветки)"),
 ];
 
 /// Найти имя аппаратного эффекта по коду (для отладки/GUI).
 pub fn hw_effect_name(code: u8) -> Option<&'static str> {
     HW_EFFECTS.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
+}
+
+/// Найти имя эффекта ресивера по коду (для отладки/GUI).
+pub fn wl_effect_name(code: u8) -> Option<&'static str> {
+    WL_EFFECTS.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
 }
 
 /// Номер Feature-репорта главного канала.
@@ -63,11 +95,18 @@ const PACKET_LEN: usize = 520;
 
 pub struct AulaF75 {
     bridge: HidBridge,
+    /// Последняя установленная яркость LED (0..4, масштаб прошивки) на
+    /// ресивере 2.4G — восстанавливается при включении света
+    /// (`apply_light_persistent(true)`); по умолчанию полная (4).
+    last_wl_brightness: Cell<u8>,
 }
 
 impl AulaF75 {
     pub fn open(bridge: HidBridge) -> Self {
-        Self { bridge: bridge }
+        Self {
+            bridge,
+            last_wl_brightness: Cell::new(4),
+        }
     }
 
     /// Собрать 520-байтовый пакет с одинаковым заголовком.
@@ -119,6 +158,244 @@ impl AulaF75 {
         let mut buf = vec![cmd_id];
         buf.extend_from_slice(payload);
         self.bridge.send_feature(&buf)?;
+        Ok(())
+    }
+
+    // --- Ресивер 2.4G (Compx 3554:FA09) ---
+    // Отдельное USB-устройство: клавиатура в режиме 2.4G НЕ видна напрямую,
+    // команды идут через ресивер. Протокол — output/input report ID 0x13
+    // (20 байт), как у F99 Pro (dnviti/aula-x99-pro, PROTOCOL.md).
+    // Версия + заряд АКБ приходят в ответе на команду 0x05 (PSD/identity):
+    //   0x05 → [13][05]… PSD … + [13][0A][01][00][04] fw btry type
+    //   byte[5]: фирма hi, byte[6]: заряд (0x64 = 100%), byte[7]: 0x01 = wireless.
+    // Проверено на железе (2026-09-14): ресивер F75 на 0x0B (как у F99 Pro)
+    // НЕ отвечает, работает именно 0x05 — PSD и version приходят вместе.
+    // Если клавиатура спит на линке — ответа не будет, пока её не разбудят
+    // нажатием клавиши (dnviti: _send_wireless, retries=1). Делаем несколько
+    // попыток с паузой, чтобы поймать ответ после пробуждения части клавиш.
+    fn wireless_battery(&self) -> Result<Option<u8>> {
+        const REPORT_WIRELESS: u8 = 0x13;
+        let mut req = [0u8; 20];
+        req[0] = REPORT_WIRELESS;
+        req[1] = 0x05;
+        // 3 попытки по ~1.2 c с паузой 300 мс (данный ресивер спит между
+        // таймаутом linкa; ножатия клавиш «будят» канал).
+        for _ in 0..3 {
+            self.bridge.send_output(&req)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+            let mut buf = [0u8; 64];
+            while std::time::Instant::now() < deadline {
+                let n = self.bridge.read_input(&mut buf, 150)?;
+                if n >= 8 && buf[0] == REPORT_WIRELESS && buf[1] == 0x0A {
+                    let ty = buf[7];
+                    let btr = buf[6];
+                    if ty == 0x01 && btr <= 100 {
+                        return Ok(Some(btr));
+                    }
+                    return Ok(None);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        // Ресивер молчит — клавиатура, вероятно, спит на линке.
+        Ok(None)
+    }
+
+    // --- Ресивер 2.4G: страничный протокол RGB (0x13, dnviti PROTOCOL.md) --
+    // Чтение/запись конфигурации подсветки через output/input report 0x13:
+    //   read  0x44 LED config (128 б), 0x49 RGB table (~490 б)
+    //   write 0x04 LED config, 0x09 RGB table  (write = read & 0x0F)
+    // Ответы идут страницами: [13][resp][total][idx][len][data…][cs].
+    // Ресивер отвечает только когда клавиатура не спит на линке (dnviti:
+    // «press any key to wake, then retry»), поэтому делаем несколько попыток.
+
+    /// Прочитать минимально одну «страницу» входящего потока (drop-buffer).
+    fn drain_input(&self, timeout_ms: i32) {
+        let mut buf = [0u8; 64];
+        let _ = self.bridge.read_input(&mut buf, timeout_ms);
+    }
+
+    /// Чтение многостраничного блока `cmd` (минимум `need` байт).
+    /// Собирает все страницы, сортируя по page index. 2 попытки × ~1.5 с.
+    fn wl_read_pages(&self, cmd: u8, need: usize) -> Result<Vec<u8>> {
+        const REPORT: u8 = 0x13;
+        for _attempt in 0..2 {
+            // Дренажим «хвост» предыдущих ответов, чтобы не принять чужую страницу.
+            self.drain_input(20);
+            let mut req = [0u8; 20];
+            req[0] = REPORT;
+            req[1] = cmd;
+            self.bridge.send_output(&req)?;
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            let mut pages: Vec<(usize, Vec<u8>)> = Vec::new();
+            let mut total: usize;
+            while std::time::Instant::now() < deadline {
+                let mut buf = [0u8; 64];
+                let n = self.bridge.read_input(&mut buf, 200)?;
+                if n < 5 || buf[0] != REPORT {
+                    continue;
+                }
+                let resp_cmd = buf[1];
+                // Принимаем собственную команду, её write-вариант (cmd&0x3F)
+                // и универсальный ACK 0x0A — как в read_multi_page у dnviti.
+                if resp_cmd != cmd && resp_cmd != (cmd & 0x3F) && resp_cmd != 0x0A {
+                    continue;
+                }
+                total = buf[2] as usize;
+                let idx = buf[3] as usize;
+                let plen = (buf[4] as usize).min(14);
+                let mut data = Vec::with_capacity(plen);
+                for i in 0..plen {
+                    data.push(buf[5 + i]);
+                }
+                if let Some(slot) = pages.iter_mut().find(|(i, _)| *i == idx) {
+                    slot.1 = data; // замена (контрольная страница повторно)
+                } else {
+                    pages.push((idx, data));
+                }
+                if total > 0 && pages.len() >= total {
+                    break; // все страницы пришли
+                }
+            }
+
+            let mut out = Vec::new();
+            pages.sort_by_key(|(i, _)| *i);
+            for (_idx, d) in pages {
+                out.extend_from_slice(&d);
+            }
+            if out.len() >= need {
+                return Ok(out);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        Err(Error::Protocol(
+            "клавиатура спит на линке 2.4G — нажмите клавишу и повторите".into(),
+        ))
+    }
+
+    /// Запись многостраничного блока `data` командой `cmd` (как write_multi_page).
+    fn wl_write_pages(&self, cmd: u8, data: &[u8]) -> Result<()> {
+        const REPORT: u8 = 0x13;
+        let total = (data.len() + 13) / 14;
+        for page_idx in 0..total {
+            let off = page_idx * 14;
+            let chunk = &data[off..(off + 14).min(data.len())];
+            let mut buf = [0u8; 20];
+            buf[0] = REPORT;
+            buf[1] = cmd;
+            buf[2] = total as u8;
+            buf[3] = page_idx as u8;
+            buf[4] = chunk.len() as u8;
+            buf[5..5 + chunk.len()].copy_from_slice(chunk);
+            self.bridge.send_output(&buf)?;
+            // Между страницами — пауза + проглатывание ACK (dnviti).
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.drain_input(40);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        Ok(())
+    }
+
+    /// Прочитать LED config ресивера (128 байт).
+    fn wl_led_config(&self) -> Result<Vec<u8>> {
+        let d = self.wl_read_pages(0x44, 128)?;
+        if d.len() < 128 {
+            return Err(Error::Protocol(format!(
+                "LED config прочитан неполностью: {} байт",
+                d.len()
+            )));
+        }
+        Ok(d[..128].to_vec())
+    }
+
+    /// Прочитать RGB-таблицу ресивера (~490 байт: 20 эффектов × 7 цветов × 3).
+    fn wl_rgb_table(&self) -> Result<Vec<u8>> {
+        let d = self.wl_read_pages(0x49, 480)?;
+        if d.len() < 480 {
+            return Err(Error::Protocol(format!(
+                "RGB table прочитана неполностью: {} байт",
+                d.len()
+            )));
+        }
+        Ok(d)
+    }
+
+    /// Маппинг host-режима на HW-эффект ресивера (селектор `led[10]`,
+    /// эмпирическая карта 2026-09-15).
+    fn wl_effect_for_mode(mode: RgbMode) -> u8 {
+        match mode {
+            RgbMode::Static => 0x03,       // Смена цветов (статично)
+            RgbMode::Breathing => 0x06,    // Дыхание
+            RgbMode::Wave => 0x10,         // Волны вправо-влево от центра
+            RgbMode::SpectrumCycle => 0x01, // Радужная статика
+            RgbMode::Ripple => 0x0A,       // Пульсация из центра
+            RgbMode::Rain => 0x05,         // Дождь
+            RgbMode::Reactive => 0x07,     // Мерцание разных букв (отклик)
+            RgbMode::Custom => 0x03,       // Ближайший статичный
+        }
+    }
+
+    /// Применить эффект/цвет/яркость/скорость в память ресивера (0x13).
+    /// Запись идёт сразу во флеш — держится без приложения. Порядок по
+    /// dnviti (cmd_set_led): LED config → RGB table → LED config ПОВТОРНО
+    /// ПОСЛЕДНИМ (иначе «LED changes flash and revert»).
+    fn wireless_apply_effect(
+        &self,
+        mode: RgbMode,
+        color: Option<Color>,
+        brightness: u8,
+        speed: u8,
+    ) -> Result<()> {
+        let mut led = self.wl_led_config()?;
+        // Селектор эффекта на ресивере — led[10] (эмпирика 2026-09-15).
+        led[10] = Self::wl_effect_for_mode(mode);
+        // UI-масштаб (0..=255) → шкала прошивки (0..=4).
+        let b = (((brightness as u16) * 4) / 255).min(4) as u8;
+        let s = (((speed as u16) * 4) / 255).min(4) as u8;
+        led[3] = b;
+        led[4] = s;
+        self.last_wl_brightness.set(b);
+        let want_color = color.is_some();
+        if let Some(c) = color {
+            led[6] = 0; // режим «одиночный цвет» (0=single)
+            let mut rgb = self.wl_rgb_table()?;
+            // Правим первый цветовой слот (offsets 0..2) у каждого эффекта —
+            // это и есть «выбранный цвет» для Steady/Breathing/… (dnviti).
+            for off in (0..rgb.len().saturating_sub(2)).step_by(21) {
+                rgb[off] = c.r;
+                rgb[off + 1] = c.g;
+                rgb[off + 2] = c.b;
+            }
+            self.wl_write_pages(0x09, &rgb)?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        // LED config пишем ПЕРВЫМ и ПОСЛЕДНИМ (dnviti: must be last to stick).
+        self.wl_write_pages(0x04, &led)?;
+        if want_color {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            self.wl_write_pages(0x04, &led)?;
+        }
+        Ok(())
+    }
+
+    /// Включить/выключить свет на ресивере в память.
+    /// НЕ только общая яркость led[3]: ресивер берёт яркость из слота
+    /// активного эффекта (пары `a` в RGB-таблице [58..125]), поэтому для
+    /// гашения зануляем `a` во ВСЕХ слотах, для включения — поднимаем `a=09`
+    /// (аналог журнала 10.36 для USB: «тумблер» — слоты эффектов, а не led[3]).
+    fn wireless_apply_light(&self, on: bool) -> Result<()> {
+        let mut led = self.wl_led_config()?;
+        led[3] = if on {
+            self.last_wl_brightness.get().max(1)
+        } else {
+            0
+        };
+        // Слоты эффектов: 34 пары (a=яркость слота, b=скорость|цвет) с offset 58.
+        for i in (58..=125).step_by(2) {
+            led[i] = if on { 0x09 } else { 0x00 };
+        }
+        self.wl_write_pages(0x04, &led)?;
         Ok(())
     }
 }
@@ -308,25 +585,23 @@ impl KeyboardDevice for AulaF75 {
     }
 
     fn get_battery_level(&self) -> Result<Option<u8>> {
-        self.cmd(0x33, &[0x00])?;
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        let report = self.bridge.read_feature(0x0F, 8)?;
-        // Байт [1]..[3] — заряд; если 0xFFFFFF или превышает 100 — недоступно.
-        if report.len() > 3 {
-            let raw = u32::from(report[1]) | (u32::from(report[2]) << 8) | (u32::from(report[3]) << 16);
-            if raw <= 100 {
-                return Ok(Some(raw as u8));
-            }
+        // Ресивер 2.4G (3554:FA09): отдельный канал output/input 0x13.
+        // Проводной канал (0x06) заряда не отдаёт — только ресивер.
+        if self.bridge.connection == ConnectionType::Wireless2_4G {
+            return self.wireless_battery();
         }
+        // USB/BT: канал заряда пока не найден (журнал 10.4), честно None.
         Ok(None)
     }
 
     // --- EEPROM ---------------------------------------------------------
-    // РЕАЛЬНАЯ запись конфига в память клавиатуры (эксперимент 10.24/10.25):
-    // снимаем снимок конфига, включаем подсветку (data[76]=09 — свет вкл по
-    // умолчанию, байт яркости найден в 10.28), пишем обратно через
-    // write_config(). Кик/перезапуск клавы и есть commit: после него подсветка
-    // держится БЕЗ запущенного приложения.
+    // РЕАЛЬНАЯ запись конфига в память клавиатуры (эксперимент 10.24/10.25).
+    // Свет вкл/выкл управляется СЛОТАМИ эффект-таблицы: у каждого эффекта в
+    // data[58..96] (шаг 2, пары (a,b)) лежит яркость a — 09 = полная, 00 =
+    // выкл. Эмпирика 2026-09-13: занулять надо ВСЕ слоты, иначе при
+    // переключении Fn+` свет возвращается (слот другого эффекта = 09).
+    // Маркер 5A A5 на data[126..127] и служебные data[98..125] не трогаем
+    // (затирание маркера = откат клавиатуры к заводскому дефолту).
     fn save_profile_to_eeprom(&self, _profile_id: u8) -> Result<()> {
         let snap = self.read_config()?;
         if snap.len() < 136 {
@@ -334,10 +609,9 @@ impl KeyboardDevice for AulaF75 {
         }
         let mut data = vec![0u8; 128];
         data.copy_from_slice(&snap[8..136]);
-        // data[76]: яркость активного эффекта (эмпирика 2026-09-12: 00 = свет
-        // выключен, 09 = полная яркость; единственный отличающийся байт между
-        // снимками «погашено Fn+Вниз» и «яркость макс. Fn+Вверх»).
-        data[76] = 0x09; // свет включён по умолчанию
+        for i in (58..98).step_by(2) {
+            data[i] = 0x09; // свет включён полной яркостью для всех эффектов
+        }
         self.write_config(&data)?;
         Ok(())
     }
@@ -349,9 +623,22 @@ impl KeyboardDevice for AulaF75 {
     }
 
     // Аппаратный эффект прошивки (селектор data[10]): пишем код эффекта
-    // и включаем свет — эффект держится в памяти и применяется сам после
-    // перезапуска/переподключения, без приложения (по Fn+\\ 2026-09-12).
+    // и включаем свет полной яркостью во всех слотах эффект-таблицы — эффект
+    // держится в памяти и применяется сам после перезапуска/переподключения,
+    // без приложения (по Fn+\\ 2026-09-12; слои яркости — 2026-09-13).
+    //
+    // Для РЕСИВЕРА 2.4G селектор другой — led[10] (WL_EFFECTS): пишем код
+    // эффекта через 0x13 сразу во флеш, свет включаем слотами [58..125].
     fn save_hardware_effect(&self, effect: u8) -> Result<()> {
+        if self.bridge.connection == ConnectionType::Wireless2_4G {
+            let mut led = self.wl_led_config()?;
+            // Селектор эффекта ресивера — led[10]; остальные байты полем-в-поле.
+            // Эмпирика 2026-09-15: запись ТОЛЬКО led[10] меняет эффект без кика;
+            // затирание led[1]/led[3]/слотов [58..125] вызывало перезапуск клавиатуры.
+            led[10] = effect;
+            self.wl_write_pages(0x04, &led)?;
+            return Ok(());
+        }
         let snap = self.read_config()?;
         if snap.len() < 136 {
             return Err(Error::Protocol("снимок конфига неполный".into()));
@@ -359,24 +646,76 @@ impl KeyboardDevice for AulaF75 {
         let mut data = vec![0u8; 128];
         data.copy_from_slice(&snap[8..136]);
         data[10] = effect; // селектор активного эффекта (эмпирика: 02/03/04/05/06/07/08/0A/0B)
-        data[76] = 0x09;   // свет включаем полной яркостью (байт яркости, 10.28)
+        for i in (58..98).step_by(2) {
+            data[i] = 0x09; // свет включаем полной яркостью для всех эффектов
+        }
         self.write_config(&data)?;
         Ok(())
     }
 
-    // Состояние подсветки в памяти (data[76]): 0x09 = вкл (полная яркость),
-    // 0x00 = выкл при старте. Найден эмпирически (журнал 10.28): «погашено
-    // Fn+Вниз» ↔ «яркость макс Fn+Вверх» отличаются ТОЛЬКО этим байтом.
+    // Состояние подсветки в памяти для ВСЕХ эффектов: яркость a в слотах
+    // эффект-таблицы data[58..96] (шаг 2). 0x09 = вкл (полная яркость),
+    // 0x00 = выкл при старте. Найдено эмпирически (журнал 2026-09-13):
+    // «погашено Fn+Вниз» ↔ «яркость макс Fn+Вверх» у активного эффекта
+    // меняет его слот; чтобы свет не возвращался при переключении эффектов
+    // Fn+`, яркость зануляется/восстанавливается у ВСЕХ слотов.
+    //
+    // Для РЕСИВЕРА 2.4G — те же слота [58..125] в LED config (0x13),
+    // запись во флеш через 0x04 (аналог wireless_apply_light, но по имени
+    // кнопки «Записать в память»/автосейва).
     fn save_hardware_light(&self, on: bool) -> Result<()> {
+        if self.bridge.connection == ConnectionType::Wireless2_4G {
+            return self.wireless_apply_light(on);
+        }
         let snap = self.read_config()?;
         if snap.len() < 136 {
             return Err(Error::Protocol("снимок конфига неполный".into()));
         }
         let mut data = vec![0u8; 128];
         data.copy_from_slice(&snap[8..136]);
-        data[76] = if on { 0x09 } else { 0x00 };
+        let level = if on { 0x09 } else { 0x00 };
+        for i in (58..98).step_by(2) {
+            data[i] = level;
+        }
         self.write_config(&data)?;
         Ok(())
+    }
+
+    // --- Персистентные хуки (ресивер 2.4G) ----------------------------
+    // Возвращают Ok(true), когда эффект/свет записан в память клавиатуры
+    // (host-стрим тогда не нужен) и Ok(false) — для проводного F75
+    // (там latch нет, работает host-рендеринг, см. 10.14/10.16).
+
+    // Применить эффект/цвет/яркость/скорость НАВСЕГДА (в память ресивера).
+    // Ресивер сразу пишет во флеш (dnviti) — эффект держится без приложения.
+    fn apply_rgb_persistent(
+        &self,
+        mode: RgbMode,
+        color: Option<Color>,
+        brightness: u8,
+        speed: u8,
+    ) -> Result<bool> {
+        match self.bridge.connection {
+            ConnectionType::Wireless2_4G => {
+                self.wireless_apply_effect(mode, color, brightness, speed)?;
+                Ok(true)
+            }
+            // Проводной F75 аппаратных эффектов без latch не умеет — пусть
+            // GUI/CLI гоняют host-рендеринг поверх движка.
+            _ => Ok(false),
+        }
+    }
+
+    // Выключить/включить свет НАВСЕГДА (яркость LED config ресивера).
+    fn apply_light_persistent(&self, on: bool) -> Result<bool> {
+        match self.bridge.connection {
+            ConnectionType::Wireless2_4G => {
+                self.wireless_apply_light(on)?;
+                Ok(true)
+            }
+            // Проводной F75 host-гашение (см. 10.30) — возвращаем Ok(false).
+            _ => Ok(false),
+        }
     }
 }
 

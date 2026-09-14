@@ -52,6 +52,13 @@ ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="01
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # ============================================================
+# Compx 2.4G Wireless Receiver (общий для AULA F75/F99)
+# ============================================================
+
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="3554", ATTR{idProduct}=="fa09", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
+# ============================================================
 # AULA F99
 # ============================================================
 
