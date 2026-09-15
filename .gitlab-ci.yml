@@ -1,0 +1,64 @@
+# --- CI для Keyboard-Center (GitLab) ---
+# Сборка/тесты Rust-пакета, который собирается Nix Flake + crane.
+# Локальный прогон: nix develop . --command cargo test --lib / cargo clippy --all-targets
+
+stages:
+  - check
+  - build
+
+variables:
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+
+# --- Тесты (быстрые, на каждый MR/ветку) -------------------------------
+test:
+  stage: check
+  image: nixos/nix:latest
+  before_script:
+    - nix --version
+  script:
+    - nix develop . --command cargo test --lib
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
+  cache:
+    key: nix-store
+    paths:
+      - /nix/store
+    policy: pull-push
+
+# --- Lint (clippy, без -D warnings) -------------------------------------
+clippy:
+  stage: check
+  image: nixos/nix:latest
+  before_script:
+    - nix --version
+  script:
+    - nix develop . --command cargo clippy --all-targets
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
+  cache:
+    key: nix-store
+    paths:
+      - /nix/store
+    policy: pull-push
+
+# --- Сборка пакета (оба бинарника: keyboard-center + kbc) --------------
+build:
+  stage: build
+  image: nixos/nix:latest
+  before_script:
+    - nix --version
+  script:
+    - nix build .#keyboard-center
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
+  cache:
+    key: nix-store
+    paths:
+      - /nix/store
+    policy: pull-push

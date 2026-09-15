@@ -106,6 +106,15 @@ pub fn build_settings_panel(
                 }
                 _ => {
                     battery_label.set_text("Батарея: не поддерживается");
+                    // Подсказка для USB (журнал 10.51): проводной канал 0x06
+                    // заряда не отдаёт — читается только 2.4G/BT.
+                    if dev.connection_type() == crate::types::ConnectionType::Usb {
+                        status.set_text(
+                            "По USB заряд не читается (проводной канал без данных о заряде). \
+                             Переключите клавиатуру на 2.4G или Bluetooth, чтобы увидеть процент.",
+                        );
+                        return;
+                    }
                 }
             }
             status.set_text(&format!("Обновлено. Заряд: {}", levels));

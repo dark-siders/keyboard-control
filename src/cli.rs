@@ -260,6 +260,12 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
                 None if dev.connection_type() == ConnectionType::Wireless2_4G => {
                     println!("батарея: нет ответа (клавиатура спит на линке — нажмите клавишу и повторите)");
                 }
+                None if dev.connection_type() == ConnectionType::Usb => {
+                    println!(
+                        "батарея по USB не читается (проводной канал без данных о заряде) — \
+                         переключите клавиатуру на 2.4G/BT"
+                    );
+                }
                 None => println!("батарея не поддерживается устройством"),
             }
             Ok(0)

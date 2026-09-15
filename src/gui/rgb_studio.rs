@@ -567,6 +567,10 @@ pub fn build_rgb_studio(
         let sel = hw_dd.selected();
         let was_off = off_s.get();
         let is_wl = hw_wl_save.get();
+        // Значения слайдеров яркости/скорости — для сохранения ВМЕСТЕ с эффектом
+        // (ресивер пишет их в слот активного эффекта; журнал 2026-09-15).
+        let bri = bright_scale.value() as u8;
+        let spd = speed_scale.value() as u8;
         let effects: &[(u8, &str)] = if is_wl {
             crate::devices::aula_f75::WL_EFFECTS
         } else {
@@ -610,7 +614,15 @@ pub fn build_rgb_studio(
                     .map_err(|e| format!("не удалось открыть устройство: {e}"))?;
                 match kind {
                     SaveKind::Effect(code) => {
-                        dev.save_hardware_effect(code).map_err(|e| e.to_string())?
+                        // Слайдеры яркости/скорости применяем вместе с эффектом
+                        // (для ресивера — слот активного эффекта в LED config;
+                        // для USB — слот эффект-таблицы).
+                        if is_wl {
+                            dev.save_effect_with_style(code, bri, spd)
+                                .map_err(|e| e.to_string())?;
+                        } else {
+                            dev.save_hardware_effect(code).map_err(|e| e.to_string())?
+                        }
                     }
                     SaveKind::LightOff => {
                         dev.save_hardware_light(false).map_err(|e| e.to_string())?

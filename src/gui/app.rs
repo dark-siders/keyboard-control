@@ -26,7 +26,16 @@ pub fn run_gtk() -> glib::ExitCode {
         .application_id(APP_ID)
         .build();
 
-    app.connect_activate(build_ui);
+    // Иконка приложения (обязательна для окон и прочих мест, где GTK
+    // запрашивает app icon). Имя совпадает с .desktop `Icon=keyboard-center`
+    // и файлом data/keyboard-center.svg, уложенным в hicolor через flake.
+    // ВАЖНО: вызывается в активации (GTK к этому моменту уже инициализирован
+    // внутри app.run()); статический вызов ДО run падает «GTK has not been
+    // initialized» (gtk-window.rs assert).
+    app.connect_activate(move |app| {
+        gtk::Window::set_default_icon_name("keyboard-center");
+        build_ui(app);
+    });
     app.run()
 }
 

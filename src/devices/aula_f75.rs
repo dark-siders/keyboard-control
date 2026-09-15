@@ -350,11 +350,17 @@ impl AulaF75 {
         let mut led = self.wl_led_config()?;
         // Селектор эффекта на ресивере — led[10] (эмпирика 2026-09-15).
         led[10] = Self::wl_effect_for_mode(mode);
-        // UI-масштаб (0..=255) → шкала прошивки (0..=4).
-        let b = (((brightness as u16) * 4) / 255).min(4) as u8;
+        // Яркость/скорость ЖИВУТ В СЛОТАХ ЭФФЕКТОВ: слот активного эффекта =
+        // [58 + 2*(led[10]-1)], пара (a=яркость, b=(speed<<4)|color). Записываем
+        // туда, НЕ трогая led[3]/led[4] (они на ресивере не используются,
+        // журнал 10.49, эмпирика 2026-09-15).
+        let slot = 58 + 2 * ((led[10] as usize).saturating_sub(1));
+        // UI-масштаб (0..=255) → шкала прошивки: яркость 0..=9, скорость 0..=4.
+        let b = (((brightness as u16) * 9) / 255).min(9) as u8;
         let s = (((speed as u16) * 4) / 255).min(4) as u8;
-        led[3] = b;
-        led[4] = s;
+        led[slot] = b;
+        // Сохраняем младшую тетраду b-байта (цвет) при перезаписи скорости.
+        led[slot + 1] = (s << 4) | (led[slot + 1] & 0x0F);
         self.last_wl_brightness.set(b);
         let want_color = color.is_some();
         if let Some(c) = color {
@@ -648,6 +654,43 @@ impl KeyboardDevice for AulaF75 {
         data[10] = effect; // селектор активного эффекта (эмпирика: 02/03/04/05/06/07/08/0A/0B)
         for i in (58..98).step_by(2) {
             data[i] = 0x09; // свет включаем полной яркостью для всех эффектов
+        }
+        self.write_config(&data)?;
+        Ok(())
+    }
+
+    // Сохранить эффект ВМЕСТЕ С яркостью и скоростью в память (GUI-кнопка
+    // «Записать в память»): ресивер 2.4G — пишем led[10] + слот активного
+    // эффекта [58+2*(led[10]-1)] (a=яркость, старшая тетрада b=скорость, цвет
+    // в младшей тетраде сохраняем). USB — тот же селектор data[10] + слот
+    // эффект-таблицы (журнал 10.28: слот яркости у активного эффекта).
+    fn save_effect_with_style(&self, effect: u8, brightness: u8, speed: u8) -> Result<()> {
+        if self.bridge.connection == ConnectionType::Wireless2_4G {
+            let mut led = self.wl_led_config()?;
+            led[10] = effect;
+            let slot = 58 + 2 * ((led[10] as usize).saturating_sub(1));
+            let b = (((brightness as u16) * 9) / 255).min(9) as u8;
+            let s = (((speed as u16) * 4) / 255).min(4) as u8;
+            led[slot] = b;
+            led[slot + 1] = (s << 4) | (led[slot + 1] & 0x0F);
+            self.last_wl_brightness.set(b);
+            self.wl_write_pages(0x04, &led)?;
+            return Ok(());
+        }
+        // USB: эффект + яркость/скорость активного слота эффект-таблицы.
+        let snap = self.read_config()?;
+        if snap.len() < 136 {
+            return Err(Error::Protocol("снимок конфига неполный".into()));
+        }
+        let mut data = vec![0u8; 128];
+        data.copy_from_slice(&snap[8..136]);
+        data[10] = effect;
+        let slot = 58 + 2 * ((effect as usize).saturating_sub(1));
+        if slot + 1 < 128 {
+            let b = (((brightness as u16) * 9) / 255).min(9) as u8;
+            let s = (((speed as u16) * 4) / 255).min(4) as u8;
+            data[slot] = b;
+            data[slot + 1] = (s << 4) | (data[slot + 1] & 0x0F);
         }
         self.write_config(&data)?;
         Ok(())
