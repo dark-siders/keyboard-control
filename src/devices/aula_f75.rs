@@ -423,11 +423,19 @@ impl KeyboardDevice for AulaF75 {
         self.read_config().is_ok()
     }
 
-    fn vid_pid(&self) -> (u16, u16) {
+fn vid_pid(&self) -> (u16, u16) {
         (self.bridge.vid, self.bridge.pid)
     }
 
-    // --- RGB --------------------------------------------------------
+    fn led_count(&self) -> usize {
+        RGB_LED_COUNT
+    }
+
+    fn led_cols(&self) -> usize {
+        RGB_COLS
+    }
+
+    // --- RGB ----------------------------------------------------------
     // Реальные команды: render_frame() (direct, подтверждён) + чтение конфига.
     // set_rgb_mode/color/brightness/speed — ВЫДУМАННЫЕ cmd-id, до реверса.
     fn render_frame(&self, colors: &[Color]) -> Result<()> {
@@ -800,17 +808,15 @@ impl Default for HostEffectParams {
 
 /// Один кадр host-эффекта: `Vec<Color>` длиной RGB_LED_COUNT.
 /// `t` — время в условных тиках (растёт со скоростью keepalive).
-///
-/// Эффекты реализованы как host-аналоги Windows-пресетов:
-///   Static       — все LED = base (с учётом brightness).
-///   Breathing    — синусоидальная модуляция яркости по времени.
-///   Wave         — бегущая волна: hue смещается по матрице по X.
-///   SpectrumCycle— «радуга»: hue бежит циклически по всем LED.
-///   Ripple       — расширяющееся кольцо от центра раскладки.
-///   Rain         — «дождь»: случайные LED вспыхивают и гаснут.
-///   Reactive     — «отклик»: капля, растекающаяся по матрице.
 pub fn host_frame(p: &HostEffectParams, t: u32) -> Vec<Color> {
-    let led = RGB_LED_COUNT;
+    host_frame_with(p, t, RGB_LED_COUNT, RGB_COLS)
+}
+
+/// То же, что `host_frame`, но с явными размерами матрицы (LED/колонки).
+/// F99 (96%, 113 LED) использует эту версию с собственными константами;
+/// host-движок одинаковый (тот же SinoWealth-чип, журнал 10.51).
+pub fn host_frame_with(p: &HostEffectParams, t: u32, led_count: usize, cols: usize) -> Vec<Color> {
+    let led = led_count;
     let mut out = Vec::with_capacity(led);
     let bright_k = p.brightness.max(1) as f32 / 255.0;
 
@@ -829,9 +835,9 @@ pub fn host_frame(p: &HostEffectParams, t: u32) -> Vec<Color> {
                 scale_c(p.base, k * bright_k)
             }
             RgbMode::Wave => {
-                // Волна hue по X-координате клавиши (i % COLS).
-                let col = (i % RGB_COLS) as f32;
-                let h = ((col / RGB_COLS as f32) * 360.0 + phase.to_degrees()) % 360.0;
+                // Волна hue по X-координате клавиши (i % cols).
+                let col = (i % cols) as f32;
+                let h = ((col / cols as f32) * 360.0 + phase.to_degrees()) % 360.0;
                 hsl(h, 1.0, 0.5, bright_k)
             }
             RgbMode::SpectrumCycle => {
@@ -840,11 +846,11 @@ pub fn host_frame(p: &HostEffectParams, t: u32) -> Vec<Color> {
                 hsl(h, 1.0, 0.5, bright_k)
             }
             RgbMode::Ripple => {
-                // Кольцевая волна от центра 75% матрицы.
-                let cx = RGB_COLS as f32 * 0.5;
-                let cy = (RGB_LED_COUNT / RGB_COLS) as f32 * 0.5;
-                let x = (i % RGB_COLS) as f32;
-                let y = (i / RGB_COLS) as f32;
+                // Кольцевая волна от центра матрицы.
+                let cx = cols as f32 * 0.5;
+                let cy = (led_count / cols) as f32 * 0.5;
+                let x = (i % cols) as f32;
+                let y = (i / cols) as f32;
                 let ring = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
                 let k = ((ring - phase).sin() * 0.5 + 0.5).powi(2);
                 scale_c(p.base, k * bright_k)
@@ -861,7 +867,7 @@ pub fn host_frame(p: &HostEffectParams, t: u32) -> Vec<Color> {
             }
             RgbMode::Reactive => {
                 // «Отклик»: капля у индекса фазы, растекается вокруг.
-                let cx = (phase * RGB_LED_COUNT as f32) as usize % RGB_LED_COUNT;
+                let cx = (phase * led_count as f32) as usize % led_count;
                 let dist = (i as i32 - cx as i32).unsigned_abs() as f32;
                 let k = (1.0 - dist / 12.0).max(0.0).powi(2);
                 scale_c(p.base, k * bright_k)

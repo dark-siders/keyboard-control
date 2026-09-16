@@ -102,32 +102,47 @@ impl Scanner {
         pid: u16,
         path: Option<&str>,
     ) -> Result<Box<dyn KeyboardDevice>, Box<dyn std::error::Error>> {
-        let bridge = match path {
+let bridge = match path {
             Some(p) => {
                 let cstr = std::ffi::CString::new(p)?;
-                HidBridge {
+                let mut bridge = HidBridge {
                     device: self.api.open_path(&cstr)?,
                     vid,
                     pid,
                     connection: find_device_info(vid, pid)
                         .map(|d| d.connection)
                         .unwrap_or(crate::types::ConnectionType::Usb),
+                    model: None,
+                };
+                // Общий PID 0x010C у F75/F99: определяем модель по ходу,
+                // чтобы матчер ниже собрал правильный драйвер.
+                if vid == 0x258A && pid == 0x010C {
+                    if let Ok(m) = bridge.detect_model() {
+                        bridge.model = Some(m);
+                    }
                 }
+                bridge
             }
             None => HidBridge::open(&self.api, vid, pid)?,
         };
 
         let info = find_device_info(vid, pid).expect("известный VID/PID");
+        let model = bridge.model;
         // Выбираем конкретную модель по VID/PID.
         match (info.vid, info.pid) {
-            (0x0328, _) => Ok(Box::new(AjazzAk820::open(bridge))),
-            // AULA F75 PID: 4B, 4C, 4D + ревизия 010C
-            (0x258A, 0x004B..=0x004D) | (0x258A, 0x010C) => Ok(Box::new(AulaF75::open(bridge))),
+            (0x0C45, _) => Ok(Box::new(AjazzAk820::open(bridge))),
+            // AULA F75 PID: 4B, 4C, 4D + ревизия 010C (010C делят F75/F99 —
+            // модель определяется по feature-запросу, см. HidBridge::detect_model)
+            (0x258A, 0x004B..=0x004D) => Ok(Box::new(AulaF75::open(bridge))),
+            (0x258A, 0x010C) => match model {
+                Some(0xA4) => Ok(Box::new(AulaF99::open(bridge))),
+                _ => Ok(Box::new(AulaF75::open(bridge))),
+            },
             // AULA F99 PID: 4E, 4F, 50
             (0x258A, 0x004E..=0x0050) => Ok(Box::new(AulaF99::open(bridge))),
             // 2.4G-ресивер Compx (3554:FA09) — общий для F75/F99
             (0x3554, 0xFA09) => Ok(Box::new(AulaF75::open(bridge))),
-            _ => Err("неподдерживаемое VID/PID".into()),
+            _ => Err("неподдерживаемый VID/PID".into()),
         }
     }
 

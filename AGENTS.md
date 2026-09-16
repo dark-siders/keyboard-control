@@ -1446,3 +1446,154 @@ pub trait KeyboardDevice {
 ### Правки этой сессии (git diff)
 - `AGENTS.md` — эта запись 10.52 + уточнение статусов батарей.
 - `README.md` — раздел «Известные ограничения» (батарея) и Roadmap (убран USB-пункт).
+
+## 10.53 РЕСЁРЧ AJAZZ AK820 PRO: НАЙДЕНЫ ПОЛНЫЕ ПРОТОКОЛЫ (web-поиск 2026-09-15)
+
+> Задача владельца: «поищи по интернету, может есть нужная информация по ajazz». Живого железа AK820 Pro у владельца по-прежнему нет. Всё — по открытым источникам, НЕ проверено на нашем железе.
+
+### Открытые проекты (живой протокол AK820 Pro)
+
+| Проект | Язык | Что даёт |
+|---|---|---|
+| **wsclx/ak820pro-modder** | Rust (macOS-first) | Самый полный: `docs/PROTOCOL.md` (байтовый), 20 эффектов, **per-key RGB (128 LED)**, keymap+Fn, макросы, **battery** (`ak820 info`), sleep, profile, **TFT upload** (пресеты; интерфейс 0xFF67). v0.7.0-beta: lighting/keymap/macros/system hardware-verified на fw 1.07 ISO-DE |
+| **gohv/EPOMAKER-Ajazz-AK820-Pro** | Rust (Linux) | CLI+GUI: lighting/sleep/clock. iface 3, feature reports. Протокол по TaxMachine + Wireshark pcap |
+| **MemerGamer/AjazzAk820ProUnofficialWebdriver** | TS/WebHID | Полная последовательность пакетов: `reset → configure → read-back → data → save → read-back`; 64-b **unnumbered** feature (report ID 0x00), usagePage **0xFF13**, iface 3; sync time, sleep |
+| **fwpb/ajazz-ak820-pro** | C/hardware RE | MCU **HFD80CP100 = Sonix SN32F299 clone**; пины bootloader под пробелом (ISP VID/PID `0C45:7140`); схема RGB-матрицы (PNP/NPN) |
+| **gusleig/ajazz-ak820-pro-mac** | Rust (macOS) | CLI + `docs/protocol.md`, `docs/REMAP-RESEARCH.md` (ремап открыт), screen clock |
+| **ESHAYAT102/ajazz-keyboard-omarchy-plugin** | Python | Транзакция с таймингом 35 мс: `04 18` start → `04 13` mode → 64-b payload → `04 02` save → `04 F0` finish, трейлер `AA 55`; udev/hidraw; протокол-тесты |
+| **KyleBoyer/TFTTimeSync-node** / **Beattrey/ajazz-ak820-config** | Node/WebHID | Clock sync; TFT time + image upload |
+
+### Ключевые факты для нашей реализации
+- **Battery у AK820 Pro ЧИТАЕТСЯ** (`ak820 info` → firmware + battery + profile) — в отличие от F75.
+- **Энкодер — firmware-fixed** Volume±/Mute («не в remappable slot space») — переназначить НЕЛЬЗЯ.
+- **TFT**: 0.85″ 128×128, контроллер GC9107, SPI, flash PY25Q128HA 16 MB (прошивка+конфиги+GIF-кадры). Wire-формат загрузки **декодирован** (wsclx Phase 5b/5c), но есть известная загвоздка с переключением дисплея на user-контент (chunk-header magic, был off-by-one в 0.7.0) — ВАЖНО: в точности как наш «commit/latch» у F75: кадры принимаются, видимая смена не происходит.
+- **Статичный цвет в память у AK820 Pro СОХРАНЯЕТСЯ** (save-команда есть и работает) — в отличие от AULA F75 (статика = host-only). Это наш аналог latch для Ajazz.
+- **Конец транзакции — маркер/трейлер** `AA 55` (ESHAYAT102) — структура пакета похожа на нашу (start→mode→payload→save→finish).
+- **VID/PID:** `0C45:8009` (wired + 2.4G), `0C45:FEFE` (BT), ISP-режим `0C45:7140`. Control-интерфейс: у gohv/MemerGamer — usagePage **0xFF13**, iface 3; у wsclx — **0xFF68**, iface 2 (TFT — 0xFF67). Расхождение = ревизии/прошивки — уточнять по живому `udev`/`lsusb`.
+- **Режимы:** 20 шт (Static включён!). `SET_LED_EFFECT` mode byte, per-key custom mode `0x80`.
+- **Раскладка:** протокол layout-agnostic; per-key RGB — 128-LED карта (как и ожидалось).
+
+### Что это значит для нашего проекта
+1. **`ajazz_ak820.rs` можно написать «по-настоящему»** (не заглушку): протокол задокументирован в wsclx PROTOCOL.md + gohv + MemerGamer. Не «выдуманные cmd-id» — а проверенные на живом железе авторами. Проверить на нашем — только когда устройство появится.
+2. **Screen Manager (TFT)** — формат загрузки есть (wsclx tft upload, 0xFF67-канал, chunked write, RGB565 128×128). Загвоздка «дисплей не переключается» — та же, что наш F75-header case: требует живой отладки.
+3. **Энкодер** в driver — только читать (Volume/Mute), не ремапить.
+4. **Battery** — добавить в GUI (как на ресивере F75).
+5. Расхождение iface/usage — зафиксировать в `HidBridge::open`-логике выбора командного канала (как для F75: usage 0xFF02/≥0xFF00 → fallback), при появлении железа.
+
+### Что НЕ делать (по-прежнему)
+- Слепой перебор по USB F75 (чётные адреса = переподключение).
+- Никаких ISP/write на живом F75 без явного разрешения владельца.
+- «Выдуманные» команды в ajazz_ak820.rs — только то, что есть в реальных PROTOCOL.md.
+
+### TODO-обновление (актуально)
+Формулировка пункта про Ajazz в списке обучаемых задач (см. выше «TODO»): «по ресёрчу — ПРОТОКОЛ НАЙДЕН; осталось перенести в драйвер и проверить на железе» (вместо «ВЫМЫСЕЛ»).
+
+## 10.54 AJAZZ AK820 PRO: ДРАЙВЕР ПЕРЕПИСАН НА wsclx + СБОРКА ОЧИЩЕНА (сессия 2026-09-16)
+
+> Задача: перенести проверенный протокол wsclx (fw 1.07, hardware-verified авторами; нашего железа нет) в драйвер вместо заглушки. Правки вносились сразу — общий рефакторинг под Ajazz (журнал 10.53). Сборка до правок была чистой (10.20 позиция).
+
+### Сделано (git diff, драйвер + инфраструктура)
+
+1. **VID/PID Ajazz по фактам ресёрча (было в заходе):**
+   - `99-keyboard-center.rules` — добавлены `0c45:8009` (wired + 2.4G), `0c45:fefe` (BT), `0c45:7140` (ISP — не продукт, только предупреждение).
+   - `src/devices/mod.rs` — реестр: `(0x0C45, 0x8009)` model «Ajazz AK820 Pro», connection Usb; `(0x0C45, 0xFEFE)` — Bluetooth; матчер в `build_device` — `(0x0C45, _)` → `AjazzAk820::open`.
+   - `src/devices/scanner.rs` — тот же матчер `(0x0C45, _)` → `AjazzAk820::open`; `assert_send::<AjazzAk820>()`.
+   - `src/devices/hid.rs` — PID→`ConnectionType` (0x8009→Usb, 0xFEFE→Bluetooth); ранг командного канала **0xFF68 = 4** (control Ajazz), 0xFF67 — только TFT, НЕ control.
+2. **Экран 128×128 (было в заходе):** `src/screen/converter.rs` `SCREEN_HEIGHT` 160→128; `src/gui/screen_manager.rs` подпись и preview.
+3. **`src/devices/ajazz_ak820.rs` — ПОЛНОСТЬЮ ПЕРЕПИСАН** (заглушка удалена, ~860 строк):
+   - Транспорт wsclx: 64-байтные output (REPORT_ID=0), кадр `[0xAA, cmd, len, addr_lo, addr_hi, 0, last, 0, payload…]`, ответ `0x55`, данные с байта 8; `get/set` (≤56 Б) и `get_many/set_many_at` (чанки 56 Б с инкрементом addr, двухфазная запись для макросов).
+   - Команды (cmd-модуль): GET_DEVICE_INFO=16, GET_GAME_MODE=17, GET_KEY=18, GET_CUSTOM_LED_DATA=20, GET_FN_KEY=22, SET_GAME_MODE=33, SET_KEY=34, SET_LED_EFFECT=35, SET_CUSTOM_LED_DATA=36, SET_MACRO=37, SET_FN_KEY=38, SET_TFT_USER_ANIMATION=80, SET_TFT_BUILT_IN_INDEX=81.
+   - Режимы AjazzMode (Off..Shuttle=0x00..0x13, Custom=0x80) + `led_effect_payload` (16 Б: mode, color×2, driverSetting=0xFF, color_mode, brightness≤5, speed≤5, direction, effect_mode_type, checkCode AA 55).
+   - **RGB:** set_rgb_mode/color/brightness/speed, `render_frame` (заливка custom-LED буфера 512 Б + Custom-режим), `get_rgb_preset` (реальные RgbPreset из types.rs).
+   - **Keymap/Fn:** slot кодировка (Page: Keyboard=2/Consumer=3/Macro=6/Tgl=10), чтение/запись BASE и FN по 128 слотов × 4 Б.
+   - **Macros:** index 100×4 Б + data (ACTION_BYTES=4: delay LE u16 + key_code + flags; флаги Keyboard press/release 0xB0/0x30, Mouse 0x90/0x10 — по wsclx, confirmed fw 1.07), двухфазная запись (index без commit → data с commit), лимит 320 Б/слот.
+   - **Screen (TFT):** set_screen_image — 256-байтный заголовок (count=1, terminator, pad 0xFF), пиксели RGB565 BE→LE переставляются, чанки 4096+8 Б на интерфейсе **0xFF67** (открывается напрямую через hidapi), после загрузки SET_TFT_BUILT_IN_INDEX [0] (известная загвоздка «дисплей не переключается» — live-отладка).
+   - **System:** set_sleep_timer (0/≤60/≤300/≤600/≤900/>900 → 0..5 байт game_mode[3]); **battery** — GET_DEVICE_INFO[17] (работает, в отличие от F75); save_profile_to_eeprom — честно `Unsupported` (Ajazz пишет во флеш сразу, save-слотов нет).
+   - **Persistent-хуки:** `apply_rgb_persistent`/`apply_light_persistent` → выполняют SET_LED_EFFECT (в память СРАЗУ) и возвращают `true` (host-стрим не нужен).
+   - **Unsupported честно (не выдуманы коды):** энкодер (firmware-fixed Volume/Mute), polling rate, debounce, sync времени, запись макроса на устройстве, яркость TFT.
+
+### Ошибки компиляции (найдены и исправлены в этой сессии)
+
+- **`enum MacroFamily` был объявлен внутри `impl AjazzAk820`** → Rust не разрешает (`enum is not supported in impl`); вынесен на уровень модуля, `wire_flags` стал методом `MacroFamily::wire_flags`.
+- **`cmd::SET_FN_KEY` не существовал** → добавлен (wsclx: `SET_FN_KEY = 38`; `GET_FN_KEY = 22` уже был).
+- **RgbPreset с полями `_unused`/`_p`** — костыль; убран, используется реальная структура из types.rs (name/mode/colors/brightness/speed).
+- Мёртвый код: `AjazzMode::name()` и `cmd::GET_MACRO` удалены; `MacroFamily::Mouse` помечен `#[allow(dead_code)]` (задел для мышиных макросов).
+
+### Сборка (NixOS, nix develop)
+- `cargo check --all-targets` — **0 ошибок, 0 warnings**.
+- `cargo test --lib` — **2/2** (RGB565, hex-color).
+- `cargo build --release` — **успех (50.99s)**: `target/release/kbc` + `target/release/keyboard-center`.
+
+### Проверка на железе — НЕВОЗМОЖНА (клавиатуры нет)
+- Живой тест (CLI/GUI, сканер, battery, RGB, TFT, keymap, макросы) — только когда AK820 Pro появится у владельца. По данным wsclx (fw 1.07) протокол должен работать как описано.
+- TFT-загрузка имеет известную загвоздку «после загрузки дисплей не переключается на user-контент» (chunk-header magic, off-by-one в wsclx 0.7.0) — аналог нашего F75-header case; требует живой отладки.
+
+### Открыто (вне этой задачи)
+- Живой тест Ajazz на железе; BT-канал; драйверы aula_f99; Screen Manager preview; откат временных правок ~/nixosniri (10.2); публикация в GitLab (по желанию).
+
+## 10.55 ПОДДЕРЖКА AULA F99: РЕАЛЬНЫЙ ДРАЙВЕР (сессия 2026-09-16)
+
+> Задача из TODO 10.32/10.51: заполнить драйвер F99 реальными командами вместо заглушки (все cmd-id 0x02…0x33/0xF0/0xF1 были выдуманы). Написание драйвера — на основе подтверждённого протокола F75 (тот же SinoWealth SH68F90 по KB.ini F99, журнал 10.51). Разрешение владельца: план из контекста задачи выполнен без предварительного показа правок.
+
+### Сделано (git diff): F99 — РЕАЛЬНЫЙ драйвер вместо заглушки
+
+1. **`src/devices/aula_f99.rs` — ПОЛНОСТЬЮ ПЕРЕПИСАН (277 → ~460 строк):**
+   - Транспорт тот же, что у F75 (feature-канал 0x06, ровно 520 байт): `packet()`, `read_config()`, `write_config()`.
+   - `render_frame()` — direct-канал (`06 08 00 00 01 00 7A 01` + RGB×N, пад до 520), N = **113 LED** (96% с NumPad, по OpenRGB `aula_f99_layout`; журнал 10.51).
+   - host-эффекты через общий движок `aula_f75::host_frame_with(&params, t, 113, 24)` — тем самым F99 получает все режимы (Static/Дыхание/Волна/Спектр/Риппл/Дождь/Реактивная) без дублирования кода.
+   - Запись в память (USB-путь, эмпирика F75): `save_profile_to_eeprom`, `save_hardware_effect` (селектор data[10]), `save_effect_with_style` (data[10] + слот [58+2*(effect-1)]: a=яркость, старшая тетрада b=скорость), `save_hardware_light` (все слоты [58..96] a=09/00) — «свет вкл/выкл в памяти» работает как на F75 (журнал 10.36), маркер 5A A5 не трогаем.
+   - `get_rgb_preset` — реальное чтение эффект-таблицы из конфига (не фейк-пресеты).
+   - **Убраны все выдуманные cmd-id** (0x02/0x03/0x04/0x05/0x10/0x11/0x20/0x30–0x33/0xF0/0xF1/0x21): для каждого нереализованного метода — честный `Err(Error::Unsupported(...))` с пояснением.
+   - `get_battery_level` → `Ok(None)` (USB-канала заряда нет вообще, журнал 10.52; 2.4G/ресивер обрабатывается AulaF75).
+   - `set_indicator` — честный Unsupported (протокол индикаторов не ревёрснут; выдуманный 0x21 удалён). `Indicator` enum сохранён как задел.
+   - `is_connected` — через реальный `read_config().is_ok()`, не через дешёвый read_feature.
+
+2. **`src/devices/mod.rs`** — в trait `KeyboardDevice` добавлены `led_count()` / `led_cols()` (дефолт 0) для параметризации host-рендеринга под матрицу устройства.
+
+3. **`src/devices/aula_f75.rs`** — переопределены `led_count() = 90`, `led_cols() = 22` (как константы). `host_frame()` оставлен как публичная обёртка (используется при желании), но CLI/GUI переведены на `host_frame_with`.
+
+4. **`src/cli.rs`** — `cmd_rgb`: хардкод `aula_f75::RGB_LED_COUNT`/`host_frame` заменён на `dev.led_count()`/`dev.led_cols()` + `host_frame_with`; цветовой кадр тоже строится по `dev.led_count()`. F99 теперь гоняет host-эффекты своей матрицей (113).
+
+5. **`src/gui/rgb_studio.rs`**:
+   - keepalive «Применить» — `host_frame_with(&params, t, dev.led_count(), dev.led_cols())`;
+   - «живой цвет»/палитра — кадры по `dev.led_count()`;
+   - «Выключить свет» — чёрный кадр/keepalive по `dev.led_count()` (F75=90, F99=113; хардкод 90 убран);
+   - чёрный keepalive при «Записать в память» (гашение) — кадр строится заново каждый тик с актуальным `dev.led_count()`.
+
+6. **`src/devices/scanner.rs`** — исправлен дубль-блок, оставшийся от предыдущей правки (дискрепа: дважды `let bridge = match path … match` в `open_device`, второй хвост `(0x258A, 0x010C) => AulaF75` удалён). Теперь match по model_id один: 010C → `Some(0xA4)`=F99, иначе F75.
+
+### Сборка
+- `cargo check --all-targets` — **0 ошибок, 0 warnings**.
+- `cargo test --lib` — **2/2** (RGB565, hex-color).
+- `cargo build --release` — **успех (51.27s)**: свежие `target/release/kbc` + `target/release/keyboard-center`.
+
+### Проверка на железе — НЕВОЗМОЖНА (F99 физически отсутствует)
+- Живой тест (сканер, RGB host-эффекты, запись в память USB) — только когда F99 появится у владельца. По данным KB.ini + OpenRGB протокол общий с F75, но модель F99 ещё предстоит подтвердить детекцией `0xA4` на реальной клавиатуре.
+
+### Открыто (вне этой задачи)
+- Живой тест F99 на железе; BT-канал; Screen Manager preview; откат временных правок ~/nixosniri (10.2); публикация в GitLab (по желанию).
+
+## 10.56 АУДИТ GUI: код согласован с устройствами; недоделанное зафиксировано (сессия 2026-09-16)
+
+> Задача владельца этой сессии: «работай сам (журнал + что успеешь по задачам)», «проверь GUI-код, запиши в журнал что не сделано». Живого железа нет — только чтение кода, правок в этой сессии в GUI НЕ вносилось. Сборка до аудита чистая (10.55).
+
+### ГЛАВНЫЙ ИТОГ аудита
+- **GUI (`src/gui/*`) НАПИСАН КОРРЕКТНО и согласован с драйверами** (F75/F99/Ajazz): все панели получают устройство через fetcher `Rc<dyn KeyboardDevice>`, ветки не поддерживаемые устройством честно деградируют в статус с ошибкой; тяжёлые HID-операции — в фоновых потоках/каналах; keepalive на поколении кадров `frame_gen` (безопасная остановка, см. 10.39). **Критических багов/рассинхронов с trait НЕ найдено.**
+- Сверено и работает: `populate_modes` используется (rgb_studio:217); apply/apply_cur/live_off повсеместно параметризованы через `dev.led_count()`/`dev.led_cols()` (F75=90, F99=113); сетка `rebuild_hw_model` под USB↔ресивер; иконка на окне; автосейв при закрытии.
+
+### НЕДОДЕЛАНО / НА БУДУЩЕЕ (код существует, но физически не проверен или не завершён):
+
+1. **Живой тест GUI на железе** — ничего из нового не гонялось на реальной клавиатуре (F75 на ПК владельца проверялся до 10.55; F99/Ajazz вообще нет). Приоритетно: RGB-студия «Применить»/«Выключить свет» для ресивера 2.4G (владелец: «слайдеры яркости/скорости + Записать в память» — подтверждено), затем host-эффекты F99 (113 LED), затем Ajazz (детекция, battery, RGB, TFT).
+2. **`kbc save --effect` для ресивера не пишет яркость/скорость** — только `save_hardware_effect` (led[10]); яркость/скорость через CLI на 2.4G доступны только в `kbc rgb` (`apply_rgb_persistent`). Нюанс оставлен; при желании добавить в CLI `save_effect_with_style`.
+3. **Батарея Bluetooth F75** — владелец не тестировал BT-режим вообще (сканер/протокол/заряд), канал не выяснен. Ajazz BT (`0c45:fefe`) — заряд читается через `GET_DEVICE_INFO[17]`, но проверить негде.
+4. **Ключевой редактор/макросы/энкодер в GUI** — код есть (keymap_editor.rs, интерфейсы `remap_key`/`set_fn_layer`/`set_macro`/`record_macro`/`stop_macro`/`set_encoder_action`), но: энкодер Ajazz firmware-fixed (Volume/Mute — переназначить нельзя), а для F75/F99 ремап-канал ПРОТОКОЛЬНО НЕ РЕВЁРСНУТ → GUI-кнопки стабильно выдают Unsupported. Не «провал», но и не «закрытая задача» — при появлении живого железа Ajazz попробовать keymap/macros.
+5. **Screen Manager (TFT Ajazz)** — панель и загрузка написаны, но «смена» на user-контент тайм-кода известна загвоздка (chunk-header magic, off-by-one, wsclx 0.7.0) — требует живой отладки. Сейчас любой нажатие «Прошить на экран» без железа = ошибка открытия.
+6. **Детекция F99 на живом железе** — `model_id 0xA4` (по OpenRGB) пока не подтверждена на реальной `258a:010c`; отличают по Psd/0xA4. До железа — фоновая детекция в `AulaF75::open`: 010C → проба PSD → F75/F99.
+7. **Откат временных правок `~/nixosniri`** (10.2: flake input keyboard-center + hosts/darkside_pc/default.nix) — не выполнен; ждёт решения владельца (оставлять ли Keyboard-Center в системном флейке).
+8. **Fedora + полная документация, публикация GitLab, релиз** — по плану «после всех задач» (10.47/10.32), не начато.
+9. **Документация экрана 160→128**: `README.md`/`docs/*` могут упоминать 160 (была правка converter SCREEN_HEIGHT 160→128 в рамках Ajazz, 10.54) — проверить тексты позже, в сессии документации.
+
+### Технические заметки аудита (зафиксировано, правки не нужны)
+- `device_panel.rs` импортирован в `src/gui/mod.rs`, но `build_device_list_box`/`build_connected_panel` **нигде не вызываются** (используется собственная `build_device_page` в app.rs) — мёртвый код-задел, не критично.
+- `build_color_picker`/`build_presets_list` (rgb_studio:1104/1160) — так же не подключены к UI (fallback-«пресеты» из 10.29 остаются референсом), не критично.
+- В `kbc save` короткий путь (без `--effect`) на **ресивере 2.4G** вызовет `save_profile_to_eeprom` (USB-путь, read_config → write_config 0x06) — на 2.4G это НЕ канал ресивера и даст ошибку Protocol/«спит на линке». Нюанс некритичный (ресивер → эффект сохраняется другими командами), но в будущем CLI стоит развести: ресивер → `apply_rgb_persistent`+яркость, USB → `save_profile_to_eeprom`.

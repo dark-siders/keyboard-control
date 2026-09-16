@@ -19,16 +19,17 @@ MODE="0664"
 # Ajazz AK820 Pro
 # ============================================================
 
-# USB
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", ATTR{idProduct}=="8207", \
+# Wired + 2.4 GHz dongle режим (один PID 0x8009 по ресёрчу wsclx,
+# VID 0x0C45 = Sonix SN32F299)
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="8009", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
-# 2.4 GHz Dongle
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", ATTR{idProduct}=="8208", \
+# Bluetooth HID
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="fefe", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
-# Bluetooth HID (ChromeOS / HID-over-GATT)
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", ATTR{idProduct}=="8209", \
+# ISP-режим (bootloader под пробелом, fwpb/ajazz-ak820-pro) — для отладки
+ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="7140", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # ============================================================

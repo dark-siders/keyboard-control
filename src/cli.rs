@@ -414,7 +414,7 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
         let c = keyboard_center::types::Color::from_hex_checked(color)
             .ok_or_else(|| anyhow::anyhow!("неверный цвет: {color} (ожидается RRGGBB)"))?;
         // Прямой (host-rendering) кадр: заливает ВСЕ LED заданным цветом.
-        let n = keyboard_center::devices::aula_f75::RGB_LED_COUNT;
+        let n = dev.led_count();
         let frame = vec![c; n];
         match dev.render_frame(&frame) {
             Ok(()) => println!("цвет {color} отправлен прямым кадром ({n} LED)"),
@@ -447,24 +447,26 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
     // с keepalive — пока CLI жив (Ctrl-C = выход).
     //
     if args.mode.is_some() || args.brightness.is_some() || args.speed.is_some() {
-        use keyboard_center::devices::aula_f75::{host_frame, HostEffectParams};
+        use keyboard_center::devices::aula_f75::{host_frame_with, HostEffectParams};
         let mode = parse_rgb_mode(args.mode.as_deref())?;
         let base = match &args.color {
             Some(color) => keyboard_center::types::Color::from_hex_checked(color)
                 .ok_or_else(|| anyhow::anyhow!("неверный цвет: {color} (ожидается RRGGBB)"))?,
             None => keyboard_center::types::Color::new(255, 90, 0),
         };
+        let n = dev.led_count();
+        let cols = dev.led_cols();
         let params = HostEffectParams {
             mode,
             base,
             brightness: args.brightness.unwrap_or(255),
             speed: args.speed.unwrap_or(60),
         };
-        println!("host-эффект: {mode:?} яркость={} скорость={} — keepalive до Ctrl-C",
+        println!("host-эффект: {mode:?} яркость={} скорость={} (матрица {n}×~{cols}) — keepalive до Ctrl-C",
                  params.brightness, params.speed);
         let mut t_ms = 0u32;
         loop {
-            let frame = host_frame(&params, t_ms);
+            let frame = host_frame_with(&params, t_ms, n, cols);
             dev.render_frame(&frame)?;
             std::thread::sleep(std::time::Duration::from_millis(500));
             t_ms += 500;

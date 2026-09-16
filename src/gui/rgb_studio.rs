@@ -500,16 +500,18 @@ pub fn build_rgb_studio(
                     );
                     return;
                 }
-                // USB: host-rendering (аппаратной эффект-таблицы у F75 нет,
+                // USB: host-rendering (аппаратной эффект-таблицы у F75/F99 нет,
                 // latch не найден) — режим/яркость/скорость рендерим НА ХОСТЕ
                 // и гоним кадрами через render_frame()-канал с keepalive.
-                use crate::devices::aula_f75::{host_frame, HostEffectParams};
+                use crate::devices::aula_f75::{host_frame_with, HostEffectParams};
                 let params = HostEffectParams {
                     mode,
                     base,
                     brightness,
                     speed,
                 };
+                let n_leds = dev.led_count();
+                let n_cols = dev.led_cols();
                 // ВАЖНО (фикс 10.21): при повторном «Применить» НАДО
                 // останавливать прежний keepalive-поток и запускать новый,
                 // иначе новые режим/яркость/скорость не применятся (старый
@@ -529,7 +531,7 @@ pub fn build_rgb_studio(
                         if gen_f.get() != my_gen {
                             return glib::ControlFlow::Break;
                         }
-                        let frame = host_frame(&params, t_ms);
+                        let frame = host_frame_with(&params, t_ms, n_leds, n_cols);
                         t_ms += 500;
                         if let Some(dev) = dev_fetch() {
                             if dev.render_frame(&frame).is_err() {
@@ -643,10 +645,6 @@ pub fn build_rgb_studio(
         let st = status_s.clone();
         let gen_r = frame_gen_s.clone();
         let dev_fetch = fetcher3.clone();
-        let black = Rc::new(vec![
-            Color::new(0, 0, 0);
-            crate::devices::aula_f75::RGB_LED_COUNT
-        ]);
         let need_off = was_off && sel == 0;
         // Отдельный клон set_device для вложенных timer-замыканий: Rc не Copy,
         // move-внутрь таймера нельзя прямо из внешнего Fn-closeure (E0507).
@@ -701,7 +699,6 @@ pub fn build_rgb_studio(
                             let set_k = sd.clone();
                             let rx_store = Rc::new(RefCell::new(None));
                             let rx_s = rx_store.clone();
-                            let black2 = black.clone();
                             let gen_k = gen_r.clone();
                             gtk::glib::timeout_add_local(
                                 std::time::Duration::from_millis(400),
@@ -714,7 +711,12 @@ pub fn build_rgb_studio(
                                     drain_reopen(&rx_s, &*set_k);
                                     match fetch_k() {
                                         Some(dev) => {
-                                            if dev.render_frame(&black2).is_err() {
+                                            // Чёрный кадр строим по размеру матрицы
+                                            // устройства (F75=90, F99=113) — хардкод
+                                            // убран при параметризации 10.55.
+                                            let black =
+                                                vec![Color::new(0, 0, 0); dev.led_count()];
+                                            if dev.render_frame(&black).is_err() {
                                                 // канал переживает пересоздание либо
                                                 // открылся не тот интерфейс — фон
                                                 // сам переоткроет и гаснуть продолжим
@@ -783,7 +785,8 @@ pub fn build_rgb_studio(
     });
 
     // --- Живой цвет: обработчики ---------------------------------------
-    let frame_capacity = crate::devices::aula_f75::RGB_LED_COUNT;
+    // Размер кадра берём из устройства (F75=90, F99=113) — хардкод
+    // RGB_LED_COUNT убран при параметризации (журнал 10.55).
 
     // Общий «включить текущий цвет из поля ввода» (палитра и кнопка).
     let apply_cur: Rc<dyn Fn()> = {
@@ -868,13 +871,14 @@ pub fn build_rgb_studio(
                 );
                 return;
             }
-            let frame = vec![color; frame_capacity];
+            let n_leds = dev.led_count();
+            let frame = vec![color; n_leds];
             if let Err(e) = dev.render_frame(&frame) {
                 status_a.set_text(&format!("Ошибка отправки кадра: {e}"));
                 return;
             }
             *color_a.borrow_mut() = Some(color);
-            status_a.set_text(&format!("Кадр #{:06X} отправлен ({frame_capacity} LED)…", color.to_argb() & 0xFF_FFFF));
+            status_a.set_text(&format!("Кадр #{:06X} отправлен ({n_leds} LED)…", color.to_argb() & 0xFF_FFFF));
             // Запускаем keepalive: поток кадров каждые 400 мс.
             let gen_k = gen_c.clone();
             let color_b = color_a.clone();
@@ -891,7 +895,7 @@ pub fn build_rgb_studio(
                     let Some(dev) = dev_fetch() else {
                         return glib::ControlFlow::Break;
                     };
-                    if dev.render_frame(&vec![c; frame_capacity]).is_err() {
+                    if dev.render_frame(&vec![c; dev.led_count()]).is_err() {
                         return glib::ControlFlow::Break;
                     }
                     glib::ControlFlow::Continue
@@ -1022,7 +1026,7 @@ pub fn build_rgb_studio(
             return;
         }
         // Чёрный кадр гасит все LED сейчас.
-        let black = vec![Color::new(0, 0, 0); frame_capacity];
+        let black = vec![Color::new(0, 0, 0); dev.led_count()];
         if let Err(e) = dev.render_frame(&black) {
             status_off.set_text(&format!("Ошибка отправки кадра: {e}"));
             return;
@@ -1036,6 +1040,7 @@ pub fn build_rgb_studio(
         // (флеш применяется только при полном отключении питания, 10.28).
         let gen_k = gen_off.clone();
         let dev_fetch = fetcher6.clone();
+        let black_ka = black.clone();
         gtk::glib::timeout_add_local(
             std::time::Duration::from_millis(400),
             move || {
@@ -1044,6 +1049,12 @@ pub fn build_rgb_studio(
                 }
                 let Some(dev) = dev_fetch() else {
                     return glib::ControlFlow::Break;
+                };
+                // Кадр строим по актуальному размеру матрицы устройства.
+                let black = if black_ka.len() == dev.led_count() {
+                    black_ka.clone()
+                } else {
+                    vec![Color::new(0, 0, 0); dev.led_count()]
                 };
                 if dev.render_frame(&black).is_err() {
                     return glib::ControlFlow::Break;

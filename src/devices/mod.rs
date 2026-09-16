@@ -97,6 +97,11 @@ pub trait KeyboardDevice: Send {
     }
     /// Получить список встроенных пресетов.
     fn get_rgb_preset(&self) -> Result<Vec<RgbPreset>>;
+    /// Количество светодиодов в матрице подсветки (для host-рендеринга).
+    /// 0 — устройство не сообщает (host-карт F99/F75 знать не обязательно).
+    fn led_count(&self) -> usize { 0 }
+    /// Количество колонок в раскладке (для host-эффектов волны). 0 — неизвестно.
+    fn led_cols(&self) -> usize { 0 }
 
     // --- Keymap / Fn -----------------------------------------------------
     /// Переназначить клавишу.
@@ -197,10 +202,13 @@ pub trait KeyboardDevice: Send {
 /// Карточка устройства для реестра (VID/PID → модель).
 pub const DEVICES: &[DeviceInfo] = &[
     // --- Ajazz AK820 Pro ---
+    // Реальные VID/PID по wsclx/ak820pro-modder (Sonix SN32F299):
+    //   0C45:8009 — wired + 2.4 GHz (один PID на оба режима, журнал 10.53);
+    //   0C45:FEFE — Bluetooth; 0C45:7140 — ISP-режим (не продукт).
     DeviceInfo {
         model: "Ajazz AK820 Pro",
-        vid: 0x0328,
-        pid: 0x8207,
+        vid: 0x0C45,
+        pid: 0x8009,
         connection: ConnectionType::Usb,
         layout: Layout::L75,
         has_screen: true,
@@ -209,18 +217,8 @@ pub const DEVICES: &[DeviceInfo] = &[
     },
     DeviceInfo {
         model: "Ajazz AK820 Pro",
-        vid: 0x0328,
-        pid: 0x8208,
-        connection: ConnectionType::Wireless2_4G,
-        layout: Layout::L75,
-        has_screen: true,
-        has_encoder: true,
-        has_indicators: false,
-    },
-    DeviceInfo {
-        model: "Ajazz AK820 Pro",
-        vid: 0x0328,
-        pid: 0x8209,
+        vid: 0x0C45,
+        pid: 0xFEFE,
         connection: ConnectionType::Bluetooth,
         layout: Layout::L75,
         has_screen: true,
@@ -336,9 +334,17 @@ pub fn open_bridge(vid: u16, pid: u16) -> Result<HidBridge> {
 /// главном GTK-потоке после того, как мост доставил фоновый поток.
 pub fn build_device(bridge: HidBridge) -> Result<Box<dyn KeyboardDevice>> {
     let (vid, pid) = (bridge.vid, bridge.pid);
+    // Проводной F75 И F99 сидят на ОДНОМ PID 0x010C (KB.ini, журнал 10.51):
+    // модель определена при открытии моста (HidBridge::detect_model, поле
+    // model: 0xCD=F75, 0xA4=F99). При отсутствии данных по умолчанию — F75.
+    let model = bridge.model;
     let dev: Box<dyn KeyboardDevice> = match (vid, pid) {
-        (0x0328, _) => Box::new(ajazz_ak820::AjazzAk820::open(bridge)),
-        (0x258A, 0x004B..=0x004D | 0x010C) => Box::new(aula_f75::AulaF75::open(bridge)),
+        (0x0C45, _) => Box::new(ajazz_ak820::AjazzAk820::open(bridge)),
+        (0x258A, 0x004B..=0x004D) => Box::new(aula_f75::AulaF75::open(bridge)),
+        (0x258A, 0x010C) => match model {
+            Some(0xA4) => Box::new(aula_f99::AulaF99::open(bridge)),
+            _ => Box::new(aula_f75::AulaF75::open(bridge)),
+        },
         (0x258A, 0x004E..=0x0050) => Box::new(aula_f99::AulaF99::open(bridge)),
         // 2.4G-ресивер Compx (3554:FA09) — обслуживает F75/F99: командный канал
         // output/input 0x13; батарея через CMD 0x05/PSD (см. aula_f75::wireless_battery).

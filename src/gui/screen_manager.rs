@@ -34,7 +34,7 @@ pub fn build_screen_manager(
     title.set_halign(gtk::Align::Start);
     panel.append(&title);
 
-    let subtitle = gtk::Label::new(Some("Загрузите изображение или GIF-анимацию для TFT-экрана 0.85\" (128×160)"));
+    let subtitle = gtk::Label::new(Some("Загрузите изображение или GIF-анимацию для TFT-экрана 0.85\" (128×128)"));
     subtitle.add_css_class("dim-label");
     subtitle.set_halign(gtk::Align::Start);
     panel.append(&subtitle);
@@ -47,7 +47,7 @@ pub fn build_screen_manager(
     // Превью
     let preview = gtk::DrawingArea::builder()
         .width_request(128 * 3)
-        .height_request(160 * 3)
+        .height_request(128 * 3)
         .hexpand(true)
         .vexpand(false)
         .build();

@@ -1,5 +1,5 @@
 // --- Конвертер картинок для TFT-экрана Ajazz AK820 Pro ---
-// Принимает GIF / PNG / JPEG / BMP, ресайзит под экран (128×160),
+// Принимает GIF / PNG / JPEG / BMP, ресайзит под экран (128×128),
 // конвертирует в RGB565 (big-endian), поддерживает анимации GIF.
 
 use image::{AnimationDecoder, DynamicImage, ImageFormat};
@@ -7,9 +7,10 @@ use std::io::Cursor;
 
 pub use image::{Frames, Rgba};
 
-/// Разрешение TFT-экрана Ajazz AK820 Pro.
+/// Разрешение TFT-экрана Ajazz AK820 Pro (wsclx tft.rs: 128×128,
+/// панель NFP085B-10AF / GC9107, журнал 10.53).
 pub const SCREEN_WIDTH: u16 = 128;
-pub const SCREEN_HEIGHT: u16 = 160;
+pub const SCREEN_HEIGHT: u16 = 128;
 
 /// Один кадр анимации в RGB565.
 #[derive(Debug, Clone)]
