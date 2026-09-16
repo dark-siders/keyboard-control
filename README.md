@@ -220,6 +220,99 @@ cargo build --release
 
 Готовые бинарники: `target/release/kbc`, `target/release/keyboard-center`.
 
+### Вариант 5 — Fedora / любой дистрибутив без nix (Makefile + fedora_install.sh)
+
+**Полный пошаговый сценарий** (Fedora 40/41+, аналогично других дистрибутивах с `dnf`).
+
+#### Шаг 1. Разрешения на доступ к клавиатуре (группа `plugdev`)
+
+Доступ к `/dev/hidraw` без root даёт группа `plugdev` и udev-правила `99-keyboard-center.rules`.
+Скрипт установки создаёт правило через флаг `--system`, а группу нужно сделать один раз:
+
+```bash
+sudo groupadd plugdev           # ошибка «уже существует» — не страшно
+sudo usermod -aG plugdev $USER
+```
+
+> [!IMPORTANT]
+> После добавления в `plugdev` нужно **перелогиниться** (группа применяется только к новой сессии).
+> Проверка: `id -nG` должен содержать `plugdev`. Быстрый временный способ без перелогина —
+> обернуть команду: `sg plugdev -c "kbc list"`.
+
+#### Шаг 2. Установка зависимостей
+
+Либо автоматически, флагом скрипта (ставит Rust, GTK4/Libadwaita dev-пакеты и hidapi):
+
+```bash
+sudo ./fedora_install.sh --install-deps
+```
+
+Либо вручную, чтобы контролировать состав:
+
+```bash
+sudo dnf install gcc gtk4-devel libadwaita-devel hidapi-devel glib2-devel \
+                 cairo-devel pango-devel gdk-pixbuf2-devel libudev-devel
+```
+
+(`rust`/`cargo`, если ещё не стоят: `sudo dnf install rust cargo` — их тоже ставит `--install-deps`.)
+
+#### Шаг 3. Сборка
+
+```bash
+make release            # = cargo build --release
+```
+
+Готовые бинарники: `target/release/kbc`, `target/release/keyboard-center`.
+
+#### Шаг 4а. Установка для своего пользователя (без sudo)
+
+```bash
+./fedora_install.sh --user
+```
+
+Ставит `kbc`/`keyboard-center` в `~/.local/bin`, `.desktop` и иконку в `~/.local/share`.
+**Udev-правило так не ставится** — без него hidraw не откроется даже с группой `plugdev`.
+Решите разово (нужен sudo):
+
+```bash
+sudo ./fedora_install.sh --udev-only   # только 99-keyboard-center.rules + reload/trigger
+```
+
+#### Шаг 4б. Системная установка (все сразу, нужен sudo)
+
+```bash
+sudo ./fedora_install.sh --system
+```
+
+Ставит бинарники в `/usr/local/bin`, глобальный `.desktop`+иконку и udev-правила
+(с перезагрузкой правил и триггером). Сочетается с шагом 2:
+
+```bash
+sudo ./fedora_install.sh --install-deps --system   # всё в одной команде
+```
+
+#### Шаг 5. Проверка
+
+```bash
+kbc list                  # видит поддерживаемые клавиатуры (после перелогина)
+keyboard-center           # запуск GUI
+```
+
+Полезные таргеты Makefile:
+
+| Цель | Что делает |
+|---|---|
+| `make build` / `make release` | debug / оптимизированная сборка |
+| `make check` | `cargo check --all-targets` |
+| `make test` | `cargo test --lib` |
+| `make install-user` | локальная установка без sudo |
+| `make install` | системная установка (`fedora_install.sh --system`) |
+| `make install-udev` | только udev-правила |
+| `make install-deps` | установка зависимостей через dnf (`fedora_install.sh --install-deps`) |
+| `make uninstall` | удаление установленного |
+
+Параметры `fedora_install.sh`: `--user` (по умолчанию), `--system`, `--udev-only`, `--install-deps` (поставить системные зависимости через dnf), `--uninstall`, `--dry-run` (показать действия без изменений).
+
 ---
 
 ## Работа с несколькими моделями
@@ -241,6 +334,8 @@ AULA F75            258A:010C   # USB, «BY Tech Gaming Keyboard»
 keyboard-control/
 ├── AGENTS.md                 # внутренняя документация/журнал (для агента)
 ├── Cargo.toml                # Rust: gtk4, libadwaita, hidapi, image, clap...
+├── Makefile                  # сборка/установка без nix (для Fedora и др.)
+├── fedora_install.sh         # установщик Fedora: зависимости (dnf) + бинарники + udev + .desktop
 ├── flake.nix                 # Nix Flake: packages, nixosModules, homeManagerModules
 ├── default.nix               # легаси-обёртка без флейка (nix-build)
 ├── 99-keyboard-center.rules  # udev-правила (доступ к hidraw)
@@ -304,7 +399,7 @@ keyboard-control/
 - [x] GUI RGB-студия: пресеты, слайдеры, автосохранение при закрытии
 - [ ] AULA F99 (подтверждение драйвера на железе)
 - [ ] Ajazz AK820 Pro: RGB, Screen Manager (TFT), энкодер, статика в память
-- [ ] Финальная документация для сборки на Fedora (без флейка)
+- [x] Финальная документация для сборки на Fedora (без флейка): Makefile + fedora_install.sh
 
 ---
 

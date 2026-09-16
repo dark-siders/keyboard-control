@@ -62,3 +62,21 @@ build:
     paths:
       - /nix/store
     policy: pull-push
+
+# --- Fedora: проверка, что пакет собирается без nix (dnf + cargo) ------
+# Свежий Fedora-контейнер: ставим системные dev-пакеты (как это делает
+# fedora_install.sh --install-deps), затем обычный cargo build/test.
+fedora-build:
+  stage: build
+  image: fedora:latest
+  before_script:
+    - dnf install -y rust cargo gcc pkgconf make \
+        gtk4-devel libadwaita-devel glib2-devel gdk-pixbuf2-devel \
+        cairo-devel pango-devel hidapi-devel libudev-devel
+  script:
+    - cargo build --release --all-targets
+    - cargo test --lib
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH

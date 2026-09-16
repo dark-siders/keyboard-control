@@ -1597,3 +1597,63 @@ pub trait KeyboardDevice {
 - `device_panel.rs` импортирован в `src/gui/mod.rs`, но `build_device_list_box`/`build_connected_panel` **нигде не вызываются** (используется собственная `build_device_page` в app.rs) — мёртвый код-задел, не критично.
 - `build_color_picker`/`build_presets_list` (rgb_studio:1104/1160) — так же не подключены к UI (fallback-«пресеты» из 10.29 остаются референсом), не критично.
 - В `kbc save` короткий путь (без `--effect`) на **ресивере 2.4G** вызовет `save_profile_to_eeprom` (USB-путь, read_config → write_config 0x06) — на 2.4G это НЕ канал ресивера и даст ошибку Protocol/«спит на линке». Нюанс некритичный (ресивер → эффект сохраняется другими командами), но в будущем CLI стоит развести: ресивер → `apply_rgb_persistent`+яркость, USB → `save_profile_to_eeprom`.
+
+## 10.57 СБОРКА НА FEDORA: Makefile + fedora_install.sh + документация (сессия 2026-09-17)
+
+> Задача из TODO 10.47 п.3 («Fedora + полная документация после всех задач») — начата досрочно по решению владельца: выбрать «Makefile → fedora_install.sh → документация». Фокус — сборка и установка без nix (dnf + cargo), правки ТОЛЬКО в репозитории. Rust-код в этой сессии НЕ менялся (рефакторинг только по скриптам).
+
+### Что добавлено (новые файлы — вне индекса ранее, по желанию владельца)
+
+1. **`Makefile`** (новый) — канонические таргеты без nix:
+   - `build` / `release` — debug / оптимизированная сборка;
+   - `check` (`cargo check --all-targets`), `test` (`cargo test --lib`);
+   - `install` (`fedora_install.sh --system`, нужен sudo), `install-user` (без sudo), `install-udev`, `uninstall`, `clean`, `help`.
+   - Переменные: `CARGO ?= cargo`, `INSTALLER ?= ./fedora_install.sh`, `PREFIX ?= /usr/local`. Переменную `INSTALL` переименовал в `INSTALLER` (конфликт с конвенцией GNU make).
+2. **`fedora_install.sh`** (новый, `chmod +x`) — установщик для Fedora/дистрибутивов без nix:
+   - режимы `--user` (по умолчанию, в `~/.local/bin` + `~/.local/share`), `--system` (нужен root: `/usr/local/bin`, `/etc/udev/rules.d`, глобальные .desktop/иконка), `--udev-only`, `--uninstall`, `--dry-run` (показ без изменений), `--help`.
+   - если `cargo` найден — собирает `cargo build --release` сам; иначе берёт готовые бинарники из `target/release/` (с проверкой существования).
+   - при `--system` требует root (проверка `id -u`), в dry-run root не требуется; udev перезагрузка через `udevadm control --reload-rules` + `udevadm trigger`.
+   - памятка в конце: группа `plugdev`, `usermod -aG`, перелогин или `sg plugdev -c "kbc list"`.
+   - защита корректности: `set -euo pipefail`, проверка наличия исходных файлов. Синтаксис `bash -n` — OK.
+3. **`README.md`** — добавлен **«Вариант 5 — Fedora / любой дистрибутив без nix»**:
+   - `dnf install gcc gtk4-devel libadwaita-devel hidapi-devel glib2-devel cairo-devel pango-devel gdk-pixbuf2-devel libudev-devel`;
+   - `make release` + `./fedora_install.sh --user` / `sudo ./fedora_install.sh --system`;
+   - таблица таргетов Makefile + параметры fedora_install.sh;
+   - дерево проекта пополнено (`Makefile`, `fedora_install.sh`); Roadmap п. «Fedora» закрыт как «сделано».
+
+### Тесты (NixOS, nix develop)
+- `cargo check --all-targets` — 0 ошибок, 0 warnings (правки Rust-кода не было, сборка подтверждает целостность).
+- `cargo test --lib` — 2/2.
+- `./fedora_install.sh --dry-run --user / --system / --udev-only / --uninstall` — логика всех веток проверена (dry-run-вывод корректен).
+- `make -n build / install-user` — корректная цепочка команд; `make help` работает.
+- На реальной Fedora не тестировалось (машины нет; правки — по dnf-пакетам из ресёрча). Утвердительные проверки на Fedora — когда появится окружение (возможно, стоит проверить через ненадолго поднимаемый container/QEMU).
+
+### Открыто (вне этой сессии)
+- Реальная сборка/проверка на Fedora (container или живой машине).
+- Остальные пункты TODO 10.47: Ajazz-проводник уже готов (см. 10.48), иконка уже висит в Window default (10.48), документировать подключение по флейку выполнено ранее — актуально лишь «полная документация/публикация».
+- Откат временных правок ~/nixosniri, батарея BT, драйверы F99/Ajazz на живом железе — см. 10.32 «Нужно ДОРАБОТАТЬ».
+
+## 10.58 FEDORA: переименование в fedora_install.sh + авто-стак зависимостей + CI-сборка (сессия 2026-09-17)
+
+> Правки по просьбе владельца: (1) переименовать установщик в `fedora_install.sh` (install.sh удалён), (2) скрипт должен сам ставить все системные зависимости для сборки, (3) добавить CI-задачу, собирающую проект на Fedora — чтобы гарантированно убедиться в проходимости сборки.
+
+### Переименование
+- `install.sh` → **`fedora_install.sh`** (прог. часть). Обновлены все ссылки в README (Вариант 5, параметры, таблица таргетов, дерево проекта, Roadmap) и Makefile (`INSTALLER ?= ./fedora_install.sh`, `help`-тексты, добавлен таргет `install-deps`). В журнале AGENTS.md старые упоминания `install.sh` заменены (sed).
+
+### Автоустановка зависимостей ($ install.sh --install-deps)
+- Новый флаг **`--install-deps`**: через `dnf install -y` ставит всё, что нужно сборке Rust+GTK4/hidapi на Fedora:
+  `rust cargo gcc pkgconf gtk4-devel libadwaita-devel glib2-devel gdk-pixbuf2-devel cairo-devel pango-devel hidapi-devel libudev-devel` (ровно те dev-пакеты, что в flake.nix buildInputs — GTK4, libadwaita, cairo, pango, gdk-pixbuf, udev).
+- Сочетается с режимами: `sudo ./fedora_install.sh --install-deps --system` (всё сразу), `--udev-only --install-deps`, либо `--install-deps` отдельно (только стак, без установки).
+- Код: новые `INSTALL_DEPS`/`MODE_SET` в арг-парсере; блок dnf после проверки исходников; требует root (кроме dry-run); если `.MODE_SET==0` (только deps) — выход после установки пакетов.
+
+### CI: fedora-build (.gitlab-ci.yml)
+- Добавлен джоб `fedora-build` (stage build, image `fedora:latest`): `dnf install` тех же dev-пакетов → `cargo build --release --all-targets` → `cargo test --lib`. Те же `rules`, что у остальных джобов (MR/default branch/любая ветка). Проверяет реальную сборку вне nix-окружения.
+- Существующие джобы (nix test/clippy/build) не тронуты.
+
+### Проверки
+- `bash -n fedora_install.sh` — OK; `--help`/`--dry-run --install-deps --user`/`--dry-run --install-deps` (выход после deps) отработали.
+- `make -n install-user` → `./fedora_install.sh --user`; `make help` показывает `install-deps`.
+- `.gitlab-ci.yml` прошёл парсинг YAML (`js-yaml` через node, /tmp/opencode).
+- `cargo check --all-targets` 0/0, `cargo test --lib` 2/2 (Rust-код не менялся).
+- На реальном Fedora-контейнере не прогонялось (нет окружения) — проверка пойдёт при следующем MR через GitLab CI `fedora-build`.
+- **Доп. в 10.58:** по просьбе владельца раздел «Вариант 5 — Fedora» в README расширен до полного пошагового сценария: Шаг 1 — группа `plugdev` и перелогин; Шаг 2 — зависимости (авто через `--install-deps` или вручную `dnf`); Шаг 3 — `make release`; Шаг 4а — `--user` + отдельно `--udev-only`; Шаг 4б — `--system`; Шаг 5 — проверка `kbc list` / `keyboard-center`. Rust-код и скрипты не менялись.
