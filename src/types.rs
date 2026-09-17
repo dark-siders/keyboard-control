@@ -76,6 +76,29 @@ pub enum RgbMode {
     Custom,
 }
 
+/// Одно событие макроса (wsclx macros::action, формат флеша).
+/// Три поля: `delay_ms` — задержка ПЕРЕД действием, `key_code` — HID-код,
+/// `family` — тип события: 3 = клавиатура (флаги 0xB0/0x30), 1 = мышь
+/// (0x90/0x10), 2 = consumer/text (те же wire-флаги, что у мыши).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroEvent {
+    /// Задержка в мс перед следующим действием (LE u16 в флеше).
+    pub delay_ms: u16,
+    /// HID-код клавиши (интерпретация зависит от `family`).
+    pub key_code: u8,
+    /// Тип события (actionType): 3=keyboard, 1=mouse, 2=consumer/text.
+    pub family: u8,
+    /// true = нажатие, false = отпускание (bit 7 wire-флагов).
+    pub is_press: bool,
+}
+
+/// Прочитанный макрос целиком (id + все события).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Macro {
+    pub id: u8,
+    pub events: Vec<MacroEvent>,
+}
+
 /// Готовый пресет RGB (набор цветов + параметры).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RgbPreset {

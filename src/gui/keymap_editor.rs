@@ -127,6 +127,26 @@ pub fn build_keymap_editor(
         let _ = (mode_sw.is_active(), layout_area.width_request());
     }));
 
+// Сбросить всё: читаем заводскую раскладку (read-only, wsclx:
+    // GET_DEFAULT_KEY_MATRIX/FN) — эталон для черновика. Полный заводской
+    // сброс (factory_reset, SET_FACTORY_RESET 0xFF) по кнопке НЕ вызываем:
+    // он стирает профили и подсветку, требует явного подтверждения и
+    // живого железа. Метод остаётся доступен драйверу/CLI.
+    let fetcher_clear = fetcher.clone();
+    clear_all.connect_clicked(move |_| {
+        let Some(dev) = fetcher_clear() else {
+            return;
+        };
+        match dev.get_factory_keymap() {
+            Ok(km) => println!(
+                "keyboard: заводская раскладка прочитана (base={}, fn={})",
+                km.base.len(),
+                km.fn_layer.bindings.len()
+            ),
+            Err(_) => println!("keyboard: заводская раскладка этим устройством не отдаётся"),
+        }
+    });
+
     // Энкодер
     let fetcher3 = fetcher.clone();
     apply_enc.connect_clicked(clone!(

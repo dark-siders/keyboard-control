@@ -55,6 +55,8 @@ enum Commands {
     /// Записать текущий конфиг подсветки в память клавиатуры
     /// (свет будет гореть без запущенного приложения)
     Save(SaveArgs),
+    /// Переназначение клавиш (F75: read-modify-write по реальному протоколу)
+    Remap(RemapArgs),
     /// Установить частоту опроса
     SetPoll(SetRate),
     /// Установить задержку дребезга
@@ -228,6 +230,28 @@ struct SaveArgs {
     effect: Option<String>,
 }
 
+#[derive(Args)]
+struct RemapArgs {
+    /// VID:PID например 258A:010C
+    #[arg(value_name = "VID:PID")]
+    device: String,
+    /// Показать текущую карту (Default + FN1)
+    #[arg(long)]
+    list: bool,
+    /// Номер слота клавиши (0..126), напр. 44 (0x2C)
+    #[arg(long, value_name = "slot")]
+    key: Option<u8>,
+    /// Назначить «клавиша→клавиша»: usage-код (hex, напр. 2C)
+    #[arg(long, value_name = "usage_hex")]
+    to: Option<String>,
+    /// Назначить медиа-кнопку: consumer usage (hex, напр. E2 = пауза/плей)
+    #[arg(long, value_name = "usage_hex")]
+    media: Option<String>,
+    /// Слой: 0 = Default, 1 = FN1 (по умолчанию 0)
+    #[arg(long, default_value_t = 0)]
+    layer: u8,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match exec(cli.command) {
@@ -271,6 +295,7 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
             Ok(0)
         }
         Commands::Save(a) => cmd_save(a),
+        Commands::Remap(a) => cmd_remap(a),
         Commands::SetPoll(a) => {
             let (vid, pid) = parse_id(&a.device)?;
             let dev = open(vid, pid)?;
@@ -718,4 +743,66 @@ fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
             u8::from_str_radix(t, 16).map_err(|e| e.to_string())
         })
         .collect()
+}
+
+/// Распарсить usage-код: hex с или без префикса 0x.
+fn parse_usage(s: &str) -> anyhow::Result<u16> {
+    let t = s.strip_prefix("0x").unwrap_or(s);
+    let v = u16::from_str_radix(t, 16).map_err(|e| anyhow::anyhow!("usage должен быть hex: {s} ({e})"))?;
+    Ok(v)
+}
+
+/// Краткое имя действия для вывода карты.
+fn action_short(a: &keyboard_center::types::KeyAction) -> String {
+    use keyboard_center::types::KeyAction;
+    match a {
+        KeyAction::Press(u) => format!("клавиша 0x{u:02X}"),
+        KeyAction::Media(u) => format!("медиа 0x{u:02X}"),
+        KeyAction::Modifier(m) => format!("модификатор {m:?}"),
+        KeyAction::FnLayer(l) => format!("слой Fn#{l}"),
+        KeyAction::Macro(id) => format!("макрос {id}"),
+    }
+}
+
+fn cmd_remap(a: RemapArgs) -> anyhow::Result<u8> {
+    use keyboard_center::types::{FnLayer, KeyAction, KeyId};
+    let (vid, pid) = parse_id(&a.device)?;
+    let dev = open(vid, pid)?;
+
+    if a.list {
+        let km = dev.get_current_keymap()?;
+        println!("Default-слой:");
+        for (k, act) in &km.base {
+            println!("  слот {:>3} (0x{:02X}) → {}", k.0, k.0, action_short(act));
+        }
+        println!("FN1-слой:");
+        for (k, act) in &km.fn_layer.bindings {
+            println!("  слот {:>3} (0x{:02X}) → {}", k.0, k.0, action_short(act));
+        }
+        return Ok(0);
+    }
+
+    let slot = a.key.ok_or_else(|| anyhow::anyhow!("укажите --key <slot> (или --list)"))?;
+    let to = if let Some(u) = &a.to {
+        KeyAction::Press(parse_usage(u)?)
+    } else if let Some(m) = &a.media {
+        KeyAction::Media(parse_usage(m)?)
+    } else {
+        return Err(anyhow::anyhow!("укажите --to <usage_hex> или --media <usage_hex>"));
+    };
+
+    if a.layer == 1 {
+        dev.set_fn_layer(FnLayer {
+            bindings: vec![(KeyId(slot as u16), to.clone())],
+        })?;
+    } else {
+        dev.remap_key(KeyId(slot as u16), to.clone())?;
+    }
+    println!(
+        "слот {slot} (0x{slot:02X}) слой {} → {}",
+        if a.layer == 1 { "FN1" } else { "Default" },
+        action_short(&to)
+    );
+    println!("записано в память клавиатуры (read-modify-write); держится без приложения");
+    Ok(0)
 }

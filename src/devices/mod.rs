@@ -2,7 +2,7 @@
 // trait KeyboardDevice + реестр поддерживаемых моделей.
 
 use crate::types::{
-    Color, EncoderAction, FnLayer, KeyAction, KeyId, Keymap, RgbPreset, ScreenFrame,
+    Color, EncoderAction, FnLayer, KeyAction, KeyId, Keymap, Macro, RgbPreset, ScreenFrame,
 };
 
 // Типы, доступные наружу через `crate::devices`.
@@ -110,10 +110,43 @@ pub trait KeyboardDevice: Send {
     fn set_fn_layer(&self, layer: FnLayer) -> Result<()>;
     /// Прочитать текущую карту клавиш с устройства.
     fn get_current_keymap(&self) -> Result<Keymap>;
+    /// Прочитать текущий аппаратный эффект подсветки (код режима прошивки).
+    /// Ajazz: GET_LED_EFFECT (19). Прочие — Unsupported.
+    fn get_current_effect(&self) -> Result<u8> {
+        Err(Error::Unsupported(
+            "чтение текущего эффекта (get_current_effect) не поддерживается этим устройством",
+        ))
+    }
+    /// Сбросить клавиатуру к заводским настройкам (keymap, профили, подсветка).
+    /// Ajazz: SET_FACTORY_RESET (15) с аргументом 0xFF (полный сброс).
+    /// Прочие — Unsupported.
+    fn factory_reset(&self) -> Result<()> {
+        Err(Error::Unsupported(
+            "сброс к заводским настройкам (factory_reset) не поддерживается этим устройством",
+        ))
+    }
+    /// Прочитать ЗАВОДСКУЮ раскладку (base + fn) — эталон для «Сбросить всё».
+    /// Ajazz: GET_DEFAULT_KEY_MATRIX (31) / GET_DEFAULT_FN_KEY_MATRIX (28),
+    /// read-only, ставится в черновик для просмотра до записи (wsclx).
+    /// Прочие — Unsupported.
+    fn get_factory_keymap(&self) -> Result<Keymap> {
+        Err(Error::Unsupported(
+            "чтение заводской раскладки (get_factory_keymap) не поддерживается этим устройством",
+        ))
+    }
 
     // --- Screen (только Ajazz AK820 Pro) ------------------------------
-    /// Загрузить кадр на TFT-экран.
+    /// Загрузить один кадр на TFT-экран.
     fn set_screen_image(&self, frame: ScreenFrame) -> Result<()>;
+    /// Загрузить полную анимацию (несколько кадров) на TFT-экран.
+    /// `delays_ms[i]` — длительность i-го кадра (у Ajazz единица = 2 мс).
+    /// Один кадр можно слать и через `set_screen_image`; эта функция —
+    /// для GIF-анимаций. Не умеющие устройства — Unsupported.
+    fn set_screen_animation(&self, _frames: &[ScreenFrame], _delays_ms: &[u16]) -> Result<()> {
+        Err(Error::Unsupported(
+            "многокадровая анимация TFT (set_screen_animation) не поддерживается этим устройством",
+        ))
+    }
     /// Установить яркость экрана (0..=255).
     fn set_screen_brightness(&self, level: u8) -> Result<()>;
     /// Синхронизировать системное время ПК с экраном клавиатуры.
@@ -130,6 +163,13 @@ pub trait KeyboardDevice: Send {
     fn stop_macro(&self) -> Result<()>;
     /// Прошивка готовой последовательности действий.
     fn set_macro(&self, id: u8, actions: Vec<KeyAction>) -> Result<()>;
+    /// Прочитать все макросы с устройства (index + data-блоки).
+    /// Не умеющие устройства — Unsupported.
+    fn get_macros(&self) -> Result<Vec<Macro>> {
+        Err(Error::Unsupported(
+            "чтение макросов не поддерживается этим устройством",
+        ))
+    }
 
     // --- System ----------------------------------------------------------
     /// Частота опроса: 125 / 250 / 500 / 1000 Гц.
@@ -203,12 +243,34 @@ pub trait KeyboardDevice: Send {
 pub const DEVICES: &[DeviceInfo] = &[
     // --- Ajazz AK820 Pro ---
     // Реальные VID/PID по wsclx/ak820pro-modder (Sonix SN32F299):
-    //   0C45:8009 — wired + 2.4 GHz (один PID на оба режима, журнал 10.53);
+    //   0C45:8009 — wired + 2.4 GHz (основная ревизия, журнал 10.53);
+    //   0C45:800A — вторая ревизия (kabelklaus, журнал 10.61);
+    //   0C45:8099 — сток fw v1.14 (jdlien, журнал 10.61);
     //   0C45:FEFE — Bluetooth; 0C45:7140 — ISP-режим (не продукт).
     DeviceInfo {
         model: "Ajazz AK820 Pro",
         vid: 0x0C45,
         pid: 0x8009,
+        connection: ConnectionType::Usb,
+        layout: Layout::L75,
+        has_screen: true,
+        has_encoder: true,
+        has_indicators: false,
+    },
+    DeviceInfo {
+        model: "Ajazz AK820 Pro",
+        vid: 0x0C45,
+        pid: 0x800A,
+        connection: ConnectionType::Usb,
+        layout: Layout::L75,
+        has_screen: true,
+        has_encoder: true,
+        has_indicators: false,
+    },
+    DeviceInfo {
+        model: "Ajazz AK820 Pro",
+        vid: 0x0C45,
+        pid: 0x8099,
         connection: ConnectionType::Usb,
         layout: Layout::L75,
         has_screen: true,

@@ -196,6 +196,10 @@ pub fn build_screen_manager(
     send_btn.connect_clicked(clone!(
         #[strong]
         anim_state,
+        #[strong]
+        info_label,
+        #[strong]
+        anim_label,
         move |_| {
         let anim = anim_state.borrow().clone();
         if let Some(anim) = anim {
@@ -203,19 +207,41 @@ pub fn build_screen_manager(
             glib::MainContext::default().spawn_local(clone!(
                 #[strong]
                 anim,
+                #[strong]
+                info_label,
+                #[strong]
+                anim_label,
                 async move {
                 if let Some(dev) = fetcher3() {
-                    // Прошиваем первый кадр (или всю анимацию — по формату экрана)
-                    let frame = anim.frames.first().expect("есть кадры");
-                    let sf = crate::types::ScreenFrame {
-                        width: anim.width,
-                        height: anim.height,
-                        data_rgb565: frame.data.clone(),
+                    let result = if anim.is_animated() {
+                        // GIF — вся анимация на экран (set_screen_animation,
+                        // единица задержки 2 мс, журнал 10.61).
+                        let frames: Vec<crate::types::ScreenFrame> = anim
+                            .frames
+                            .iter()
+                            .map(|f| crate::types::ScreenFrame {
+                                width: anim.width,
+                                height: anim.height,
+                                data_rgb565: f.data.clone(),
+                            })
+                            .collect();
+                        let delays: Vec<u16> = anim.frames.iter().map(|f| f.delay_ms).collect();
+                        dev.set_screen_animation(&frames, &delays)
+                    } else {
+                        // Статичная картинка — один кадр.
+                        let frame = anim.frames.first().expect("есть кадры");
+                        let sf = crate::types::ScreenFrame {
+                            width: anim.width,
+                            height: anim.height,
+                            data_rgb565: frame.data.clone(),
+                        };
+                        dev.set_screen_image(sf)
                     };
-                    match dev.set_screen_image(sf) {
-                        Ok(_) => {}
+                    match result {
+                        Ok(_) => info_label.set_text("Изображение передано на экран"),
                         Err(e) => {
                             eprintln!("ошибка прошивки экрана: {e}");
+                            anim_label.set_text(&format!("Ошибка прошивки: {e}"));
                         }
                     }
                 }

@@ -35,6 +35,10 @@ image = { version = "0.25", features = ["gif", "jpeg", "png"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
+# Синхронизация часов TFT Ajazz: локальное время ПК (naive_local).
+# Добавлен без unstable — обычный crates.io пакет (журнал 10.63).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 # Ошибки
 anyhow = "1"
 thiserror = "2"

@@ -14,6 +14,9 @@ use super::{Error, KeyboardDevice, Result};
 use crate::types::*;
 use std::time::{Duration, Instant};
 
+#[allow(unused_imports)] // используются только в linker-компиляции с chrono
+use chrono::{Datelike, Timelike};
+
 const PACKET_LEN: usize = 64;
 const HEADER_LEN: usize = 8;
 const PAYLOAD_PER_PACKET: usize = PACKET_LEN - HEADER_LEN; // 56
@@ -25,18 +28,68 @@ const DEFAULT_TIMEOUT_MS: i32 = 500;
 /// Команды протокола (wsclx protocol.rs, cmd-модуль).
 mod cmd {
     pub const GET_DEVICE_INFO: u8 = 16;
-    pub const GET_GAME_MODE: u8 = 17;
+    pub const GET_GAME_MODE: u8 = 17; // задел: get_game_mode (см. выше)
     pub const GET_KEY: u8 = 18;
+    /// Чтение текущих глобальных настроек подсветки (16-байтный payload,
+    /// формат как у SET_LED_EFFECT; cmd 19, журнал 10.60).
+    pub const GET_LED_EFFECT: u8 = 19;
     pub const GET_FN_KEY: u8 = 22;
     pub const GET_CUSTOM_LED_DATA: u8 = 20;
+    /// Чтение макросов (wsclx macros read path: index 400 б + data-блоки).
+    pub const GET_MACRO: u8 = 21;
+    /// Заводская раскладка Fn-слоя, read-only (форма как у GET_FN_KEY).
+    pub const GET_DEFAULT_FN_KEY_MATRIX: u8 = 28;
+    /// Заводская раскладка базового слоя, read-only (форма как у GET_KEY).
+    /// Используется приложением для кнопки «Factory default» — ставится в
+    /// черновик для просмотра перед записью.
+    pub const GET_DEFAULT_KEY_MATRIX: u8 = 31;
+    /// задел: game-mode-блок (см. get_game_mode)
+    #[allow(dead_code)]
     pub const SET_GAME_MODE: u8 = 33;
     pub const SET_KEY: u8 = 34;
     pub const SET_LED_EFFECT: u8 = 35;
     pub const SET_CUSTOM_LED_DATA: u8 = 36;
     pub const SET_MACRO: u8 = 37;
     pub const SET_FN_KEY: u8 = 38;
+    /// Сброс к заводским настройкам. Опциональный аргумент `0xFF` = полный сброс.
+    pub const SET_FACTORY_RESET: u8 = 15;
+    /// Boot-анимация подсветки. Формат payload НЕ расшифрован (только значение
+    /// cmd известно из wsclx PROTOCOL.md) — задел.
+    #[allow(dead_code)]
+    pub const SET_LED_BOOT_ANIMATION: u8 = 64;
     pub const SET_TFT_USER_ANIMATION: u8 = 80;
     pub const SET_TFT_BUILT_IN_INDEX: u8 = 81;
+    /// TFT-ack: прошивка подтверждает каждый загруженный чанк командой 65,
+    /// а НЕ 80 (wsclx PROTOCOL.md; при синхронном чтении ответов фильтровать
+    /// по 65). У нас загрузка fire-and-forget, но константа — для будущего.
+    #[allow(dead_code)]
+    pub const SET_LED_USER_ANIMATION: u8 = 65;
+}
+
+/// Control-интерфейс Ajazz (usage page 0xFF13, iface 3) — время, сон и
+/// загрузка картинок через 64-байтные feature-репорты (gohv/TaxMachine/
+/// bernalirio, журнал 10.60). Отличается от основного командного канала
+/// 0xFF68 (что использует wsclx-транспорт) — открывается отдельным дескриптором.
+mod ctl {
+    /// Длина feature-репорта.
+    pub const PACKET_LEN: usize = 64;
+    /// Командные пакеты начинаются с report id 0x04, data-пакеты — с 0x00.
+    pub const REPORT_ID_CMD: u8 = 0x04;
+    /// Команды (gohv protocol.rs):
+    pub const START: u8 = 0x18;
+    /// FINISH — задел: используется формально в полной транзакции загрузки
+    /// картинок (kabelklaus), но для sleep/time по gohv не требуется.
+    #[allow(dead_code)]
+    pub const FINISH: u8 = 0xF0;
+    pub const TIME: u8 = 0x28;
+    pub const SLEEP: u8 = 0x17;
+    pub const SAVE: u8 = 0x02;
+    /// Трейлер data-пакета (в последних двух байтах).
+    pub const DELIM: (u8, u8) = (0xAA, 0x55);
+    /// Usage page control-интерфейса, на котором живут эти команды.
+    pub const USAGE_PAGE: u16 = 0xFF13;
+    /// Интерфейс control-канала (fallback к usage page).
+    pub const INTERFACE: i32 = 3;
 }
 
 /// 128-LED матрица (один слот на клавишу keymap'а).
@@ -216,11 +269,22 @@ impl AjazzAk820 {
 
     /// Многочанковый GET (например keymap 512 байт).
     fn get_many(&self, cmd_byte: u8, content_size: usize) -> Result<Vec<u8>> {
+        self.get_many_at(cmd_byte, 0, content_size)
+    }
+
+    /// Многочанковый GET с произвольным базовым адресом (макросы: index 0,
+    /// отдельные data-блоки по offset из index).
+    fn get_many_at(
+        &self,
+        cmd_byte: u8,
+        addr_base: u16,
+        content_size: usize,
+    ) -> Result<Vec<u8>> {
         let chunk = PAYLOAD_PER_PACKET;
         let num_chunks = content_size.div_ceil(chunk).max(1);
         let mut out = Vec::with_capacity(content_size);
         for i in 0..num_chunks {
-            let addr = (i * chunk) as u16;
+            let addr = addr_base.wrapping_add((i * chunk) as u16);
             let remaining = content_size - i * chunk;
             let this_size = remaining.min(chunk);
             let is_last = i == num_chunks - 1;
@@ -333,6 +397,10 @@ impl AjazzAk820 {
     }
 
     /// Прочитать game-mode (wsclx system.rs, 56 байт).
+    /// С 10.63 таймер сна ушёл на control-канал; этот метод и константы
+    /// GET/SET_GAME_MODE остались как задел для чтения/записи других полей
+    /// game-mode-блока (раскладка/свет/поведение) — держим помеченным.
+    #[allow(dead_code)]
     fn get_game_mode(&self) -> Result<[u8; 56]> {
         let payload = self.get(cmd::GET_GAME_MODE, 56)?;
         let mut b = [0u8; 56];
@@ -431,6 +499,143 @@ impl AjazzAk820 {
             out.push((0, code, family, false));
         }
         out
+    }
+}
+
+// --- Control-интерфейс (время, сон) и анимация TFT ------------------
+
+impl AjazzAk820 {
+    /// Открыть control-интерфейс (usage page 0xFF13, fallback — iface 3)
+    /// СВЕЖИМ HID-дескриптором. В отличие от основного канала 0xFF68 (wsclx-
+    /// транспорт), эти команды живут на втором интерфейсе и требуют
+    /// feature-репортов (gohv/TaxMachine/bernalirio; журнал 10.60).
+    fn open_control(&self) -> Result<hidapi::HidDevice> {
+        let api = hidapi::HidApi::new().map_err(Error::from)?;
+        let mut best_rank = 0u8;
+        let mut best_path: Option<Vec<u8>> = None;
+        for d in api.device_list() {
+            if d.vendor_id() != self.bridge.vid || d.product_id() != self.bridge.pid {
+                continue;
+            }
+            let p = d.path();
+            if p.to_bytes().is_empty() {
+                continue;
+            }
+            let rank = if d.usage_page() == ctl::USAGE_PAGE {
+                2
+            } else if d.interface_number() == ctl::INTERFACE {
+                1
+            } else {
+                0
+            };
+            if rank > best_rank {
+                best_rank = rank;
+                best_path = Some(p.to_bytes().to_vec());
+            }
+        }
+        let path = best_path.ok_or_else(|| {
+            Error::Protocol("control-интерфейс Ajazz (usage 0xFF13 / iface 3) не найден".into())
+        })?;
+        let cstr = std::ffi::CString::new(path)
+            .map_err(|_| Error::Protocol("control путь содержит NUL".into()))?;
+        api.open_path(&cstr).map_err(Error::from)
+    }
+
+    /// 64-байтный командный пакет control-канала:
+    /// `[0]=0x04 (report id), [1]=cmd, [2]=byte2, [8]=byte8`, остальное 0.
+    fn control_packet(cmd: u8, byte2: u8, byte8: u8) -> [u8; ctl::PACKET_LEN] {
+        let mut p = [0u8; ctl::PACKET_LEN];
+        p[0] = ctl::REPORT_ID_CMD;
+        p[1] = cmd;
+        p[2] = byte2;
+        p[8] = byte8;
+        p
+    }
+
+    /// Отправить feature-репорт по control-каналу и прочитать подтверждение
+    /// (gohv: после каждого send ожидается feature-get; ошибку игнорируем —
+    /// прошивка может отвечать не на все report id).
+    fn send_ctl(&self, dev: &hidapi::HidDevice, pkt: &[u8; ctl::PACKET_LEN]) -> Result<()> {
+        dev.send_feature_report(pkt).map_err(Error::from)?;
+        let mut resp = [0u8; ctl::PACKET_LEN];
+        let _ = dev.get_feature_report(&mut resp);
+        Ok(())
+    }
+
+    /// Загрузить payload (256-байтный заголовок + пиксельные кадры LE) на
+    /// TFT-интерфейс 0xFF67 чанками по 4096, затем переключить дисплей на
+    /// user-содержимое. Общий хвост для `set_screen_image`/`set_screen_animation`.
+    fn upload_tft_payload(&self, payload: &[u8]) -> Result<()> {
+        if payload.len() < 256 || payload.len() % 2 != 0 {
+            return Err(Error::Protocol(
+                "TFT payload: ожидается заголовок 256 б + чётные пиксельные данные".into(),
+            ));
+        }
+        // Открываем интерфейс TFT-загрузки (usage page 0xFF67, большой output report).
+        let api = hidapi::HidApi::new().map_err(Error::from)?;
+        let tft = api.device_list().find(|d| {
+            d.vendor_id() == self.bridge.vid
+                && d.product_id() == self.bridge.pid
+                && d.usage_page() == 0xFF67
+        });
+        let dev = match tft {
+            Some(info) => {
+                let path = std::ffi::CString::new(info.path().to_bytes().to_vec())
+                    .map_err(|_| Error::Protocol("TFT путь содержит NUL".into()))?;
+                api.open_path(&path).map_err(Error::from)?
+            }
+            None => return Err(Error::Protocol("интерфейс 0xFF67 (TFT) не найден".into())),
+        };
+
+        const TFT_REPORT_LEN: usize = 4104;
+        const TFT_PAYLOAD_LEN: usize = TFT_REPORT_LEN - HEADER_LEN; // 4096
+        let total_chunks = payload.len().div_ceil(TFT_PAYLOAD_LEN).max(1);
+        let mut report = vec![0u8; 1 + TFT_REPORT_LEN];
+        for i in 0..total_chunks {
+            let start = i * TFT_PAYLOAD_LEN;
+            let end = (start + TFT_PAYLOAD_LEN).min(payload.len());
+            // Специфический per-chunk заголовок TFT: [0xAA, 80, idx_lo, idx_hi, total_lo, total_hi, 0x50, 0x06].
+            report[0] = REPORT_ID;
+            report[1] = MAGIC_OUTGOING;
+            report[2] = cmd::SET_TFT_USER_ANIMATION;
+            report[3] = (i & 0xFF) as u8;
+            report[4] = ((i >> 8) & 0xFF) as u8;
+            report[5] = (total_chunks & 0xFF) as u8;
+            report[6] = ((total_chunks >> 8) & 0xFF) as u8;
+            report[7] = 0x50;
+            report[8] = 0x06;
+            report[9..9 + (end - start)].copy_from_slice(&payload[start..end]);
+            dev.write(&report).map_err(Error::from)?;
+            // Ack-фильтр (wsclx 10.60): прошивка подтверждает каждый загруженный
+            // чанк командой 65 (SET_LED_USER_ANIMATION), а НЕ 80. Читаем ответ
+            // неблокирующе (короткий таймаут, 2 попытки): если 65 получен —
+            // чанк принят; если ответа нет — продолжаем (fire-and-forget),
+            // чтобы не вешать синхронную загрузку на живом железе без ack.
+            for _ in 0..2 {
+                let mut ack = vec![0u8; 1 + TFT_REPORT_LEN];
+                let n = match dev.read_timeout(&mut ack, 150) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                // Смещение отчёт id: [0]=report id(0), [1]=0xAA… либо [0]=0x55.
+                let cmd_byte = if ack.first() == Some(&MAGIC_INCOMING) {
+                    ack[1]
+                } else {
+                    ack[2]
+                };
+                if ack.contains(&MAGIC_INCOMING) && cmd_byte == cmd::SET_LED_USER_ANIMATION {
+                    break; // чанк подтверждён
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+
+        // Переключение дисплея на user-содержимое. wsclx: «try index 0, если не
+        // показывает — перебрать до ~10». На железе подберём.
+        self.set(cmd::SET_TFT_BUILT_IN_INDEX, &[0])?;
+        Ok(())
     }
 }
 
@@ -569,78 +774,110 @@ impl KeyboardDevice for AjazzAk820 {
         Ok(Keymap { base, fn_layer })
     }
 
+    /// Текущий аппаратный эффект подсветки (GET_LED_EFFECT, 16-байтный
+    /// payload в формате SET_LED_EFFECT; режим — первый байт). wsclx 10.60.
+    fn get_current_effect(&self) -> Result<u8> {
+        let payload = self.get(cmd::GET_LED_EFFECT, 16)?;
+        Ok(payload.first().copied().unwrap_or(0))
+    }
+
+    /// Полный заводской сброс (SET_FACTORY_RESET с аргументом 0xFF).
+    /// wsclx 10.60: опциональный аргумент 0xFF = полный сброс.
+    fn factory_reset(&self) -> Result<()> {
+        self.set(cmd::SET_FACTORY_RESET, &[0xFF])
+    }
+
+    /// Заводская раскладка — read-only, в черновик перед записью
+    /// (GET_DEFAULT_KEY_MATRIX / GET_DEFAULT_FN_KEY_MATRIX, форма как у
+    /// GET_KEY / GET_FN_KEY). wsclx 10.60.
+    fn get_factory_keymap(&self) -> Result<Keymap> {
+        let mut base = Vec::new();
+        let base_raw = self.get_many(cmd::GET_DEFAULT_KEY_MATRIX, KEYMAP_BYTES)?;
+        for slot in 0..TOTAL_SLOTS {
+            let off = slot * SLOT_BYTES;
+            let bytes: [u8; SLOT_BYTES] = base_raw[off..off + SLOT_BYTES].try_into().unwrap();
+            if let Some(action) = Self::slot_decode(bytes) {
+                base.push((KeyId(slot as u16), action));
+            }
+        }
+        let mut fn_layer = FnLayer::default();
+        let fn_raw = self.get_many(cmd::GET_DEFAULT_FN_KEY_MATRIX, KEYMAP_BYTES)?;
+        for slot in 0..TOTAL_SLOTS {
+            let off = slot * SLOT_BYTES;
+            let bytes: [u8; SLOT_BYTES] = fn_raw[off..off + SLOT_BYTES].try_into().unwrap();
+            if let Some(action) = Self::slot_decode(bytes) {
+                fn_layer.bindings.push((KeyId(slot as u16), action));
+            }
+        }
+        Ok(Keymap { base, fn_layer })
+    }
+
     // --- Screen (Ajazz-only) -------------------------------------------
 
-    /// Загрузка кадра/анимации на TFT. Кадры от нашего конвертера — RGB565
+    /// Мультикадровая анимация на TFT. Кадры от нашего конвертера — RGB565
     /// big-endian; TFT ждёт little-endian — при загрузке пиксели переставляются.
-    fn set_screen_image(&self, frame: ScreenFrame) -> Result<()> {
-        // Разрешение жёстко 128×128 (панель NFP085B-10AF), см. wsclx tft.rs.
-        if frame.width != 128 || frame.height != 128 {
+    /// Задержки — в единицах 2 мс (журнал 10.61: kabelklaus/Beattrey/aks075), в
+    /// отличие от wsclx (5 мс). На железе подобрать точную единицу.
+    fn set_screen_animation(&self, frames: &[ScreenFrame], delays_ms: &[u16]) -> Result<()> {
+        const FRAME_BYTES: usize = 128 * 128 * 2;
+        const MAX_FRAMES: usize = 30; // wsclx: tftMaxFrames (~30) на одну загрузку
+        if frames.is_empty() || frames.len() != delays_ms.len() {
+            return Err(Error::Protocol("TFT: кадры и задержки не совпадают по длине".into()));
+        }
+        if frames.len() > MAX_FRAMES {
             return Err(Error::Protocol(format!(
-                "TFT Ajazz: ожидается 128×128, получено {}×{}",
-                frame.width, frame.height
+                "TFT Ajazz: анимация из {} кадров больше лимита {MAX_FRAMES} (децимируйте GIF)",
+                frames.len()
             )));
         }
-        const FRAME_BYTES: usize = 128 * 128 * 2;
-        if frame.data_rgb565.len() != FRAME_BYTES {
-            return Err(Error::Protocol(format!(
-                "TFT Ajazz: ожидается {FRAME_BYTES} байт кадра, получено {}",
-                frame.data_rgb565.len()
-            )));
+        for f in frames {
+            if f.width != 128 || f.height != 128 {
+                return Err(Error::Protocol(format!(
+                    "TFT Ajazz: ожидается 128×128, получено {}×{}",
+                    f.width, f.height
+                )));
+            }
+            if f.data_rgb565.len() != FRAME_BYTES {
+                return Err(Error::Protocol(format!(
+                    "TFT Ajazz: ожидается {FRAME_BYTES} байт кадра, получено {}",
+                    f.data_rgb565.len()
+                )));
+            }
         }
 
-        // 256-байтный заголовок (1 кадр → count=1, terminator на индексе 1, дальше 0xFF).
-        let mut payload = vec![0u8; 256 + FRAME_BYTES];
-        payload[0] = 1;
-        payload[1] = 0x00;
-        for i in 2..256 {
+        // 256-байтный заголовок анимации:
+        //   [0] = N (число кадров)
+        //   [1..1+N) = задержки каждого кадра, единица 2 мс (clamp 0..=255)
+        //   [1+N] = 0x00 terminator
+        //   [2+N..256] = 0xFF pad
+        let n = frames.len();
+        let mut payload = vec![0u8; 256 + n * FRAME_BYTES];
+        payload[0] = n as u8;
+        for (i, d) in delays_ms.iter().enumerate() {
+            payload[1 + i] = (d / 2).min(255) as u8;
+        }
+        payload[1 + n] = 0x00;
+        for i in (2 + n)..256 {
             payload[i] = 0xFF;
         }
-        // Байты big-endian → little-endian.
-        for (dst, src) in payload[256..].chunks_exact_mut(2).zip(frame.data_rgb565.chunks_exact(2)) {
-            dst[0] = src[1];
-            dst[1] = src[0];
-        }
-
-        // Открываем интерфейс TFT-загрузки (usage page 0xFF67, большой output report).
-        let api = hidapi::HidApi::new().map_err(Error::from)?;
-        let tft = api
-            .device_list()
-            .find(|d| d.vendor_id() == self.bridge.vid && d.product_id() == self.bridge.pid && d.usage_page() == 0xFF67);
-        let dev = match tft {
-            Some(info) => {
-                let path = std::ffi::CString::new(info.path().to_bytes().to_vec())
-                    .map_err(|_| Error::Protocol("TFT путь содержит NUL".into()))?;
-                api.open_path(&path).map_err(Error::from)?
+        // Кадры: big-endian → little-endian.
+        for (fi, f) in frames.iter().enumerate() {
+            let base = 256 + fi * FRAME_BYTES;
+            for (dst, src) in payload[base..base + FRAME_BYTES]
+                .chunks_exact_mut(2)
+                .zip(f.data_rgb565.chunks_exact(2))
+            {
+                dst[0] = src[1];
+                dst[1] = src[0];
             }
-            None => return Err(Error::Protocol("интерфейс 0xFF67 (TFT) не найден".into())),
-        };
-
-        const TFT_REPORT_LEN: usize = 4104;
-        const TFT_PAYLOAD_LEN: usize = TFT_REPORT_LEN - HEADER_LEN; // 4096
-        let total_chunks = payload.len().div_ceil(TFT_PAYLOAD_LEN).max(1);
-        let mut report = vec![0u8; 1 + TFT_REPORT_LEN];
-        for i in 0..total_chunks {
-            let start = i * TFT_PAYLOAD_LEN;
-            let end = (start + TFT_PAYLOAD_LEN).min(payload.len());
-            // Специфический per-chunk заголовок TFT: [0xAA, 80, idx_lo, idx_hi, total_lo, total_hi, 0x50, 0x06].
-            report[0] = REPORT_ID;
-            report[1] = MAGIC_OUTGOING;
-            report[2] = cmd::SET_TFT_USER_ANIMATION;
-            report[3] = (i & 0xFF) as u8;
-            report[4] = ((i >> 8) & 0xFF) as u8;
-            report[5] = (total_chunks & 0xFF) as u8;
-            report[6] = ((total_chunks >> 8) & 0xFF) as u8;
-            report[7] = 0x50;
-            report[8] = 0x06;
-            report[9..9 + (end - start)].copy_from_slice(&payload[start..end]);
-            dev.write(&report).map_err(Error::from)?;
         }
 
-        // Переключение дисплея на user-содержимое. wsclx: «try index 0, если не
-        // показывает — перебрать до ~10». На железе подберём.
-        self.set(cmd::SET_TFT_BUILT_IN_INDEX, &[0])?;
-        Ok(())
+        self.upload_tft_payload(&payload)
+    }
+
+    /// Один кадр на TFT — частный случай анимации из одного кадра.
+    fn set_screen_image(&self, frame: ScreenFrame) -> Result<()> {
+        self.set_screen_animation(&[frame], &[0])
     }
 
     fn set_screen_brightness(&self, _level: u8) -> Result<()> {
@@ -649,10 +886,45 @@ impl KeyboardDevice for AjazzAk820 {
         ))
     }
 
+    /// Синхронизация времени: локальное время ПК на экран клавиатуры.
+    /// Control-протокол (gohv protocol.rs + TaxMachine ak820pro.cpp, журнал 10.60):
+    ///   START (0x18, b8=1) → TIME-config (0x28, b8=1) → data(!report id 0x00!,
+    ///   [0]=0x00,[1]=0x01,[2]=0x5A,[3]=YY,[4]=MM,[5]=DD,[6]=hh,[7]=mm,[8]=ss,
+    ///   [9]=0x00,[10]=0x04, trailer AA 55) → SAVE (0x02, b8=0).
     fn sync_system_time(&self) -> Result<()> {
-        Err(Error::Unsupported(
-            "sync времени TFT: формат SET_TEMPORARY_COMMAND_DATA (cmd 52) в wsclx не реализован",
-        ))
+        use chrono::Local;
+        let now = Local::now().naive_local();
+        let (y, mo, d, h, mi, s) = (
+            now.year() % 100,
+            now.month() as u8,
+            now.day() as u8,
+            now.hour() as u8,
+            now.minute() as u8,
+            now.second() as u8,
+        );
+
+        let dev = self.open_control()?;
+        self.send_ctl(&dev, &Self::control_packet(ctl::START, 0x00, 0x01))?;
+        self.send_ctl(&dev, &Self::control_packet(ctl::TIME, 0x00, 0x01))?;
+
+        // data-пакет: report id 0x00 (НЕ 0x04).
+        let mut data = [0u8; ctl::PACKET_LEN];
+        data[1] = 0x01;
+        data[2] = 0x5A;
+        data[3] = y as u8;
+        data[4] = mo;
+        data[5] = d;
+        data[6] = h;
+        data[7] = mi;
+        data[8] = s;
+        data[9] = 0x00;
+        data[10] = 0x04;
+        data[62] = ctl::DELIM.0;
+        data[63] = ctl::DELIM.1;
+        dev.send_feature_report(&data).map_err(Error::from)?;
+
+        self.send_ctl(&dev, &Self::control_packet(ctl::SAVE, 0x00, 0x00))?;
+        Ok(())
     }
 
     // --- Encoder ---------------------------------------------------------
@@ -707,6 +979,46 @@ impl KeyboardDevice for AjazzAk820 {
         Ok(())
     }
 
+    fn get_macros(&self) -> Result<Vec<Macro>> {
+        // wsclx read path (PROTOCOL.md «Macros — read path»): сначала index —
+        // 400 байт (100 слотов × 4 байта LE/offset в firmware-памяти). Затем для
+        // каждого слота с ненулевым offset: блок = заголовок 4 б (LE u16 —
+        // событий×2, два байта reserved) + события по 4 б (delay LE u16,
+        // key_code, flags: bit7=press, bits6..4=actionType). Декодируем в
+        // MacroEvent как есть (family = actionType, задержки внутри макроса).
+        let index = self.get_many(cmd::GET_MACRO, 400)?;
+        let mut macros = Vec::new();
+        for (id, slot) in index.chunks_exact(4).enumerate() {
+            let offset = u32::from_le_bytes(slot.try_into().unwrap()) as usize;
+            if offset == 0 {
+                continue; // слот пуст
+            }
+            let header = self.get_many_at(cmd::GET_MACRO, offset as u16, 4)?;
+            if header.len() < 4 {
+                continue;
+            }
+            let count = u16::from_le_bytes([header[0], header[1]]) as usize / 2;
+            if count == 0 {
+                continue;
+            }
+            let payload = self.get_many_at(cmd::GET_MACRO, offset as u16 + 4, count * 4)?;
+            let mut events = Vec::with_capacity(count);
+            for chunk in payload.chunks_exact(4) {
+                events.push(MacroEvent {
+                    delay_ms: u16::from_le_bytes([chunk[0], chunk[1]]),
+                    key_code: chunk[2],
+                    family: (chunk[3] >> 4) & 0x07,
+                    is_press: chunk[3] & 0x80 != 0,
+                });
+            }
+            macros.push(Macro {
+                id: id as u8,
+                events,
+            });
+        }
+        Ok(macros)
+    }
+
     // --- System ----------------------------------------------------------
 
     fn set_polling_rate(&self, _rate: u16) -> Result<()> {
@@ -721,23 +1033,32 @@ impl KeyboardDevice for AjazzAk820 {
         ))
     }
 
+    /// Таймер сна: 4 ступени (gohv SleepTime): 0=never, <=60=1m, <=300=5m, иначе=30m.
+    /// Control-протокол (журнал 10.60): START (0x18, b8=1) → SLEEP-config
+    /// (0x17, byte2=0x01, b8=1) → data(!report id 0x00!, [8]=ступень, trailer AA 55).
+    /// FINISH (0xF0) по gohv для сна НЕ нужен.
     fn set_sleep_timer(&self, seconds: u16) -> Result<()> {
-        let sleep_time = if seconds == 0 {
+        let step = if seconds == 0 {
             0
         } else if seconds <= 60 {
             1
         } else if seconds <= 300 {
             2
-        } else if seconds <= 600 {
-            3
-        } else if seconds <= 900 {
-            4
         } else {
-            5
+            3
         };
-        let mut gm = self.get_game_mode()?;
-        gm[3] = sleep_time;
-        self.set(cmd::SET_GAME_MODE, &gm)?;
+
+        let dev = self.open_control()?;
+        self.send_ctl(&dev, &Self::control_packet(ctl::START, 0x00, 0x01))?;
+        self.send_ctl(&dev, &Self::control_packet(ctl::SLEEP, 0x01, 0x01))?;
+
+        // data-пакет: report id 0x00, ступень сна на байте 8, трейлер AA 55.
+        let mut data = [0u8; ctl::PACKET_LEN];
+        data[8] = step;
+        data[62] = ctl::DELIM.0;
+        data[63] = ctl::DELIM.1;
+        dev.send_feature_report(&data).map_err(Error::from)?;
+
         Ok(())
     }
 

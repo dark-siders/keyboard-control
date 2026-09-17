@@ -77,8 +77,10 @@ impl HidBridge {
         };
         let connection = match pid {
             // --- Ajazz AK820 Pro (Sonix SN32F299) ---
-            // 0x8009 — wired + 2.4 GHz (один PID на оба режима); 0xFEFE — BT.
-            0x8009 => ConnectionType::Usb,
+            // 0x8009 — wired + 2.4 GHz (основная ревизия, журнал 10.53);
+            // 0x800A — вторая ревизия (kabelklaus, журнал 10.61);
+            // 0x8099 — сток fw v1.14 (jdlien, журнал 10.61); 0xFEFE — BT.
+            0x8009 | 0x800A | 0x8099 => ConnectionType::Usb,
             0xFEFE => ConnectionType::Bluetooth,
             // --- AULA ---
             0x004B | 0x004E => ConnectionType::Usb,

@@ -1658,3 +1658,392 @@ pub trait KeyboardDevice {
 - На реальном Fedora-контейнере не прогонялось (нет окружения) — проверка пойдёт при следующем MR через GitLab CI `fedora-build`.
 - **Доп. в 10.58:** по просьбе владельца раздел «Вариант 5 — Fedora» в README расширен до полного пошагового сценария: Шаг 1 — группа `plugdev` и перелогин; Шаг 2 — зависимости (авто через `--install-deps` или вручную `dnf`); Шаг 3 — `make release`; Шаг 4а — `--user` + отдельно `--udev-only`; Шаг 4б — `--system`; Шаг 5 — проверка `kbc list` / `keyboard-center`. Rust-код и скрипты не менялись.
 - **Фикс CI fedora-build (сессия 2026-09-17, после первого провала пайплайна):** джоб падал с `No match for argument: gtk4-devel / cairo-devel`. Причина — НЕ отсутствие пакетов, а YAML-переносы через `\` внутри folded-скаляра `before_script`: из-за folding команда собиралась в одну строку с пробелами, и bash `\ gtk4-devel` склеивал слова (`make \ gtk4-devel` → один аргумент `make gtk4-devel`). dnf не находил пакета с «прилипшим» соседом. Фикс: список пакетов записан ОДНОЙ строкой без `\`-переносов (14 пакетов). Проверено: YAML валиден (js-yaml), извлечённая команда — корректная строка. В README «Шаг 2» ручной dnf-пример оставлен с `\`-переносами — это для вставки в терминал, там bash сам склеит по правилам; в CI-файлах так делать нельзя.
+
+## 10.59 РЕСЁРЧ 4 НОВЫХ РЕПОЗИТОРИЕВ: РЕМАП F75 НАЙДЕН (сессия 2026-09-17)
+
+> Владелец привёл 4 ссылки: gohv/EPOMAKER-Ajazz-AK820-Pro, pradyumnac/aula-f99-controller, cloudglides/aula-f75-linux-drivers, not-ayan/openaula. Задача: изучить, сказать, помогут ли. Вывод: полной поддержки нет ни в одном; два репо — cloudglides и openaula — содержат **проверенный на железе канал ремапа F75**, чего у нас не ревёрснуто. Запись в журнал — по явной просьбе владельца.
+
+### Сводка по репозиториям
+
+1. **gohv/EPOMAKER-Ajazz-AK820-Pro** (Rust): lighting (20 режимов), sleep timer, clock sync. Протокол Sonix SN32F299 (usagePage 0xFF13, iface 3), как в wsclx-семействе. НЕТ per-key RGB, keymap, макросов, TFT, батареи. Для нас почти ничего нового — всё это уже есть через wsclx (журнал 10.53/10.54).
+2. **pradyumnac/aula-f99-controller** (Python/uv, **Windows-only пока**, «Linux planned»): детект линка wired/wireless, прослушка media/volume-клавиш, сплошной цвет, имя модели. Per-key/эффекты/макросы — «planned». Наша F99-реализация (10.55) сильно полнее.
+3. **cloudglides/aula-f75-linux-drivers** (WebHID, Chromium) — **самый ценный**: протокол F75 `258A:010C` + родной донгл `3554:FA09`, весь помечен VERIFIED на железе (сессии 2026-08-24):
+   - **Ремап Default+FN1 (wired) — работает**; per-key live (wired+2.4G); эффекты/скорость/яркость (wired); debounce, профили, снимок/restore.
+   - 2.4G — только live per-key стрим; запись настроек через радио НЕ решена.
+   - Макросы — локально в приложении, загрузка на клаву НЕ решена. Sleep informational.
+   - `docs/PROTOCOL.md` — полный вайр-референс (см. ниже).
+4. **not-ayan/openaula** (WebHID, TS): ремап (включая комбо модификаторов+код), бэкап/дифф 1024-байтной матрицы, «Surgical Fn Recovery» (матрица #53), восстановление Win; RGB не имеет. Нашёл уязвимость прошивки: запись всех 128 слотов как обычных `[0,0,0,0xFF]` ломает физический Fn (требуется `[13,0,0,0]`).
+
+### КЛЮЧЕВЫЕ ФАКТЫ ПРОТОКОЛА РЕМАПА F75 (для реализации, см. PROTOCOL.md cloudglides + README openaula)
+
+- **Матрица/блоб:** feature report `0x06`, 520 байт. Заголовок: `06 [1]=0x03 (const) [2]=слой (0=Default, 1=FN1) [3]=0x00 [4]=0x01 [5]=0x00 [6-7]=00 FF`, далее слоты `8+4·i`: `page, 0x00, 0x00, usage` (128 слотов), трейлер `[518]=5A [519]=A5`.
+- Валидные слоты 0..126 (слот 127 перекрыл бы трейлер). Unbind = `page 0x00, usage 0x00`.
+- Output pages: `0x00` = HID Usage Page 0x07 (клавиатура/кейпад), `0x02` = 0x0C (consumer/media).
+- **Залочены прошивкой:** F1–F12 = матричные индексы `[12,18,24,30,36,42,48,54,60,66,72,78]`.
+- **Fn-клавиша = матричный слот #53** (байт 212 в Table 0). Родное `[13,0,0,0]`; перезапись «по-тупому» — ломает Fn. Восстановление только точечной записью слота.
+- **Read:** `[0]=0x83 [1-2]=00 00 [3]=01 (count) [4]=00 (index) [5]=00 [6]=0x02 (512 байт)` → GET 520; ответ: `06 83 ...` + 512 байт payload. **Write:** `[0]=0x03 ... [6]=0x02` + 512 байт данных (запись подтверждается read-back).
+- Текущий эффект = offset 10 в config (подтверждено крок-диффом, совпадает с нашей эмпирикой 10.26). **Нюанс нумерации:** hw-id эффектов на 1 больше, чем таблица приложения (steady = select 0x02 при Fixed-on=1) — у нас select-байты data[10] из 10.26 уже эмпирические (02=дыхание…).
+- **Расхождение с нами (отметить, сверить на железе):** у cloudglides эффект-таблица начинается с offset 64 (64+2n = яркость, 65+2n = speed|color; ripple 78–79). У нас по эмпирике 10.36 — с 58. Разница 6 байт. Открытый вопрос, ЧТО лежит в наших [58..63]. 
+- **Color table VERIFIED у cloudglides:** read `0x8a`/write `0x0a`, addr `00 00 01 00`, len `0x0200`, 512× `RR GG BB 00` (persist byte-exact). **У НАС (10.5) тот же адрес давал Protocol error — стоит перепроверить живой пробой** (возможно, дело в паде до 520).
+- Direct mode (совпадает с нашим 10.7): cmd `0x08`, LED count `0x7A`=122 у cloudglides (у нас OpenRGB даёт 90 для модели 0xCD! расхождение — разные ревизии), зона d[4]=0x01. Heartbeat required (~20 fps у них; у нас keepalive 400–500 мс — им сопоставимо).
+- **Enable-последовательность direct:** три feature-репорта: `0x39 body 20 06 00 01 00` → `0x3c body 20 01 00` → `0x39 body 20 06 01 01 00`; disable: `0x3c body 20 00 00`. (У нас direct слался напрямую `06 08 …` — возможно, эта enable-seq объясняет нестабильность на старте!)
+- **Донгл 2.4G (3554:FA09, output 0x13, 20 б):** read config `0x44 subcmd 0x0A` (10 фреймов, seq 0–9), write config `0x04/0x0A`, write palette `0x09/0x25` (37 записей), write per-key `0x02/0x1C` (27 фреймов × 14 б), **Save `0x0A/0x01` — «always issued last or nothing persists»**. У нас wireless-запись для config есть, но явного Save-шага в контракте нет — СВЕРИТЬ с эмпирикой 10.49 (записи держались и без него).
+- Flip-блока из remembered: F75 cabled wired — эффект-таблица в конфиге и цветовая таблица делят адрес `00 00 01 00`, различаются длиной (0x80 vs 0x200).
+
+### Общий вывод
+
+- Для **F75-ремапа** (наш главный открытый кусок, `remap_key` в драйвере = Unsupported) есть два независимых проверенных источника (cloudglides + openaula) — можно реализовать реально: `get/put` 512-байтной таблицы, слоты Default+FN1, комбо-модификаторы, с защитой слота Fn (#53) и залоченных F1–F12.
+- Для F99-ремапа оба репо не дают ничего (F99-репо — игрушка на Windows); остаётся наш план 10.32.
+- Для Ajazz всё уже есть у нас (wsclx).
+
+### Осталось / планы (следующий заход)
+1. Перепроверка живьём: color table `0x8a/0x0a` (адрес 00 00 01 00 / 0x200) — закрыть вопрос 10.5; enable-последовательность direct (0x39/0x3c); разброс эффект-таблицы offset 58 vs 64; Save на донгле в связке с write.
+2. Реализация реального ремапа F75 (Default+FN1): чтение/запись 512-б таблицы через `06 83/03`, слоты, защита Fn #53 и F1–F12; CLI `kbc remap` + GUI keymap_editor.
+3. Остальные «Нужно ДОРАБОТАТЬ» (10.32/10.56) без изменений.
+
+## 10.60 СВЕРКА AJAZZ-ДРАЙВЕРА С Актуальным PROTOCOL.md wsclx/ak820pro-modder (сессия 2026-09-17)
+
+> Владелец: вещь отчётность «напишу пространство», проверить этот репо из единого характера из источников wsclx (наш драйвер). Живого AK820 Pro нет. Правки КОДА в этой сессии НЕ вносились (только журнал).
+
+### Вывод сверки
+**Наш `ajazz_ak820.rs` согласуется со свежим PROTOCOL.md с оригинала (fw 1.07, macOS 2026-05-13, выправлено «0x8009—PID», а не VID): итого ~полное совпадение.** Ниже детали.
+
+### Транспорт (совпадает)
+- Output reports, report ID 0, magic `0xAA` (исходящий) / `0x55` (входящий), 64 б/пакет (payload до 56 после заголовка 8 б). Наш `build_frame`: `[AA, cmd, len, addr_lo, addr_hi, 0, last, 0, payload…]` — в точности P() из JS.
+- Входящий frame по PROTOCOL.md: `55 | cmd | len | addr_lo | addr_hi | … | payload` — наш `read_response` читает `buf[0]=0x55`, `buf[1]=want_cmd`, payload с байта 8. Совпадает.
+- Многочанковые чтения (`get_many`) и заschrift (`set_many_at`, двухфазная запись index-без-commit → data-с-commit) — совпадает с контрактом.
+
+### Команды (совпадает с таблицей)
+- Наши константы: GET_DEVICE_INFO=16, GET_GAME_MODE=17, GET_KEY=18, GET_CUSTOM_LED_DATA=20, GET_FN_KEY=22, SET_GAME_MODE=33, SET_KEY=34, SET_LED_EFFECT=35, SET_CUSTOM_LED_DATA=36, SET_MACRO=37, SET_FN_KEY=38, SET_TFT_USER_ANIMATION=80, SET_TFT_BUILT_IN_INDEX=81.
+- В PROTOCOL.md дополнительно есть (у нас нет, не критично): COMMUNICATION_START=1, COMMUNICATION_END=2, SET_FACTORY_RESET=15, GET_LED_EFFECT=19 (read; у нас только SET 35), GET_DEFAULT_FN_KEY_MATRIX=28, GET_DEFAULT_KEY_MATRIX=31, SET_LED_BOOT_ANIMATION=64. Могут пригодиться для «Factory default»-кнопки редактора keymap / чтения текущего эффекта.
+
+### SET_LED_EFFECT payload (16 б) — ПОЛНОЕ совпадение
+Наш `led_effect_payload`: `mode | r,g,b | driverSetting=0xFF | sr,sg,sb | colorMode | brightness≤5 | speed≤5 | direction | effectModeType | 0(pad) | 0xAA | 0x55`. PROTOCOL.md: режим 0x00–0x13 (20 режимов + Custom 0x80 — совпадает), driverSetting hardcoded 0xFF (совпадает), colorMode 0=моно / 1=радужный, brightness/speed 0–5, checkCode `AA 55` в байтах [14][15] (отметка: инверсно от gohv; у нас тоже AA 55 на 14–15 — верно).
+
+### Макросы — совпадает (и «foot-gun» правильно)
+- Двухуровневая структура: index 400 б (100 слотов × 4 б LE u32 offset, 0=пусто) → data-блоки с 400. Header 4 б: `(actionCount*2) LE u16` + 2 б reserved=0. Per-action 4 б: `delay LE u16 + keyCode + flags`. Наш `set_macro` — идентично.
+- **flags (ВАЖНО, мы не вляфались):** bit7 = isPress, bits 6..4 = actionType. Keyboard=0xB0 нажатие/0x30 отпуск (actionType 3); Mouse=0x90/0x10 (actionType 1); consumer/текстовые макросы тоже 0x90/0x10 (type 2). Наш `MacroFamily::Keyboard → 0xB0/0x30`, Mouse (задел) → 0x90/0x10 — совпадает. «Foot-gun» из PROTOCOL.md: нельзя путать 0x90/0x10 с клавой — у нас это осознанно только Mouse.
+- Лимит 320 Б/слот (мы проверяем), ёмкость макро-хранилища 3072 Б у fw 1.07 (index 400 + данные). Наш путь записи index→(data с last_packet=true commit) — совпадает.
+
+### Keymap / слоты (совпадает с таблицей O)
+- Slots 128×4, page byte: KEYBOARD=2, CONSUMER_KEY=3, MACRO=6, TGL=10. Наш `slot_encode`: Press→[2,0,usage,0], Media→[3,lo,hi,0], Modifier→[2,0,0xE0+n,0], FnLayer→[10,l,0,0], Macro→[6,id,0,0]. Совпадает. (Приписка PROTOCOL.md: не брать MACRO=4 — это SYSTEM_KEY; у нас 6 верно.)
+- Триггер макроса через SET_KEY/FN: byte0=6, byte1=macroId, byte2=triggerMode (0=один раз,1=повтор N,2=пока снова), byte3=repeatCount. У нас Macro slot — `[6, id, 0, 0]` (triggerMode 0 — корректен дефолт).
+
+### TFT (почти совпадает, есть НЮАНС)
+- Формат кадра: 128×128 RGB565 **little-endian** = 32768 б/кадр; 256-байтный заголовок: `[0]=N кадров, [1..N-1]=delay[i]*5 мс, [N]=0x00 terminator, [N+1..255]=0xFF pad`. Наш `set_screen_image` (один кадр): заголовок 256 б, `[0]=1`, `[1]=0x00`, `[2..]=0xFF`; пиксели BE→LE переставляются. Совпадает.
+- **Transport чанков: bespoke header, НЕ build_frame. PROTOCOL.md:** `[0]=0xAA, [1]=0x50 (cmd 80), [2-3]=chunkIndex LE, [4-5]=totalChunks LE, [6]=0x50, [7]=0x06` — константа `0x0650` (=1616 LE u16; в 0.7.0-beta была BUG `0x064F` — прошивка принимала, но дисплей НЕ переключался; в 0.8.x исправлена). Наш код: `report[0]=REPORT_ID=0, [1]=0xAA, [2]=cmd 80, [3-4]=idx, [5-6]=total, [7]=0x50, [8]=0x06` — соответствует (со сдвигом на report id байт в начале, hidapi-стиль). **Магия 0x0650 у нас правильная.**
+- Chunk payload: 4104 б — 8 (header) = 4096 б/чанк (у нас TFT_REPORT_LEN=4104, TFT_PAYLOAD_LEN=4096). Совпадает.
+- **Ack-ответ:** firmware подтверждает каждый чанк командой **65 (SET_LED_USER_ANIMATION)**, а НЕ 80. У нас ответы TFT-чанков вообще не читаются и не фильтруются — при живом тесте (если понадобится синхронизация) фильтровать по cmd 65.
+- Capacity: `tftMaxFrames` ~30+ кадров на одну загрузку; бОльшие GIF децимировать клиентом (у нас однокадровая загрузка — ок).
+- Переключение дисплея на user-контент: известный «дисплей не переключается» = как раз баг магии `0x064F` в wsclx 0.7.0-beta; fix — `0x0650`. У нас magic верная, но живого теста нет.
+
+### Выводы для проекта
+- **Наш драйвер Ajazz — полный и точный относительно wsclx fw 1.07.** Ничего критически не расходится; страховки «foot-gun» (макро-флаги, page-таблица) уже приняты в коде.
+- Нюансы к бережности на живом железе: (1) фильтр ack TFT по cmd 65 при синхронной многочанковой загрузке; (2) отправка chank-заголовка с report-id-байтом в начале (hidapi) vs без него — сверить по живому устройству; (3) GET_LED_EFFECT (19) и GET_DEFAULT_*_MATRIX (28/31) — можно добавить позже для чтения текущего эффекта и «Factory default».
+- Планов не меняет: живой тест Ajazz закрывает всё, что не тронуто сейчас.
+
+## 10.61 РЕСЁРЧ 6 НОВЫХ РЕПО AK820 PRO: НАЙДЕНЫ PID-ВАРИАНТЫ И НЮАНСЫ TFT/СНА (сессия 2026-09-17)
+
+> Продолжение 10.60. Владелец дал очередной список репо (kabelklaus, bernalirio, RiyaGrady, jdlien, actop420, Xilion807). Живого AK820 Pro нет — всё по открытым источникам. **Правки КОДА в этой сессии НЕ вносились** (только журнал): находки ниже требуют решения владельца (PID-варианты — правка кода; остальное — нюансы к живому тесту).
+
+### 1. kabelklaus/ajazz-ak820-pro (WebHID, браузер, MIT) — ЦЕННЫЙ
+- Локальный, без сети; две ревизии: **PID `0x8009` И `0x800A`** (важно: некоторые тулзы фильтруют только 8009 и «не находят» клавиатуру — наш сканер тоже знает только `0x8009`!).
+- Control iface: usage **`0xFF13`**, 64-б **feature**; data iface: usage **`0xFF68`**, 4096-б **output** (у нас control-ранг 0xFF68 — согласуется с wsclx).
+- Транспорт (их RE): кадр `04 <cmd> <sub> 00×5 <flag> 00×55`; прошивка эхо-подтверждает известные команды (byte3=0x01) — их «command scanner» на этом построен. Команды: `0x18` START, `0x13` lighting, `0x17` sleep, `0x28` time, `0x72` image, `0x02` SAVE, `0xF0` FINISH — это **другая (WebHID/нумерованная) обёртка** того же семейства; для нашего report-ID-0 формата не переносится напрямую.
+- **TFT image:** заголовок 256 б (frame count + по одному delay-байту на кадр, **единица 2 мс**), затем 32768 б RGB565 LE/кадр, пад `0xFF`. **Нюанс:** у нас/wsclx delay считался как `*5 мс` — расхождение единиц (2 vs 5 мс) — к живому тесту.
+- **Спящий режим: 4 ступени — never / 1 / 5 / 30 минут.** У нас `set_sleep_timer` маппит 0/≤60/≤300/≤600/≤900/>900 → 0..5 (6 значений) — **расхождение**, к проверке.
+- Floyd–Steinberg дизеринг для градиентов RGB565 (идея для нашего конвертера).
+- **Ремапа в прошивке НЕТ** (их вывод: no QMK, no remap command) — remap только средствами ОС (`hidutil`). Расходится с cloudglides/openaula (там ремап через 512-б таблицу VERIFIED) — вероятно, разные ревизии/каналы.
+- **Два фрейминга картинки** (AKS075 по умолчанию vs gohv) отличаются **тремя байтами** — прямой ответ на «дисплей не переключается» (10.54/10.60): наш framing мог попасть в «неправильный» вариант.
+
+### 2. bernalirio/ak820pro-time-sync (Rust, Linux) — узкий
+- Только синк часов на TFT, `cargo build --release` + `sudo ./ak820pro-time-sync`. Тестировано на AK820 Pro. Протокольных заметок почти нет — подтверждает саму возможность синка часов; ничего нового к нашему 10.60.
+
+### 3. RiyaGrady/Ajazz-ak820pro-gif-splitter (Python/Tkinter, Windows) — не про протокол
+- Режет GIF на кадры 128×128 для ОФИЦИАЛЬНОГО софта (обход ошибки импорта GIF). Наш `screen/converter.rs` это уже делает; берём только идею клиентского ресайза/децимации.
+
+### 4. jdlien/ak820-pro (QMK-порт «Jackrabbit», GPL) — железные факты
+- QMK/VIA прошивка для AK820 Pro. Подтверждает: bootloader `0C45:7140` (вход Fn+Esc; из стока — замыкание пинов под пробелом), слои `WINBASE=0, WINFN=1, MACBASE=2, MACFN=3`, LCD assets пишутся в **flash по 0x0CE0000** (не стримингом — режим «assets»), панель бывает двух ревизий (LCD вверх ногами/инверсия = другая панель).
+- **ВАЖНО про прошивки:** сток **v1.13 (`0x8009`) — рабочая**; **v1.14 меняет PID на `0x8099`** и ломает распознавание родным софтом. → Нашему реестру/udev стоит знать и `0x8099` (и `0x800A` из п.1), иначе обновлённые клавиатуры «исчезнут».
+- Host-агенты (timekeeper/nowplaying) — macOS/Windows; для нас архитектурный референс (SOF-bias синк, SMTC now-playing), не для Linux-реализации сейчас.
+
+### 5. actop420/ajazz820 — это **зеркало/форк wsclx/ak820pro-modder** (MIT © wsclx)
+- Тот же `docs/PROTOCOL.md`, та же версия v0.7.0-beta, тот же control usage `0xFF68`. Ничего сверх 10.60, НО в README явно перечислены уже реализованные фичи: **battery + charge state + active profile slot** (`ak820 info`, GET_DEVICE_INFO), **now-playing на TFT** (album art/трек/прогресс из SMTC/Spotify/YouTube), **knob remapping** отдельным контролом, **factory-default reset** base+Fn (`GET_DEFAULT_*_MATRIX` 28/31 + SET_FACTORY_RESET 15), CLI `ak820 lighting set --mode static --color FF00AA`, `ak820 rgb fill/rainbow` (128-LED), `ak820 macros list`, `ak820 tft solid/cycle/select-index`. Всё это уже покрыто нашим драйвером, кроме factory-default и now-playing (не нужно).
+- Их маппинг энкодера ремапится (в отличие от gohv, где «firmware-fixed») — при живом Ajazz попробовать `set_encoder_action`.
+
+### 6. Xilion807/Ajazz-820-PRO — SignalRGB-плагин (JS, wired)
+- Ничего про протокол; максимум LED-карта/геометрия. Не используется.
+
+### ИТОГ и что это даёт проекту
+1. **СДЕЛАНО (разрешение владельца в этой сессии):** PID-варианты Ajazz **`0x800A`** и **`0x8099`** добавлены:
+   - `src/devices/hid.rs` — `0x8009 | 0x800A | 0x8099 => ConnectionType::Usb`;
+   - `src/devices/mod.rs` — карточки `DeviceInfo` для `0x800A` и `0x8099` (реестр/`kbc list`; матчер `build_device` уже ловил через `(0x0C45, _)`);
+   - `99-keyboard-center.rules` — правила для `0c45:800a` и `0c45:8099`;
+   - `README.md` — таблица VID/PID пополнена.
+   - Сборка: `cargo check --all-targets` — 0 ошибок/0 warnings. Коммит НЕ делался (владелец: «оставить в рабочей копии»).
+2. **К живому тесту (нужен AK820 Pro):** единица delay кадра TFT (**2 мс** у kabelklaus vs 5 мс у нас), 4-ступенчатый sleep (never/1/5/30 vs наш 0..5), два фрейминга картинки (**3 байта** — вероятная причина «дисплей не переключается»), LCD assets vs user-anim.
+3. Полного протокольного сюрприза нет: наш `ajazz_ak820.rs` по-прежнему верен относительно wsclx fw 1.07 (10.60); actop420 — его зеркало.
+4. Ремап Ajazz: источники расходятся (kabelklaus «нет команды» vs wsclx/actop420 «keymap редактор работает») — истина, вероятно, в канале/ревизии; решать на живом железе.
+
+### Осталось (как в 10.60)
+- Живой тест AK820 Pro; F75-ремап по cloudglides/openaula (план 10.59); откат временных правок `~/nixosniri` (10.2); коммит фикса CI fedora-build (ждёт ОК владельца).
+
+## 10.62 F75 РЕМАП РЕАЛИЗОВАН: read-modify-write (cloudglides + openaula) (сессия 2026-09-17)
+
+> Продолжение плана 10.59 п.2 («Реализация реального ремапа F75»). Разрешение владельца — «вносить полностью». Форматы взвешены: чтение по openaula (`0x83`), запись blob'ом cloudglides; при расхождении форматов выбран **безопасный read-modify-write** (владелец подтвердил выбор).
+
+### Сделано (git diff, 3 файла)
+
+1. **`src/devices/aula_f75.rs`**:
+   - Константы: `KEYMAP_SLOTS=128`, `KEYMAP_SLOT_BYTES=4`, `KEYMAP_BYTES=512`, `LOCKED_F_KEYS=[12,18,24,30,36,42,48,54,60,66,72,78]`, `FN_SLOT=53`.
+   - Приватные хелперы: `read_keymap_raw(layer)` — openaula-запрос `06 83 00 <layer> 01 00 00 02` + пад до 520 → GET 06 520, payload 512 б с offset 8; `write_keymap_raw(layer, table)` — cloudglides blob `06 03 <layer> 00 01 00 00 FF` + 128 слотов + трейлер `5A A5` на [518..519]; `slot_encode` (Press → `[0x00,0,0,usage]`, Media → `[0x02,0,0,usage]`; остальное — Unsupported «ждать живого теста»); `slot_decode` (page 0/2; служебные page типа 13 (Fn) → None и при RMW НЕ трогаются); `check_writable_slot` — защита: Fn #53 и F1–F12 → критическая ошибка, вне 0..126 → ошибка.
+   - Проверка соединения: ремап только по USB (wired); на 2.4G/BT — честный Unsupported (запись настроек через радио не реализована нигде, 10.59).
+   - Методы trait: `remap_key` (RMW: read layer 0 → правим один слот → write) вместо выдуманного `cmd(0x10)`; `set_fn_layer` (RMW layer 1; пустые bindings → Ok без записи) вместо `cmd(0x11)`; `get_current_keymap` — реальное чтение base (обязательно) + fn (пробная попытка, при неудаче — пустой слой, не роняем карту).
+2. **`src/cli.rs`**: новая команда `kbc remap`:
+   - `kbc remap VID:PID --list` — вывод карт Default + FN1 (слот → действие);
+   - `kbc remap VID:PID --key <slot> --to <usage_hex>` (клавиша→клавиша, слой по умолчанию 0);
+   - `kbc remap VID:PID --key <slot> --media <usage_hex>` (медиа);
+   - `--layer 0|1` — слой; `parse_usage()` (hex с/без 0x) и `action_short()` добавлены.
+3. **`src/gui/keymap_editor.rs`** — код НЕ менялся: кнопка «Применить раскладку» удачно легла на новые методы (пустой `set_fn_layer` из GUI → безопасный no-op; `remap_key(0x2C→0x2C)` → реальная RMW-запись слота 44, не в locked). Клик-редактор клавиш — по-прежнему TODO (живой тест сначала).
+
+### Сборка
+- `cargo check --all-targets` — **0 ошибок, 0 warnings** (nix develop).
+- `cargo test --lib` — **2/2**.
+- `cargo build --release` — **успех (52s)**: свежие `target/release/kbc` + `target/release/keyboard-center`.
+
+### Проверка на железе — ожидается владельцем (F75 USB, `sg plugdev`)
+1. `kbc remap 258A:010C --list` — показывает реальную карту (слоты Default/FN1).
+2. `kbc remap 258A:010C --key 44 --to 2C` (слот 0x2C → «A») → readback `--list` показывает смену; клавиша печатает «A» (для слота без физической клавиши эффекта нет — но запись держится).
+3. Защита: `--key 53` (Fn) и `--key 12` (F1) → критическая ошибка, запись отклонена.
+4. Медиа: `--media E2` на свободном слоте.
+5. Живая сверка форматов (главное!): фактический read-response openaula (offset 8, 512 б) и write-подтверждение cloudglides blob читаются корректно; поведение при записи ОДНОГО слота через blob (не стирает ли остальное).
+6. Модификаторы/комбо (Modifier/FnLayer/Macro в slot_encode) — вернуть после live-подтверждения формата байта модификатора.
+
+### Остатки/нюансы
+- Чтение FN1-слоя — по аналогии с blob (байт [2]=слой), НЕ сверено на железе: `get_current_keymap` деградирует fn пустым при неудаче, `--layer 1` попытается прочитать и упадёт с протокольной ошибкой при неполном ответе.
+- Выдуманные cmd-id в `set_rgb_*`/`set_encoder_action` (0x02/0x03/0x04/0x05/0x20) — НЕ трогались (вне задачи, см. 10.55-подход).
+- Далее по плану 10.59: live color table `0x8a/0x0a`, direct enable 0x39/0x3c, Save донгла; затем живой тест Ajazz/F99.
+
+## 10.63 AJAZZ AK820 PRO: АНИМАЦИЯ TFT + СИНХРОН ВРЕМЕНИ + ТАЙМЕР СНА ЧЕРЕЗ CONTROL-КАНАЛ (сессия 2026-09-17)
+
+> Задача из TODO 10.47/10.53/10.60-10.61: ① `sync_system_time` по проверенному протоколу gohv/TaxMachine/bernalirio, ② многокадровый GIF на TFT (единица задержки 2 мс), ③ `set_sleep_timer` 4-ступени с трейлером AA 55 — через второй control-канал 0xFF13 (iface 3, 64-б feature-репорты), проводка через trait/конвертер/GUI. Разрешение владельца — «делай». Живого AK820 Pro нет — всё по ресёрчу (10.53/10.60/10.61).
+
+### Сделано (git diff, 5 файлов)
+
+1. **`Cargo.toml`** — добавлена зависимость `chrono 0.4` (`default-features=false`, `features=["clock"]`) для локального времени при синке часов. Cargo.lock обновлён.
+
+2. **`src/devices/mod.rs`** — в trait `KeyboardDevice` добавлен метод `set_screen_animation(&self, frames: &[ScreenFrame], delays_ms: &[u16]) -> Result<()>` (default `Err(Unsupported)`), размещён после `set_screen_image`.
+
+3. **`src/devices/ajazz_ak820.rs`** — основные правки:
+   - **`mod ctl`** — константы control-канала: `REPORT_ID_CMD=0x04` (командные пакеты)/`0x00` (data-пакеты), `START=0x18`, `FINISH=0xF0` (задел), `TIME=0x28`, `SLEEP=0x17`, `SAVE=0x02`, `DELIM=(0xAA,0x55)`, `USAGE_PAGE=0xFF13`, `INTERFACE=3`.
+   - Новые приватные хелперы (в `impl AjazzAk820`):
+     - `open_control()` — свежий `hidapi::HidDevice` на каждый вызов; выбор интерфейса: `usage_page()==0xFF13` (ранг 2) → fallback `interface_number()==3` (ранг 1); путь через `CString → open_path`.
+     - `control_packet(cmd, b2, b8)` — `[0x04, cmd, b2, 0,0,0,0,0, b8, …0]`.
+     - `send_ctl(dev, pkt)` — `send_feature_report` + нефатальный `get_feature_report`.
+     - `upload_tft_payload(payload)` — общий TFT-загрузчик: валидация len≥256 и чётности; открытие интерфейса 0xFF67 (wsclx transport, output-репорт); чанки payload по 4096: `report[0]=REPORT_ID, [1]=MAGIC_OUTGOING, [2]=SET_TFT_USER_ANIMATION, [3..4]=idx LE, [5..6]=total LE, [7]=0x50, [8]=0x06`, данные с [9]; финальный `set(SET_TFT_BUILT_IN_INDEX, &[0])`.
+   - **`set_screen_animation`** — мультикадровая загрузка: заголовок 256 б `[0]=N, [1..1+N)=задержки в единицах 2 мс (clamp 0..=255), [1+N]=0x00 terminator, [2+N..256]=0xFF pad`; кадры 32768 б RGB565 LE (конвертер отдаёт BE — пары байт переставлены); лимит MAX_FRAMES=30 (wsclx tftMaxFrames) и валидация 128×128.
+   - **`set_screen_image`** — переписан как частный случай `set_screen_animation` с одним кадром (задержка 0). Дубли TFT-кода убраны.
+   - **`sync_system_time`** — реализован (было Unsupported): `chrono::Local::now().naive_local()`, START `(0x18,b8=1)` → TIME-config `(0x28,b8=1)` → data-пакет (report id 0x00!): `[1]=0x01,[2]=0x5A,[3]=YY(год%100),[4]=MM,[5]=DD,[6]=hh,[7]=mm,[8]=ss,[9]=0x00,[10]=0x04,[62]=AA,[63]=55` → SAVE `(0x02,b8=0)`.
+   - **`set_sleep_timer`** — переписан (был wsclx-путь через SET_GAME_MODE gm[3]): 4 ступени 0→0 / ≤60→1 / ≤300→2 / иначе→3; START `(0x18,b8=1)` → SLEEP-config `(0x17, b2=0x01, b8=1)` → data `[8]=step, [62]=AA, [63]=55`; FINISH по gohv для сна НЕ нужен.
+   - `get_game_mode`/`GET_GAME_MODE`/`SET_GAME_MODE`/`FINISH` — помечены `#[allow(dead_code)]` как задел (после ухода сна с wsclx-пути).
+4. **`src/gui/screen_manager.rs`** — отправка на экран: анимация (GIF >1 кадр) → `set_screen_animation(frames, delays)`; статика → `set_screen_image`; статус результата в info_label/anim_label (раньше молча первый кадр).
+
+### Сборка
+- `cargo check --all-targets` — **0 ошибок, 0 warnings** (nix develop).
+- `cargo test --lib` — **2/2** (RGB565, hex-color).
+- `cargo build --release` — **успех (53s)**: свежие `target/release/kbc` + `target/release/keyboard-center`.
+
+### Проверка на железе — НЕВОЗМОЖНА (AK820 Pro физически отсутствует)
+Живой тест (battery, RGB, keymap, TFT, sync time, sleep) — только когда клавиатура появится у владельца. Нюансы к живой сверке:
+1. Единица задержки TFT — 2 мс (kabelklaus/Beattrey/aks075) vs 5 мс (wsclx) — журнал 10.61: подобрать на железе.
+2. Кадры — RGB565 little-endian (конвертер пишет BE — драйвер переставляет пары) — сверить с реальной колориметрией панели.
+3. Нужен ли FINISH после data (kabelklaus) и в каком порядке START/FINISH/SAVE для time/sleep — по gohv без FINISH, подтвердить.
+4. TFT-атомность: известная загвоздка «дисплей не переключается на user-контент» (chunk-header magic 0x0650, wsclx off-by-one) — наш magic `0x50 0x06` корректна по 0.8.x, но live-отладка нужна.
+5. Существование интерфейса 0xFF13/iface 3 на конкретной ревизии (`0x8009`/`0x800A`/`0x8099`) — при MIA control-канала сообщить владельцу точное `lsusb -v`-дерево.
+6. `set_screen_brightness` — по-прежнему честный `Unsupported` (команда не декодирована).
+
+### Остаётся (вне этой задачи)
+- Живой тест Ajazz/F99/F75-ремапа (plan 10.59/10.62); батарея BT; откат временных правок ~/nixosniri (10.2); публикация в GitLab.
+
+## 10.63 AJAZZ AK820 PRO: АНИМАЦИЯ TFT + СИНХРОН ВРЕМЕНИ + ТАЙМЕР СНА ЧЕРЕЗ CONTROL-КАНАЛ (сессия 2026-09-17)
+
+> Задача из TODO 10.47/10.53/10.60-10.61: ① `sync_system_time` по проверенному протоколу gohv/TaxMachine/bernalirio, ② многокадровый GIF на TFT (единица задержки 2 мс), ③ `set_sleep_timer` 4-ступени с трейлером AA 55 — через второй control-канал 0xFF13 (iface 3, 64-б feature-репорты), проводка через trait/конвертер/GUI. Разрешение владельца — «делай». Живого AK820 Pro нет — всё по ресёрчу (10.53/10.60/10.61).
+
+### Сделано (git diff, 5 файлов)
+
+1. **`Cargo.toml`** — добавлена зависимость `chrono 0.4` (`default-features=false`, `features=["clock"]`) для локального времени при синке часов. Cargo.lock обновлён.
+2. **`src/devices/mod.rs`** — в trait `KeyboardDevice` добавлен метод `set_screen_animation(&self, frames: &[ScreenFrame], delays_ms: &[u16]) -> Result<()>` (default `Err(Unsupported)`), размещён после `set_screen_image`.
+3. **`src/devices/ajazz_ak820.rs`** — основные правки:
+   - **`mod ctl`** — константы control-канала: `REPORT_ID_CMD=0x04` (командные пакеты)/`0x00` (data-пакеты), `START=0x18`, `FINISH=0xF0` (задел), `TIME=0x28`, `SLEEP=0x17`, `SAVE=0x02`, `DELIM=(0xAA,0x55)`, `USAGE_PAGE=0xFF13`, `INTERFACE=3`.
+   - Новые приватные хелперы (в `impl AjazzAk820`):
+     - `open_control()` — свежий `hidapi::HidDevice` на каждый вызов; выбор интерфейса: `usage_page()==0xFF13` (ранг 2) → fallback `interface_number()==3` (ранг 1); путь через `CString → open_path`.
+     - `control_packet(cmd, b2, b8)` — `[0x04, cmd, b2, 0,0,0,0,0, b8, …0]`.
+     - `send_ctl(dev, pkt)` — `send_feature_report` + нефатальный `get_feature_report`.
+     - `upload_tft_payload(payload)` — общий TFT-загрузчик: валидация len≥256 и чётности; открытие интерфейса 0xFF67 (wsclx transport, output-репорт); чанки payload по 4096: `report[0]=REPORT_ID, [1]=MAGIC_OUTGOING, [2]=SET_TFT_USER_ANIMATION, [3..4]=idx LE, [5..6]=total LE, [7]=0x50, [8]=0x06`, данные с [9]; финальный `set(SET_TFT_BUILT_IN_INDEX, &[0])`.
+   - **`set_screen_animation`** — мультикадровая загрузка: заголовок 256 б `[0]=N, [1..1+N)=задержки в единицах 2 мс (clamp 0..=255), [1+N]=0x00 terminator, [2+N..256]=0xFF pad`; кадры 32768 б RGB565 LE (конвертер отдаёт BE — пары байт переставлены); лимит MAX_FRAMES=30 (wsclx tftMaxFrames) и валидация 128×128.
+   - **`set_screen_image`** — переписан как частный случай `set_screen_animation` с одним кадром (задержка 0). Дубли TFT-кода убраны.
+   - **`sync_system_time`** — реализован (было Unsupported): `chrono::Local::now().naive_local()`, START `(0x18,b8=1)` → TIME-config `(0x28,b8=1)` → data-пакет (report id 0x00!): `[1]=0x01,[2]=0x5A,[3]=YY(год%100),[4]=MM,[5]=DD,[6]=hh,[7]=mm,[8]=ss,[9]=0x00,[10]=0x04,[62]=AA,[63]=55` → SAVE `(0x02,b8=0)`.
+   - **`set_sleep_timer`** — переписан (был wsclx-путь через SET_GAME_MODE gm[3]): 4 ступени 0→0 / ≤60→1 / ≤300→2 / иначе→3; START `(0x18,b8=1)` → SLEEP-config `(0x17, b2=0x01, b8=1)` → data `[8]=step, [62]=AA, [63]=55`; FINISH по gohv для сна НЕ нужен.
+   - `get_game_mode`/`GET_GAME_MODE`/`SET_GAME_MODE`/`FINISH` — помечены `#[allow(dead_code)]` как задел (после ухода сна с wsclx-пути).
+4. **`src/gui/screen_manager.rs`** — отправка на экран: анимация (GIF >1 кадр) → `set_screen_animation(frames, delays)`; статика → `set_screen_image`; статус результата в info_label/anim_label (раньше молча первый кадр).
+   - Функция `converter::to_screen_frames()` НЕ добавлялась — GUI строит `Vec<ScreenFrame>` сам через итератор (оказалась избыточной прослойкой).
+
+### Сборка
+- `cargo check --all-targets` — **0 ошибок, 0 warnings** (nix develop).
+- `cargo test --lib` — **2/2** (RGB565, hex-color).
+- `cargo build --release` — **успех (53s)**: свежие `target/release/kbc` + `target/release/keyboard-center`.
+
+### Проверка на железе — НЕВОЗМОЖНА (AK820 Pro физически отсутствует)
+Живой тест (battery, RGB, keymap, TFT, sync time, sleep) — только когда клавиатура появится у владельца. Нюансы к живой сверке:
+1. Единица задержки TFT — 2 мс (kabelklaus/Beattrey/aks075) vs 5 мс (wsclx) — журнал 10.61: подобрать на железе.
+2. Кадры — RGB565 little-endian (конвертер пишет BE — драйвер переставляет пары) — сверить с реальной колориметрией панели.
+3. Нужен ли FINISH после data (kabelklaus) и в каком порядке START/FINISH/SAVE для time/sleep — по gohv без FINISH, подтвердить.
+4. TFT-атомность: известная загвоздка «дисплей не переключается на user-контент» (chunk-header magic 0x0650, wsclx off-by-one) — наш magic `0x50 0x06` корректна по 0.8.x, но live-отладка нужна.
+5. Существование интерфейса 0xFF13/iface 3 на конкретной ревизии (`0x8009`/`0x800A`/`0x8099`) — при MIA control-канала сообщить владельцу точное `lsusb -v`-дерево.
+6. `set_screen_brightness` — по-прежнему честный `Unsupported` (команда не декодирована).
+
+### Остаётся (вне этой задачи)
+- Живой тест Ajazz/F99/F75-ремапа (plan 10.59/10.62); батарея BT; откат временных правок ~/nixosniri (10.2); публикация в GitLab.
+
+## 10.64 «ЗАБРАЛИ» ОСТАВШЕЕСЯ ИЗ РЕСЁРЧА AJAZZ: GET_LED_EFFECT / SET_FACTORY_RESET / GET_DEFAULT_*_MATRIX / BOOT-АНИМАЦИЯ / TFT-ACK (сессия 2026-09-17)
+
+> Задача владельца: «ну давай заберем что еще не забрано для нашего проекта и журнал обнови». Забрано то, что оставалось из 10.60/10.61 (wsclx PROTOCOL.md). Живого AK820 Pro нет — код вносился по задокументированным форматам, проверка сборка-only.
+
+### ВНЕСЕНО (git diff, 3 файла)
+
+1. **`src/devices/ajazz_ak820.rs` — `mod cmd` пополнен** (5 команд + ack-константа):
+   - `GET_LED_EFFECT = 19` (чтение текущих глобальных настроек подсветки; 16-байтный payload в формате SET_LED_EFFECT);
+   - `SET_FACTORY_RESET = 15` (опц. аргумент `0xFF` = полный сброс);
+   - `GET_DEFAULT_FN_KEY_MATRIX = 28` / `GET_DEFAULT_KEY_MATRIX = 31` (заводские раскладки Fn и базового слоя, read-only, форма как GET_FN_KEY/GET_KEY);
+   - `GET_MACRO = 21` (чтение макросов целиком: index 400 б → data-блоки по offset; реализовано в `get_macros`, пришёл в заходе «забери оставшееся»);
+   - `SET_LED_BOOT_ANIMATION = 64` — помечена `#[allow(dead_code)]` как задел (формат payload НЕ расшифрован — только значение команды известно);
+   - `SET_LED_USER_ANIMATION = 65` — TFT-ack: прошивка подтверждает каждый загруженный чанк командой 65, а НЕ 80 (wsclx); при синхронном чтении ответов фильтровать по 65. У нас загрузка fire-and-forget, поэтому константа — для будущего (10.60, п.1).
+   - **Ack-фильтр внедрён в `upload_tft_payload`** (в тот же заход): после записи каждого чанка — неблокирующее чтение со сдвигом report id ([0]=0x55 → cmd в байте 1, иначе байт 2), 2 попытки × 150 мс; подтверждение чанка только по cmd 65, ответа нет — продолжаем (fire-and-forget не нарушается, синхронная загрузка не вешается).
+2. **`src/devices/ajazz_ak820.rs` — реализованы 4 новых метода** (в `impl KeyboardDevice for AjazzAk820`):
+   - `get_current_effect() -> Result<u8>` — GET_LED_EFFECT, режим = первый байт payload;
+   - `factory_reset() -> Result<()>` — SET_FACTORY_RESET с `0xFF`;
+   - `get_factory_keymap() -> Result<Keymap>` — читает обе заводские раскладки (31 + 28) и декодирует их как обычную keymap (эталон для «Сбросить всё», кладётся в черновик, НЕ пишется напрямую — как требует wsclx);
+   - **`get_macros() -> Result<Vec<Macro>>`** — чтение всех макросов с устройства (GET_MACRO 21, wsclx read path: index 400 б + data-блоки по offset, декод в `Macro { id, events: Vec<MacroEvent { delay_ms, key_code, family, is_press }> }`). Это закрыло последний реализуемый без железа пункт ресёрча (журнал 10.60/10.64).
+   - Рефакторинг: общий паттерн декодирования слота вынесен согласно существующему стилю `get_current_keymap`.
+   - **`src/types.rs`** — добавлены типы `MacroEvent` и `Macro` (для чтения макросов).
+3. **`src/devices/mod.rs` — trait `KeyboardDevice` пополнен 4 default-методами** (`Unsupported` на не-умеющих устройствах): `get_current_effect()`, `factory_reset()`, `get_factory_keymap()`, `get_macros()` — размещены в секции Keymap/Macros рядом с `get_current_keymap`.
+4. **`src/gui/keymap_editor.rs` — кнопка «Сбросить всё» (`clear_all`) наконец подключена** (раньше висела без обработчика): по клику читает заводскую раскладку через `get_factory_keymap()` и печатает `base=/fn=` в консоль. Полный `factory_reset()` по кнопке НЕ вызывается (стирает профили и подсветку; требует подтверждения и живого железа) — метод остаётся доступен драйверу/CLI.
+
+### Сборка
+- `cargo check --all-targets` — 0 ошибок, 0 warnings.
+- `cargo test --lib` — 2/2 (RGB565, hex-color).
+- `cargo build --release` — успех (53s): свежие `target/release/kbc` + `target/release/keyboard-center`.
+
+### Осторожность / честно
+- `GET_DEFAULT_KEY_MATRIX/FN + SET_FACTORY_RESET` — НЕ проверены на железе (AK820 Pro физически нет). Форматы — из wsclx PROTOCOL.md (fw 1.07), реализация читает 512-байтные блоки штатным `get_many`-путем (формата как у GET_KEY/GET_FN_KEY).
+- Заводскую раскладку в GUI читаем read-only; запись (если понадобится кнопка «восстановить завод») — отдельная задача, после живого теста.
+
+### Остаётся (вне этой задачи)
+- Живой тест Ajazz (battery, RGB, keymap, TFT, sync time, sleep, factory); F75-ремап (план 10.59/10.62); батарея BT; откат временных правок ~/nixosniri (10.2); публикация в GitLab.
+
+## 10.65 ПОВТОРНЫЙ ЧЕК-РЕСЁРЧ AJAZZ + РЕАЛИЗАЦИЯ ЧТЕНИЯ МАКРОСОВ GET_MACRO (сессия 2026-09-17)
+
+> Владелец: «Проверь что у нас все забрано точно и давай реализуем то что щас возможно без наличия клавы». Сводка «что осталось незабранным» (GET_MACRO / SET_LED_BOOT_ANIMATION / COMMUNICATION_START/END + честные нереализуемошки) — сверена с кодом и PROTOCOL.md wsclx.
+
+### РЕ-ВЕРИФИКАЦИЯ «забрано всё точно» — ПОДТВЕРЖДЕНО (код vs PROTOCOL.md wsclx)
+- в `mod cmd` есть ВСЕ команды PROTOCOL.md: GET_DEVICE_INFO(16), GET_GAME_MODE(17,задел), GET_KEY(18), GET_LED_EFFECT(19), GET_CUSTOM_LED_DATA(20), GET_FN_KEY(22), GET_DEFAULT_FN_KEY_MATRIX(28), GET_DEFAULT_KEY_MATRIX(31), SET_GAME_MODE(33,задел), SET_KEY(34), SET_LED_EFFECT(35), SET_CUSTOM_LED_DATA(36), SET_MACRO(37), SET_FN_KEY(38), SET_FACTORY_RESET(15), SET_LED_BOOT_ANIMATION(64,задел), SET_LED_USER_ANIMATION(65,TFT-ack), SET_TFT_USER_ANIMATION(80), SET_TFT_BUILT_IN_INDEX(81).
+- Единственное реально реализуемое без железа оставалось — **чтение макросов `GET_MACRO (21)`** (wsclx документирует полный read path). Реализовано (ниже).
+- `COMMUNICATION_START/END (1/2)` — не имеют смысла: wsclx подтвердил, что gohv-фрейминг не работает на fw 1.07 (журнал 10.60).
+
+### ВНЕСЕНО (git diff, +23 строки в types.rs + правки ajazz_ak820.rs/mod.rs)
+
+1. **`src/types.rs`** — новые типы:
+   - `MacroEvent { delay_ms: u16, key_code: u8, family: u8, is_press: bool }` (family = wire actionType: 3=keyboard, 1=mouse, 2=consumer/text);
+   - `Macro { id: u8, events: Vec<MacroEvent> }`.
+2. **`src/devices/ajazz_ak820.rs`**:
+   - `mod cmd`: добавлен `GET_MACRO = 21`;
+   - новый приватный `get_many_at(cmd, addr_base, size)` — многочанковое чтение с ПРОИЗВОЛЬНЫМ базовым адресом (для data-блоков макросов по offset); `get_many` переписан поверх него (addr_base=0);
+   - метод `get_macros()` в `impl KeyboardDevice` — полный wsclx read path: `GET_MACRO index` (400 б = 100 слотов × 4 б LE offset) → для каждого ненулевого слота заголовок 4 б (LE u16 = событий×2) → блок `count*4` байт → декод событий (delay LE u16, key_code, flags: bit7=press, bits6..4=actionType).
+3. **`src/devices/mod.rs`** — в trait добавлен 4-й default-метод `get_macros() -> Result<Vec<Macro>>` (`Unsupported` на прочих устройствах); импортирован `Macro`.
+
+### Сборка
+- `cargo check --all-targets` — 0 ошибок, 0 warnings.
+- `cargo test --lib` — 2/2 (RGB565, hex-color).
+- `cargo build --release` — успех (53s): свежие `target/release/kbc` + `target/release/keyboard-center`.
+
+### Честно / остаётся
+- `get_macros` — НЕ проверен на железе (AK820 Pro нет). Формат index/header/data — из wsclx PROTOCOL.md (fw 1.07); литература: `macros::read` wsclx.
+- Забрать без железа больше нечего: `SET_LED_BOOT_ANIMATION` (payload не расшифрован), энкодер firmware-fixed, sleep/battery/TFT-детали — всё уже в коде или требует живого теста.
+- Живой тест Ajazz (когда появится клавиатура); F75-ремап (10.59/10.62); батарея BT; откат ~/nixosniri (10.2).
+
+## 10.66 ПОЛНЫЙ АУДИТ: ЧТО РЕАЛИЗОВАНО / НЕ РЕАЛИЗОВАНО ПО КАЖДОЙ КЛАВИАТУРЕ (сессия 2026-09-17, без железа)
+
+> Задача владельца: «проверь GUI-код, запиши в журнал что не сделано». Аудит проведён ЧТЕНИЕМ кода (живого железа нет — F75/ресивер недоступны в этой сессии, F99/Ajazz физически отсутствуют). Правки КОДА в этой сессии НЕ вносились (только журнал). Сборка до аудита чистая (10.65).
+
+### 1. AULA F75 (USB 258A:010C) + ресивер 2.4G (3554:FA09)
+
+**РАБОТАЕТ / ПОДТВЕРЖДЕНО НА ЖЕЛЕЗЕ (прошлые сессии):**
+- host-рендеринг эффектов (render_frame + host_frame/host_frame_with, keepalive), чтение/запись конфига (06 84/06 04, 520 б), слоты эффектов data[58..96], маркер 5A A5;
+- сохранение в память: save_hardware_effect (селектор data[10]), save_hardware_light (a=00/09 во ВСЕХ слотах), save_effect_with_style (data[10]+слот яркости/скорости), save_profile_to_eeprom (запись конфига + свет вкл);
+- ремап USB: remap_key / set_fn_layer / get_current_keymap — реальный канал 06 83/03 (512-байтная таблица, 128 слотов), защита Fn #53 и F1–F12 (10.62);
+- ресивер 2.4G: apply_rgb_persistent / apply_light_persistent (0x13, сразу во флеш), селектор led[10] (WL_EFFECTS), яркость/скорость в слотах [58+2*(led[10]-1)] (10.49), wireless_battery (0x05→0x0A, байт[6]);
+- get_rgb_preset — реальный (читает эффект-таблицу из read_config), не фейк.
+
+**НЕ РЕАЛИЗОВАНО (в коде — пометки «ВЫМЫСЕЛ (не проверено)»):**
+- **set_rgb_mode / set_rgb_color / set_rgb_brightness / set_rgb_speed (USB)** — cmd-id 0x02–0x05 ВЫДУМАНЫ, не проверены на железе. В GUI/CLI эти методы НЕ используются (везде host-движок или persistent-хуки), но присутствуют в driver.
+- **set_polling_rate / set_debounce / set_sleep_timer (USB)** — cmd 0x30/0x31/0x32 ВЫДУМАНЫ (реальные команды не ревёрснуты).
+- **set_encoder_action** — cmd 0x20 ВЫДУМАН; ролик F75 = только громкость (Volume/Mute), переназначение НЕ ревёрснуто.
+- **Аппаратные макросы** (record_macro/stop_macro/set_macro) — не поддерживаются AULA (честный Unsupported); протокола нет.
+- **TFT/Screen** (set_screen_image/brightness, sync_system_time) — нет экрана, честный Unsupported.
+- **Батарея USB/BT** — канала НЕТ (10.52); BT-режим не тестировался вообще.
+- **load_profile_from_eeprom** — отдельной команды нет (конфиг сам грузится при старте; Unsupported честно).
+
+### 2. AULA F99 (USB 258A:004E…, ресивер общий 3554:FA09 → AulaF75)
+
+**РАБОТАЕТ (код тот же протокол, что у F75 — SinoWealth SH68F90; на железе НЕ проверялось):**
+- render_frame (113 LED, модель 0xA4 по OpenRGB/KB.ini), host-эффекты через общий host_frame_with (led_count/led_cols параметризованы);
+- запись в память USB-путём: save_hardware_effect / save_hardware_light / save_effect_with_style / save_profile_to_eeprom (всё как F75, data[58..96]);
+- get_rgb_preset — реальный (эффект-таблица из read_config);
+- apply_rgb_persistent / apply_light_persistent — всегда Ok(false) (2.4G обрабатывает AulaF75 через ресивер; проводной latch не найден) → GUI/CLI корректно уходят в host-рендеринг.
+
+**НЕ РЕАЛИЗОВАНО (честный Unsupported, cmd-id не выдуманы):**
+- set_rgb_mode/color/brightness/speed — намеренно НЕ реализованы (надёжнее host-движок); per-key не ревёрснут; ведущие комментарии прямо об этом говорят.
+- **Ремап/слой Fn/чтение keymap** — канал F99 НЕ ревёрснут (в отличие от F75: источник cloudglides/openaula давал только проводной F75).
+- Энкодер (ролик громкости/подсветки) — протокол не ревёрснут.
+- Аппаратные макросы — Unsupported.
+- set_polling_rate / set_debounce / set_sleep_timer — cmd-id не ревёрснуты.
+- TFT/Screen — нет экрана, Unsupported.
+- Батарея — Ok(None) (USB/2.4G каналы — как F75; на ресивере обрабатывается AulaF75).
+- set_indicator (индикаторы) — не ревёрснут (был выдуманный 0x21, удалён).
+
+### 3. Ajazz AK820 Pro (0C45:8009/800A/8099, BT 0C45:FEFE, ISP 0C45:7140)
+
+**РЕАЛИЗОВАНО по wsclx PROTOCOL.md (fw 1.07); НА ЖЕЛЕЗЕ НЕ проверялось (клавиатуры нет):**
+- Транспорт report-ID-0 frame (build_frame/read_response), get/set, get_many/get_many_at/set_many_at;
+- RGB: set_rgb_mode/color/brightness/speed (SET_LED_EFFECT 35, режимы 0x00–0x13 + Custom 0x80), render_frame (per-key custom-LED, 512 б), get_rgb_preset (реальные пресеты);
+- Keymap: remap_key / set_fn_layer / get_current_keymap (GET_KEY 18 / GET_FN_KEY 22 / SET_KEY 34 / SET_FN_KEY 38, 128 слотов, страницы Keyboard/Consumer/Macro/Tgl);
+- Макросы: set_macro (37) + **get_macros (21)** — чтение всех макросов;
+- Screen (TFT 128×128): set_screen_image + **set_screen_animation** (многокадровый GIF, задержки в 2 мс), upload через интерфейс 0xFF67, финал SET_TFT_BUILT_IN_INDEX 81;
+- sync_system_time (28, через ctl-канал 0xFF13/iface 3), set_sleep_timer (17, 4 ступени) — переведены на control-канал (10.63);
+- battery (GET_DEVICE_INFO 16, байт[17] — работает в отличие от F75);
+- apply_rgb_persistent / apply_light_persistent (запись сразу во флеш через SET_LED_EFFECT) → Ok(true);
+- get_current_effect (19), factory_reset (15), get_factory_keymap (28+31), get_macros (21) — реализованы (10.64).
+
+**НЕ РЕАЛИЗОВАНО (честный Unsupported / задел):**
+- **set_screen_brightness** — команда на яркость TFT не декодирована.
+- **set_encoder_action** — firmware-fixed (Volume/Mute); gohv/actop420 допускают ремап энкодера, но требует живой проверки.
+- **record_macro / stop_macro** — аппаратная запись макроса на устройстве не реализована (программный set_macro есть).
+- **set_polling_rate / set_debounce** — для Sonix SN32F299 таких команд нет (протокол не предусматривает).
+- **save_profile_to_eeprom** — Unsupported: Ajazz пишет во флеш сразу, отдельных слотов профилей нет.
+- **SET_LED_BOOT_ANIMATION (64)** — cmd известен, payload не расшифрован (задел `#[allow(dead_code)]`).
+- TFT-чunk ack (cmd 65) — константа и частичный фильтр в upload_tft_payload есть; синхронная многочанковая загрузка требует живого теста.
+
+### 4. Общий итог GUI (проверка чтением, всё согласовано)
+
+- Все три устройства корректно проходят через fetcher → панели RGB-студии работают с host-движком/персистент-хуками в зависимости от connection_type (USB ↔ 2.4G). **Критических багов не найдено.**
+- Мёртвый код-задел (не влияет на работу): `build_device_list_box`/`build_connected_panel` (device_panel.rs), `build_color_picker`/`build_presets_list` (rgb_studio.rs:1103/1160) — не подключены к UI.
+- keymap_editor использует жёстко `Layout::L75` (для Ajazz 75% совпадает, но геометрия другая — F99 96% не влезает; UX-нюанс, не баг).
+- Автосейв при закрытии, поколение кадров (10.39), фоновые потоки записи — на месте.
+
+### Открытые вопросы / следующие шаги (все — без кода, требуют железа или решения)
+
+1. **Живой тест F75/F99/Ajazz** всех новых методов (ремап F75 на железе — приоритет №1 после 10.62; Ajazz battery/RGB/TFT — по появлению клавиатуры).
+2. **Батарея BT F75** — не тестировалась; Ajazz BT (0C45:FEFE) — заряд читается через GET_DEVICE_INFO[17].
+3. **Унификация CLI**: `kbc save` без `--effect` на ресивере 2.4G идёт в save_profile_to_eeprom (USB-путь) → на 2.4G некорректен; при желании развести.
+4. **Документация/README**: единицы задержки TFT (2 vs 5 мс), sleep 4 ступени — сверить на живом Ajazz; раздел Fedora уже добавлен (10.57/10.58).
+5. Откат временных правок ~/nixosniri (10.2); публикация в GitLab — по решению владельца.

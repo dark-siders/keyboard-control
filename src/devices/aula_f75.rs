@@ -93,6 +93,32 @@ const REPORT_FEATURE: u8 = 0x06;
 /// Длина пакета (без report id).
 const PACKET_LEN: usize = 520;
 
+// --- Ремап (keymap) F75: реальный протокол ---
+// Первоисточники (проверены на железе авторами):
+//   cloudglides/aula-f75-linux-drivers  (docs/PROTOCOL.md, 2026-08-24)
+//   not-ayan/openaula                   (README.md, реверс таблицы)
+// Журнал AGENTS.md 10.59–10.61. Формат:
+//   - Вся таблица слоя — 512 байт = 128 слотов × 4 [page, 0x00, 0x00, usage]
+//     (page 0x00 = HID usage page 0x07 клавиатура/кейпад, 0x02 = 0x0C consumer;
+//     unbind = page 0x00 usage 0x00 = [0,0,0,0]).
+//   - Валидные слоты 0..126 (слот 127 перекрыл бы трейлер 5A A5 на [518..519]).
+//   - Залочены прошивкой F1–F12: [12,18,24,30,36,42,48,54,60,66,72,78].
+//   - Физическая Fn — слот #53 (байт 212), родное [13,0,0,0]; «тупая»
+//     перезапись слота ломает Fn (openaula: нужна точечная запись) — защищаем.
+// Чтение (openaula): запрос 06 83 00 <layer> 01 00 00 02 (+пад до 520) →
+// GET 06 520: payload 512 б с offset 8 (report id + эхо-заголовок).
+// Запись (cloudglides blob, 520 б): 06 03 <layer> 00 01 00 00 FF + слоты +
+// трейлер 5A A5. Пишем ТОЛЬКО изменённый слот (read-modify-write); подтверждается
+// read-back. Формат чтения слоя FN1 — по аналогии с blob (байт [2] = слой),
+// живая сверка отложена (журнал 10.62).
+const KEYMAP_SLOTS: usize = 128;
+const KEYMAP_SLOT_BYTES: usize = 4;
+const KEYMAP_BYTES: usize = KEYMAP_SLOTS * KEYMAP_SLOT_BYTES;
+/// Залоченные прошивкой F1–F12 (cloudglides PROTOCOL.md) — запись запрещена.
+const LOCKED_F_KEYS: [u8; 12] = [12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78];
+/// Слот физической Fn-клавиши (openaula) — перезапись ломает Fn.
+const FN_SLOT: u8 = 53;
+
 pub struct AulaF75 {
     bridge: HidBridge,
     /// Последняя установленная яркость LED (0..4, масштаб прошивки) на
@@ -404,6 +430,114 @@ impl AulaF75 {
         self.wl_write_pages(0x04, &led)?;
         Ok(())
     }
+
+    // --- Ремап (keymap) F75: реальный протокол ---
+    // Транспорт — тот же feature-канал 0x06/520 б, что и конфиг. Ремап работает
+    // ТОЛЬКО по USB (wired): на ресивере 2.4G / BT запись настроек через радио
+    // не реализована ни в одном проверенном источнике (cloudglides: «2.4G —
+    // только live per-key стрим»).
+
+    /// Прочитать таблицу keymap слоя `layer` (0=Default, 1=FN1) — ровно 512 байт.
+    /// Путь чтения — openaula (CMD 0x83): запрос `06 83 00 <layer> 01 00 00 02` +
+    /// пад до 520 → GET 06 520. Ответ: report id + эхо-заголовок (8 б) + payload
+    /// 512 б (128 слотов × 4). Формат чтения FN1 — по аналогии (байт [2] = слой),
+    /// живая сверка отложена (журнал 10.62).
+    fn read_keymap_raw(&self, layer: u8) -> Result<Vec<u8>> {
+        if self.bridge.connection != ConnectionType::Usb {
+            return Err(Error::Unsupported(
+                "ремап F75 работает только по USB (wired); на 2.4G/BT запись настроек не реализована".into(),
+            ));
+        }
+        let req = Self::packet(&[0x83, 0x00, layer, 0x01, 0x00, 0x00, 0x02]);
+        self.bridge.send_feature(&req)?;
+        let report = self.bridge.read_feature(REPORT_FEATURE, PACKET_LEN)?;
+        if report.len() < 8 + KEYMAP_BYTES {
+            return Err(Error::Protocol(format!(
+                "keymap слоя {layer}: ответ неполный ({} байт, ожидается {})",
+                report.len(),
+                8 + KEYMAP_BYTES
+            )));
+        }
+        Ok(report[8..8 + KEYMAP_BYTES].to_vec())
+    }
+
+    /// Записать таблицу keymap слоя `layer` (cloudglides blob, 520 б):
+    /// `06 03 <layer> 00 01 00 00 FF` + 128 слотов + трейлер `5A A5` на [518..519].
+    /// `table` — ровно 512 байт слотов; пишем переданную таблицу целиком.
+    fn write_keymap_raw(&self, layer: u8, table: &[u8]) -> Result<()> {
+        if table.len() != KEYMAP_BYTES {
+            return Err(Error::Protocol(
+                "write_keymap: нужна таблица ровно 512 байт".into(),
+            ));
+        }
+        if self.bridge.connection != ConnectionType::Usb {
+            return Err(Error::Unsupported(
+                "ремап F75 работает только по USB (wired); на 2.4G/BT запись настроек не реализована".into(),
+            ));
+        }
+        let mut buf = Vec::with_capacity(PACKET_LEN);
+        buf.push(REPORT_FEATURE);
+        buf.extend_from_slice(&[0x03, layer, 0x00, 0x01, 0x00, 0x00, 0xFF]);
+        buf.extend_from_slice(table);
+        // Трейлер перекрывает последние 2 байта невалидного слота 127 — намеренно.
+        buf[PACKET_LEN - 2] = 0x5A;
+        buf[PACKET_LEN - 1] = 0xA5;
+        debug_assert_eq!(buf.len(), PACKET_LEN);
+        self.bridge.send_feature(&buf)?;
+        Ok(())
+    }
+
+    /// Кодирование действия в 4 байта слота [page, 0x00, 0x00, usage].
+    /// Пока поддерживаются только «клавиша→клавиша» (page 0x00) и «медиа»
+    /// (page 0x02); модификаторы/слои/макросы — ждут живого теста (журнал 10.62).
+    fn slot_encode(action: &KeyAction) -> Result<[u8; 4]> {
+        match action {
+            KeyAction::Press(usage) => Ok([0x00, 0x00, 0x00, (*usage & 0xFF) as u8]),
+            KeyAction::Media(usage) => Ok([0x02, 0x00, 0x00, (*usage & 0xFF) as u8]),
+            _ => Err(Error::Unsupported(
+                "F75: поддержан ремап «клавиша→клавиша» и «медиа»; модификаторы/слои/макросы — ждут живого теста".into(),
+            )),
+        }
+    }
+
+    /// Декодирование 4 байт слота в действие. Слоты со служебными page
+    /// (13 = Fn, и т.п.) возвращают None — их НЕ трогаем при записи (RMW).
+    fn slot_decode(bytes: [u8; 4]) -> Option<KeyAction> {
+        match bytes[0] {
+            0x00 => {
+                let usage = bytes[3] as u16;
+                if usage == 0 {
+                    None // unbind
+                } else {
+                    Some(KeyAction::Press(usage))
+                }
+            }
+            0x02 => Some(KeyAction::Media(bytes[3] as u16)),
+            _ => None, // page 13 (Fn) и прочие служебные — не разбираем
+        }
+    }
+
+    /// Проверка защищённых/невалидных слотов перед записью (RMW).
+    /// Залоченные прошивкой F1–F12 (cloudglides) и физическая Fn (#53, openaula)
+    /// возвращают критическую ошибку — запись в них запрещена.
+    fn check_writable_slot(slot: u8) -> Result<()> {
+        if slot == FN_SLOT {
+            return Err(Error::Protocol(
+                "слот #53 — физическая Fn-клавиша, перезапись ломает Fn (openaula); защищено".into(),
+            ));
+        }
+        if LOCKED_F_KEYS.contains(&slot) {
+            return Err(Error::Protocol(
+                format!("слот #{slot} — F1–F12 залочены прошивкой (cloudglides); запись запрещена"),
+            ));
+        }
+        if slot as usize >= KEYMAP_SLOTS {
+            return Err(Error::Protocol(
+                format!("слот #{slot} вне диапазона keymap (0..{})", KEYMAP_SLOTS - 1),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl KeyboardDevice for AulaF75 {
@@ -509,36 +643,61 @@ fn vid_pid(&self) -> (u16, u16) {
     }
 
     // --- Keymap ------------------------------------------------------
+    // Реальный протокол ремапа (cloudglides + openaula, журнал 10.59–10.61):
+    // read-modify-write — полная таблица слоя читается, меняется ТОЛЬКО целевой
+    // слот, таблица пишется обратно blob'ом cloudglides. До реверса метода
+    // remap здесь были ВЫДУМАННЫЕ cmd-id (0x10/0x11) — заменены.
     fn remap_key(&self, from: KeyId, to: KeyAction) -> Result<()> {
-        let keycode_out = match &to {
-            KeyAction::Press(k) => *k,
-            KeyAction::Media(k) => *k | 0x40_00, // старший байт маркирует consumer
-            KeyAction::Modifier(m) => *m as u16,
-            KeyAction::FnLayer(l) => *l as u16 | 0x80_00,
-            KeyAction::Macro(m) => *m as u16 | 0xC0_00,
-        };
-        self.cmd(
-            0x10,
-            &[
-                (from.0 & 0xFF) as u8,
-                (from.0 >> 8) as u8,
-                (keycode_out & 0xFF) as u8,
-                (keycode_out >> 8) as u8,
-            ],
-        )
+        let slot = from.0 as u8;
+        Self::check_writable_slot(slot)?;
+        let encoded = Self::slot_encode(&to)?;
+        let mut table = self.read_keymap_raw(0)?; // слой 0 = Default
+        let off = (slot as usize) * KEYMAP_SLOT_BYTES;
+        table[off..off + KEYMAP_SLOT_BYTES].copy_from_slice(&encoded);
+        self.write_keymap_raw(0, &table)
     }
 
     fn set_fn_layer(&self, layer: FnLayer) -> Result<()> {
-        for (key, action) in &layer.bindings {
-            self.remap_key(*key, action.clone())?;
+        if layer.bindings.is_empty() {
+            return Ok(()); // нечего менять: не затираем FN1 пустой записью
         }
-        self.cmd(0x11, &[0x01])
+        let mut table = self.read_keymap_raw(1)?; // слой 1 = FN1
+        for (key, action) in &layer.bindings {
+            let slot = key.0 as u8;
+            Self::check_writable_slot(slot)?;
+            let encoded = Self::slot_encode(action)?;
+            let off = (slot as usize) * KEYMAP_SLOT_BYTES;
+            table[off..off + KEYMAP_SLOT_BYTES].copy_from_slice(&encoded);
+        }
+        self.write_keymap_raw(1, &table)
     }
 
     fn get_current_keymap(&self) -> Result<Keymap> {
+        let base_tab = self.read_keymap_raw(0)?;
+        // FN1 читаем пробной попыткой: формат чтения слоя 1 пока не сверен на
+        // железе (журнал 10.62), при неудаче не роняем карту целиком.
+        let fn_tab = self.read_keymap_raw(1).unwrap_or_default();
+        let decode = |table: &[u8]| {
+            let mut out = Vec::new();
+            for i in 0..KEYMAP_SLOTS.saturating_sub(1) {
+                let off = i * KEYMAP_SLOT_BYTES;
+                let bytes = [
+                    table[off],
+                    table[off + 1],
+                    table[off + 2],
+                    table[off + 3],
+                ];
+                if let Some(act) = Self::slot_decode(bytes) {
+                    out.push((KeyId(i as u16), act));
+                }
+            }
+            out
+        };
         Ok(Keymap {
-            base: Vec::new(),
-            fn_layer: FnLayer::default(),
+            base: decode(&base_tab),
+            fn_layer: FnLayer {
+                bindings: decode(&fn_tab),
+            },
         })
     }
 
