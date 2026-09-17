@@ -345,6 +345,8 @@ keyboard-control/
 ├── 99-keyboard-center.rules  # udev-правила (доступ к hidraw)
 ├── docs/
 │   └── collect-data.md       # инструкция владельцам F99/Ajazz (read-only сбор данных)
+├── scripts/
+│   └── collect-data.sh       # автособирает read-only диагностику и упаковывает в tar.gz
 ├── data/
 │   ├── keyboard-center.desktop
 │   ├── keyboard-center.svg   # иконка приложения
@@ -416,7 +418,17 @@ keyboard-control/
 
 ### У вас AULA F99 или Ajazz AK820 Pro?
 
-У проекта **физически нет этих клавиатур** — драйверы под них написаны по ресёрчу и ещё не проверялись на реальном железе. Если у вас есть такая клавиатура, помогите её подтвердить: соберите read-only диагностику по инструкции **[docs/collect-data.md](docs/collect-data.md)** и пришлите вывод — это займёт 5 минут и не меняет настроек клавиатуры.
+У проекта **физически нет этих клавиатур** — драйверы под них написаны по ресёрчу и ещё не проверялись на реальном железе. Если у вас есть такая клавиатура, помогите её подтвердить:
+
+```bash
+git clone https://gitlab.com/dark_siders/keyboard-control && cd keyboard-control
+# один раз собрать kbc (см. docs/collect-data.md, раздел 1 — NixOS или Fedora),
+# затем:
+./scripts/collect-data.sh
+# результат: ~/kbc-diag-ГГГГММДД-ЧЧММСС.tar.gz
+```
+
+Скрипт собирает только **read-only** диагностику (не меняет настроек клавиатуры): `kbc list/info/probe/battery`, дампы конфиг-региона (F99), `lsusb` и uevent. Подробности — в **[docs/collect-data.md](docs/collect-data.md)**. Пришлите архив — это займёт 5 минут и не меняет настроек клавиатуры.
 
 ---
 
