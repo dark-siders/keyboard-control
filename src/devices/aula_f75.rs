@@ -22,9 +22,20 @@
 //     Нужен ПОСТОЯННЫЙ поток кадров (keepalive ~0.5–1с), иначе подсветка гаснет.
 //     N = 90 (матрица LED по OpenRGB SinowealthKeyboard10cController, модель 0xCD).
 //
-//   ВАЖНО: методы ниже (set_rgb_mode/set_rgb_color/remap_key/polling rate и т.д.)
-//   НАПИСАНЫ С ВЫДУМАННЫМИ cmd-id — на железе не проверены. Рабочие:
-//   render_frame() и чтение конфига. Остальное заполняем по мере реверса.
+//   Цветовая таблица (VERIFIED cloudglides 2026-08-24, журнал 10.59/10.66):
+//     read 0x8a / write 0x0a, addr 00 00 01 00, len 0x0200 (+ пад до 520),
+//     512 байт = 128 × [RR GG BB 00]. Хранение держится; ОТОБРАЖЕНИЕ требует
+//     active self-define (custom) режима прошивки — не ревёрснут (см. ниже).
+//   РЕАЛИЗОВАННЫЕ МЕТОДЫ (по состоянию на 2026-09-17, «добить»):
+//     - render_frame()            — direct-канал (host-rendering) ✓
+//     - read_config/write_config  — конфиг-регион ✓
+//     - save_hardware_effect/light/effect_with_style — запись в память ✓
+//     - remap_key/set_fn_layer    — keymap (cloudglides+openaula) ✓
+//     - set_rgb_mode/brightness/speed — ОБЁРТКИ над записью в память
+//       (убраны выдуманные 0x02/0x04/0x05; применяются после кика/перезапуска)
+//     - set_rgb_color             — RMW цветовой таблицы 0x8a/0x0a (USB)
+//     - set_polling_rate/debounce/sleep_timer — честный Unsupported
+//       (реальных команд в открытых источниках НЕТ, журнал 10.59/10.66)
 
 use super::hid::HidBridge;
 use super::{Error, KeyboardDevice, Result};
@@ -172,19 +183,113 @@ impl AulaF75 {
         Ok(())
     }
 
-    /// Название режима подсветки по индексу из эффект-таблицы (приблизительно).
-    fn effect_name(_idx: u8) -> &'static str {
-        // Полного маппинга эффектов пока нет; уточнять по дампу прошивки.
-        "Эффект"
+    /// Прочитать цветовую таблицу клавиш — 512 байт = 128 × [RR GG BB 00].
+    /// Канал USB: CMD 0x8a, addr 00 00 01 00, len 0x0200 (+ пад до 520).
+    /// VERIFIED cloudglides (журнал 10.59/10.66); в 10.5 тот же адрес давал
+    /// Protocol error — вероятно из-за неверного пада/порядка len.
+    fn read_color_table(&self) -> Result<Vec<u8>> {
+        if self.bridge.connection != ConnectionType::Usb {
+            return Err(Error::Unsupported(
+                "цветовая таблица ресивера 2.4G — отдельный канал (0x02/0x1C), не реализован".into(),
+            ));
+        }
+        let req = Self::packet(&[0x8a, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02]);
+        self.bridge.send_feature(&req)?;
+        let report = self.bridge.read_feature(REPORT_FEATURE, PACKET_LEN)?;
+        if report.len() < 8 + 512 {
+            return Err(Error::Protocol(format!(
+                "цветовая таблица прочитана неполностью: {} байт (ожидается {})",
+                report.len(),
+                8 + 512
+            )));
+        }
+        Ok(report[8..8 + 512].to_vec())
     }
 
-    // --- Протокол AULA F75 ---
-    // НА ЗАМЕТКУ: cmd() и всё через него — выдуманные ID, пока не проверено.
-    fn cmd(&self, cmd_id: u8, payload: &[u8]) -> Result<()> {
-        let mut buf = vec![cmd_id];
-        buf.extend_from_slice(payload);
+    /// Записать цветовую таблицу целиком (512 байт). VERIFIED cloudglides.
+    fn write_color_table(&self, table: &[u8]) -> Result<()> {
+        if table.len() != 512 {
+            return Err(Error::Protocol(
+                "write_color_table: нужен ровно 512 байт (128 × 4)".into(),
+            ));
+        }
+        if self.bridge.connection != ConnectionType::Usb {
+            return Err(Error::Unsupported(
+                "цветовая таблица ресивера 2.4G — отдельный канал (0x02/0x1C), не реализован".into(),
+            ));
+        }
+        let mut buf = Self::packet(&[0x0a, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02]);
+        buf[8..8 + 512].copy_from_slice(table);
         self.bridge.send_feature(&buf)?;
         Ok(())
+    }
+
+    /// Записать яркость и/или скорость АКТИВНОГО эффекта в его слот
+    /// эффект-таблицы. USB — через конфиг-регион (write_config, применяется
+    /// после кика/перезапуска); ресивер 2.4G — через LED config (0x04, сразу
+    /// во флеш). Слот = 58 + 2*(селектор-1), пара (a=яркость 0..=9,
+    /// b=(скорость<<4)|цвет) — эмпирика 10.28/10.49. Младшая тетрада b
+    /// (цвет) при записи скорости сохраняется.
+    fn set_active_style(&self, brightness: Option<u8>, speed: Option<u8>) -> Result<()> {
+        if self.bridge.connection == ConnectionType::Wireless2_4G {
+            let mut led = self.wl_led_config()?;
+            let sel = led.get(10).copied().unwrap_or(1);
+            let slot = 58 + 2 * (sel as usize).saturating_sub(1);
+            if slot + 1 >= led.len() {
+                return Err(Error::Protocol(format!(
+                    "слот активного эффекта {slot} вне LED config (len {})",
+                    led.len()
+                )));
+            }
+            if let Some(b) = brightness {
+                let bb = ((b as u16 * 9) / 255).min(9) as u8;
+                led[slot] = bb;
+                self.last_wl_brightness.set(bb);
+            }
+            if let Some(s) = speed {
+                let ss = ((s as u16 * 4) / 255).min(4) as u8;
+                led[slot + 1] = (ss << 4) | (led[slot + 1] & 0x0F);
+            }
+            return self.wl_write_pages(0x04, &led);
+        }
+        let snap = self.read_config()?;
+        if snap.len() < 136 {
+            return Err(Error::Protocol("короткий ответ конфига".into()));
+        }
+        let mut data = vec![0u8; 128];
+        data.copy_from_slice(&snap[8..136]);
+        let sel = data.get(10).copied().unwrap_or(1);
+        let slot = 58 + 2 * (sel as usize).saturating_sub(1);
+        if slot + 1 >= 128 {
+            return Err(Error::Protocol(format!(
+                "слот активного эффекта {slot} вне конфиг-региона (128)"
+            )));
+        }
+        if let Some(b) = brightness {
+            let bb = ((b as u16 * 9) / 255).min(9) as u8;
+            data[slot] = bb;
+        }
+        if let Some(s) = speed {
+            let ss = ((s as u16 * 4) / 255).min(4) as u8;
+            data[slot + 1] = (ss << 4) | (data[slot + 1] & 0x0F);
+        }
+        self.write_config(&data)?;
+        Ok(())
+    }
+
+    /// Маппинг host-режима на аппаратный код эффекта конфига (data[10], USB).
+    /// Приблизительный (в цикле Fn+` только радужные эффекты, однотонной
+    /// статики нет — журнал 10.26); уточнять на живом железе.
+    fn usb_effect_for_mode(mode: RgbMode) -> u8 {
+        match mode {
+            RgbMode::Breathing => 0x02,      // Дыхание
+            RgbMode::Reactive => 0x04,       // Реактивная
+            RgbMode::Rain => 0x05,           // Падающие блоки (дождь)
+            RgbMode::Ripple => 0x0A,         // пульсация (совпадает с ресивером)
+            RgbMode::SpectrumCycle => 0x08,  // Радуга
+            RgbMode::Wave => 0x0B,           // Перелив-волна
+            RgbMode::Static | RgbMode::Custom => 0x03, // Смена цветов (статично)
+        }
     }
 
     // --- Ресивер 2.4G (Compx 3554:FA09) ---
@@ -570,8 +675,9 @@ fn vid_pid(&self) -> (u16, u16) {
     }
 
     // --- RGB ----------------------------------------------------------
-    // Реальные команды: render_frame() (direct, подтверждён) + чтение конфига.
-    // set_rgb_mode/color/brightness/speed — ВЫДУМАННЫЕ cmd-id, до реверса.
+    // Реальные команды: render_frame() (direct host-rendering, подтверждён),
+    // чтение конфига, запись эффекта/света в память, цветовая таблица.
+    // set_rgb_* — честные обёртки (см. ниже), не вымысел.
     fn render_frame(&self, colors: &[Color]) -> Result<()> {
         // direct-режим: 06 08 00 00 01 00 7A 01 + (R,G,B)×N, пад до 520
         let mut buf = Self::packet(&[0x08, 0x00, 0x00, 0x01, 0x00, 0x7A, 0x01]);
@@ -585,56 +691,81 @@ fn vid_pid(&self) -> (u16, u16) {
         Ok(())
     }
 
-    // ВЫМЫСЕЛ (не проверено): set_rgb_mode
+    // --- RGB (аппаратные методы) -------------------------------------
+    // Выдуманные cmd-id (0x02–0x05) УБРАНЫ (журнал 10.66): отдельной live-
+    // команды «режим/яркость/скорость» у проводного F75 НЕТ — эффекты живут
+    // только в конфиг-регионе (селектор + слоты) либо в host-rendering.
+    // Методы ниже — ЧЕСТНЫЕ ОБЁРТКИ над записью в память (вариант владельца
+    // «б»): применяются после кика/перезапуска клавиатуры. Live-эффекты —
+    // только через render_frame() (host-движок), см. cli.rs/rgb_studio.rs.
     fn set_rgb_mode(&self, mode: RgbMode) -> Result<()> {
-        let mode_id = match mode {
-            RgbMode::Static => 0x01,
-            RgbMode::Breathing => 0x02,
-            RgbMode::Wave => 0x03,
-            RgbMode::SpectrumCycle => 0x04,
-            RgbMode::Ripple => 0x05,
-            RgbMode::Rain => 0x06,
-            RgbMode::Reactive => 0x07,
-            RgbMode::Custom => 0x08,
+        let code = match self.bridge.connection {
+            ConnectionType::Wireless2_4G => Self::wl_effect_for_mode(mode),
+            _ => Self::usb_effect_for_mode(mode),
         };
-        self.cmd(0x02, &[mode_id])
+        self.save_hardware_effect(code)
     }
 
-    // ВЫМЫСЕЛ (не проверено): set_rgb_color
+    // Пери-кей цвет по USB: read-modify-write цветовой таблицы (0x8a/0x0a).
+    // Запись держится и читается (VERIFIED cloudglides, журнал 10.59/10.66),
+    // но ОТОБРАЖЕНИЕ требует активного self-define (custom) режима прошивки,
+    // который на F75 не ревёрснут — живой цвет рисует render_frame().
+    // Ресивер 2.4G: отдельный канал (0x02/0x1C) — не реализован.
     fn set_rgb_color(&self, key: KeyId, color: Color) -> Result<()> {
-        // [0x03, key_lo, key_hi, r, g, b]
-        self.cmd(
-            0x03,
-            &[
-                (key.0 & 0xFF) as u8,
-                (key.0 >> 8) as u8,
-                color.r,
-                color.g,
-                color.b,
-            ],
-        )
+        if self.bridge.connection != ConnectionType::Usb {
+            return Err(Error::Unsupported(
+                "per-key цвет на ресивере 2.4G — канал 0x02/0x1C, не реализован".into(),
+            ));
+        }
+        let idx = key.0 as usize;
+        if idx >= 128 {
+            return Err(Error::Protocol(format!(
+                "KeyId {idx} вне диапазона цветовой таблицы (0..127)"
+            )));
+        }
+        let mut tbl = self.read_color_table()?;
+        let off = idx * 4;
+        tbl[off] = color.r;
+        tbl[off + 1] = color.g;
+        tbl[off + 2] = color.b;
+        tbl[off + 3] = 0x00;
+        self.write_color_table(&tbl)
     }
 
-    // ВЫМЫСЕЛ (не проверено): set_rgb_brightness
+    // Яркость пишется в слот АКТИВНОГО эффекта (data[10] / led[10]):
+    // 58 + 2*(селектор-1), байт a в 0..=9. Применяется после кика (USB)
+    // или сразу во флеш (ресивер).
     fn set_rgb_brightness(&self, level: u8) -> Result<()> {
-        self.cmd(0x04, &[level])
+        self.set_active_style(Some(level), None)
     }
 
-    // ВЫМЫСЕЛ (не проверено): set_rgb_speed
+    // Скорость пишется в старшую тетраду байта b слота активного эффекта
+    // (цвет в младшей тетраде сохраняется).
     fn set_rgb_speed(&self, speed: u8) -> Result<()> {
-        self.cmd(0x05, &[speed])
+        self.set_active_style(None, Some(speed))
     }
 
-    /// Прочитать текущий эффект из конфига (реально, через read_config).
+    /// Прочитать текущий аппаратный эффект из конфига: селектор (data[10]),
+    /// яркость/скорость — из СЛОТА активного эффекта (не первой пары).
+    /// Только по USB: ресивер отвечает на канал 0x06 константным блоком
+    /// (журнал 10.15), для 2.4G — LED config через 0x13.
     fn get_rgb_preset(&self) -> Result<Vec<RgbPreset>> {
+        if self.bridge.connection != ConnectionType::Usb {
+            return Err(Error::Unsupported(
+                "get_rgb_preset на 2.4G: читайте LED config каналом 0x13".into(),
+            ));
+        }
         let data = self.read_config()?;
-        // data[0] = report id, [1..8] — эхо-заголовок, [8..] — 128 байт config + 5A A5
-        let cfg = &data[8..data.len().min(8 + 128)];
-        // Эффект-таблица: пары (a,b) с offset 58; берём первую пару как текущую.
-        let a = cfg.get(58).copied().unwrap_or(0x09); // яркость
-        let b = cfg.get(59).copied().unwrap_or(0); // (speed << 4) | color
+        if data.len() < 8 + 128 {
+            return Err(Error::Protocol("короткий ответ конфига".into()));
+        }
+        let cfg = &data[8..8 + 128];
+        let sel = cfg.get(10).copied().unwrap_or(0);
+        let slot = 58 + 2 * (sel as usize).saturating_sub(1);
+        let a = cfg.get(slot).copied().unwrap_or(0x09);
+        let b = cfg.get(slot + 1).copied().unwrap_or(0);
         Ok(vec![RgbPreset {
-            name: format!("{} (из прошивки)", Self::effect_name(b & 0x0F)),
+            name: format!("{} (из прошивки)", hw_effect_name(sel).unwrap_or("Эффект")),
             mode: RgbMode::Custom,
             colors: vec![],
             brightness: a,
@@ -716,17 +847,21 @@ fn vid_pid(&self) -> (u16, u16) {
 
     // --- Encoder ------------------------------------------------------
     fn set_encoder_action(&self, action: EncoderAction) -> Result<()> {
-        // F75 — ролик только громкость.
-        let action_id = match action {
-            EncoderAction::Volume | EncoderAction::Mute => 0x01,
-            _ => return Err(Error::Unsupported("ролик F75 поддерживает только громкость")),
-        };
-        self.cmd(0x20, &[action_id])
+        // Ролик F75 аппаратно жёстко = громкость: отдельной команды настройки
+        // энкодера в протоколе НЕТ (не документирован ни одним источником,
+        // журнал 10.59/10.66). Volume/Mute — штатное поведение, коммандить
+        // нечем — возвращаем Ok (выдуманный cmd 0x20 убран).
+        match action {
+            EncoderAction::Volume | EncoderAction::Mute => Ok(()),
+            _ => Err(Error::Unsupported(
+                "ролик F75 поддерживает только громкость (аппаратно), переназначение не ревёрснуто",
+            )),
+        }
     }
 
     // --- Macros ---------------------------------------------------------
     fn record_macro(&self, _macro_id: u8) -> Result<()> {
-        Err(Error::Unsupported("аппаратные макросы не поддерживаются AULA F75"))
+        Err(Error::Unsupported("аппаратные макросы не поддерживаются AULA F75 (cloudglides: MACRO_SUPPORTED=false)"))
     }
 
     fn stop_macro(&self) -> Result<()> {
@@ -734,27 +869,31 @@ fn vid_pid(&self) -> (u16, u16) {
     }
 
     fn set_macro(&self, _id: u8, _actions: Vec<KeyAction>) -> Result<()> {
-        Err(Error::Unsupported("аппаратные макросы не поддерживаются AULA F75"))
+        Err(Error::Unsupported("аппаратные макросы не поддерживаются AULA F75 (cloudglides: MACRO_SUPPORTED=false)"))
     }
 
     // --- System ---------------------------------------------------------
-    fn set_polling_rate(&self, rate: u16) -> Result<()> {
-        let rate_id = match rate {
-            125 => 0x01,
-            250 => 0x02,
-            500 => 0x03,
-            1000 => 0x04,
-            _ => return Err(Error::Protocol("неподдерживаемый polling rate".into())),
-        };
-        self.cmd(0x30, &[rate_id])
+    // Выдуманные cmd 0x30/0x31/0x32 УБРАНЫ: реальных USB-команд для
+    // polling rate / debounce / sleep в открытых PROTOCOL.md НЕТ (журнал
+    // 10.59/10.66). На ресивере 2.4G эти параметры живут в LED config
+    // (cloudglides: debounce — frame0 byte8, sleep — frame1 byte15 =
+    // minutes*2) — реализация ожидает живого теста, см. журнал 10.66.
+    fn set_polling_rate(&self, _rate: u16) -> Result<()> {
+        Err(Error::Unsupported(
+            "polling rate F75: команда не ревёрснута (нет в открытых PROTOCOL.md)",
+        ))
     }
 
-    fn set_debounce(&self, ms: u16) -> Result<()> {
-        self.cmd(0x31, &[(ms & 0xFF) as u8, (ms >> 8) as u8])
+    fn set_debounce(&self, _ms: u16) -> Result<()> {
+        Err(Error::Unsupported(
+            "debounce F75: команда не ревёрснута; на ресивере 2.4G живёт в LED config (frame0 byte8, cloudglides)",
+        ))
     }
 
-    fn set_sleep_timer(&self, seconds: u16) -> Result<()> {
-        self.cmd(0x32, &[(seconds & 0xFF) as u8, (seconds >> 8) as u8])
+    fn set_sleep_timer(&self, _seconds: u16) -> Result<()> {
+        Err(Error::Unsupported(
+            "sleep timer F75: команда не ревёрснута; на ресивере 2.4G — LED config (frame1 byte15 = minutes*2, cloudglides)",
+        ))
     }
 
     fn get_battery_level(&self) -> Result<Option<u8>> {

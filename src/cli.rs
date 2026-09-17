@@ -287,8 +287,11 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
                 None if dev.connection_type() == ConnectionType::Usb => {
                     println!(
                         "батарея по USB не читается (проводной канал без данных о заряде) — \
-                         переключите клавиатуру на 2.4G/BT"
+                         переключите клавиатуру на 2.4G"
                     );
+                }
+                None if dev.connection_type() == ConnectionType::Bluetooth => {
+                    println!("батарея по Bluetooth не поддерживается (BT-режим закрыт)");
                 }
                 None => println!("батарея не поддерживается устройством"),
             }
