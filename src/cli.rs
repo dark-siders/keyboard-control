@@ -456,7 +456,7 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
         }
         // Direct-режим живёт только пока идёт поток кадров.
         if let Some(hold) = args.hold {
-            let interval = std::time::Duration::from_millis(400);
+            let interval = std::time::Duration::from_millis(40);
             let end = std::time::Instant::now() + std::time::Duration::from_millis(hold);
             let mut sent = 1;
             while std::time::Instant::now() < end {
@@ -496,8 +496,8 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
         loop {
             let frame = host_frame_with(&params, t_ms, n, cols);
             dev.render_frame(&frame)?;
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            t_ms += 500;
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            t_ms += 40;
         }
     }
     Ok(0)

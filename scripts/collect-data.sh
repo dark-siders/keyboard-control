@@ -50,14 +50,28 @@ kbc() {
 }
 
 # --- автодетект устройства по kbc list -----------------------------------
+# ВАЖНО (10.70): AULA F75 и F99 имеют ОДИН PID 258A:010C, различаются
+# только моделью в PSD (0xA4 = F99). Имя в `kbc list` берётся из реестра
+# по PID и может показывать «AULA F75» для физической F99 — поэтому
+# модель для AULA подтверждаем через `kbc info <pid>` -> «Модель: AULA F99».
 detect_device() {
-    local out list
+    local out pid kbd
     echo "kbc list — автодетект клавиатуры..."
     out="$(kbc list 2>&1 || true)"
-    # формат строки: "  AULA F99  258A:004E  USB  ..."
-    if echo "$out" | grep -qiE 'AULA F99|258A:00(4[E-F]|50)'; then
-        DEVICE="f99"
-    elif echo "$out" | grep -qiE 'Ajazz AK820|0C45:800[9A]|0C45:8099'; then
+    # формат строки: "  AULA F75  258A:010C  USB  ..."
+    if pid="$(printf '%s\n' "$out" | grep -oE '258A:010C|258A:00(4[E-F]|50)' | head -n1)" && [[ -n "$pid" ]]; then
+        # кандидат AULA (F75 или F99) — уточняем модель по PSD через kbc info
+        kbd="$(kbc info "$pid" 2>&1 || true)"
+        if printf '%s\n' "$kbd" | grep -qiE 'Модель: AULA F99'; then
+            DEVICE="f99"
+        else
+            echo "AULA-клавиатура найдена ($pid), но по PSD это не F99" >&2
+            echo "($0 собирает данные только для F99/Ajazz; F75 этим скриптом не снимается)." >&2
+            echo "--- вывод kbc info $pid ---" >&2
+            echo "$kbd" >&2
+            exit 1
+        fi
+    elif printf '%s\n' "$out" | grep -qiE 'Ajazz AK820|0C45:800[9A]|0C45:8099'; then
         DEVICE="ajazz"
     else
         echo "не удалось автоматически определить клавиатуру." >&2
@@ -96,7 +110,9 @@ collect() {
     local list_file="$dir/01-kbc-list.txt"
     local pid_auto pid_wl
     if [[ "$DEVICE" = f99 ]]; then
-        pid_auto="$(find_pid '258A:00(4[E-F]|50)' "$list_file")" || true
+        # 10.70: реальный USB PID F99 = 258A:010C (общий с F75; модель уточняется
+        # в kbc info). 258A:004E–50 — резерв по таблице (некоторые ревизии).
+        pid_auto="$(find_pid '258A:010C|258A:00(4[E-F]|50)' "$list_file")" || true
         pid_wl="$(find_pid '3554:FA09' "$list_file")" || true
     else
         pid_auto="$(find_pid '0C45:800[9A]|0C45:8099' "$list_file")" || true

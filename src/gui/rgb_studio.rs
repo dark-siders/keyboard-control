@@ -524,7 +524,7 @@ pub fn build_rgb_studio(
                 let gen_f = frame_gen.clone();
                 let mut t_ms = 0u32;
                 gtk::glib::timeout_add_local(
-                    std::time::Duration::from_millis(500),
+                    std::time::Duration::from_millis(40),
                     move || {
                         // Поколение устарело — была нажата другая кнопка/запущен
                         // новый поток: этот таймер больше не нужен, завершаемся.
@@ -532,7 +532,7 @@ pub fn build_rgb_studio(
                             return glib::ControlFlow::Break;
                         }
                         let frame = host_frame_with(&params, t_ms, n_leds, n_cols);
-                        t_ms += 500;
+                        t_ms += 40;
                         if let Some(dev) = dev_fetch() {
                             if dev.render_frame(&frame).is_err() {
                                 return glib::ControlFlow::Break;
