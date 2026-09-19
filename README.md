@@ -5,7 +5,7 @@
 <h1 align="center">⌨️ Keyboard-Center ⌨️</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.1.0-blue?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Version-0.2.0-blue?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/OS-Linux-blue?logo=linux&logoColor=white&style=flat-square" alt="OS">
   <img src="https://img.shields.io/badge/GUI-GTK4_%2B_Libadwaita-orange?style=flat-square" alt="GUI">
   <img src="https://img.shields.io/badge/Lang-Rust-red?logo=rust&logoColor=white&style=flat-square" alt="Rust">

@@ -24,9 +24,11 @@ DEVICE=""      # автодетект по умолчанию
 USE_SG=0
 
 # --- поиск бинарника kbc -------------------------------------------------
+# ВНИМАНИЕ: использовать `type -P`, а НЕ `command -v`! Ниже объявлена функция
+# с именем `kbc`, поэтому `command -v kbc` вернёт имя функции (рекурсия → SIGSEGV).
 find_kbc() {
-    if command -v kbc >/dev/null 2>&1; then
-        KBC="$(command -v kbc)"
+    if type -P kbc >/dev/null 2>&1; then
+        KBC="$(type -P kbc)"
     elif [[ -x "$ROOT/target/release/kbc" ]]; then
         KBC="$ROOT/target/release/kbc"
     else
@@ -39,10 +41,13 @@ find_kbc() {
 }
 
 # --- вызов kbc (с учётом --sg) -------------------------------------------
+# ВАЖНО: аргументы (в т.ч. полный 520-байтный hex-пакет одной строкой с пробелами)
+# экранируются через printf '%q', иначе `sg plugdev -c "$cmd"` разобьёт их по
+# пробелам и clap получит 520 отдельных аргументов (feature-send «не удалось»).
 kbc() {
     if [[ "$USE_SG" -eq 1 ]]; then
-        local cmd="$KBC"
-        for a in "$@"; do cmd+=" $a"; done
+        local cmd
+        cmd="$(printf '%q ' "$KBC" "$@")"
         sg plugdev -c "$cmd"
     else
         "$KBC" "$@"
@@ -103,7 +108,7 @@ collect() {
     } > "$dir/00-обзор.txt"
 
     # 1. kbc list — что видит сканер
-    echo "[1/7] kbc list"
+    echo "[1] kbc list"
     kbc list > "$dir/01-kbc-list.txt" 2>&1 || true
 
     # 2. Определение PID/USB-девайса и ресиверов
@@ -120,7 +125,7 @@ collect() {
     fi
 
     # 3. kbc info для найденного устройств
-    echo "[2/7] kbc info (pid=$pid_auto)"
+    echo "[2] kbc info (pid=$pid_auto)"
     if [[ -n "$pid_auto" ]]; then
         kbc info "$pid_auto" > "$dir/02-info.txt" 2>&1 || true
     else
@@ -128,7 +133,7 @@ collect() {
     fi
 
     # 4. Разведка интерфейсов/usage pages
-    echo "[3/7] kbc probe (pid=$pid_auto)"
+    echo "[3] kbc probe (pid=$pid_auto)"
     if [[ -n "$pid_auto" ]]; then
         kbc probe "$pid_auto" > "$dir/03-probe.txt" 2>&1 || true
     else
@@ -136,7 +141,7 @@ collect() {
     fi
 
     # 5. Батарея (F99 — 2.4G-ресивер; Ajazz — USB-девайс)
-    echo "[4/7] kbc battery"
+    echo "[4] kbc battery"
     if [[ -n "$pid_wl" ]]; then
         kbc battery "$pid_wl" > "$dir/04-battery.txt" 2>&1 || true
     elif [[ -n "$pid_auto" ]]; then
@@ -148,7 +153,7 @@ collect() {
     # 6. Дамп конфиг-региона AULA (read-only: SET-читающего фича-репорта + GET).
     #    Для Ajazz пропускаем: у него другой транспорт (output-репорты), тыкать не будем.
     if [[ "$DEVICE" = f99 && -n "$pid_auto" ]]; then
-        echo "[5/7] дамп конфиг-региона (feature 0x06, F99)"
+        echo "[5] дамп конфиг-региона (feature 0x84, F99)"
         {
             echo "# feature-send: SET_тема чтения конфига (полный 520-байтный пакет)"
             kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
@@ -156,21 +161,76 @@ collect() {
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/05-config-dump.txt" 2>&1 || true
 
-        echo "[6/7] дамп таблицы цветов (feature 0x8a, F99)"
+        echo "[6] дамп таблицы цветов (feature 0x8a, F99)"
         {
             echo "# feature-send: SET_тема чтения таблицы цветов (полный 520-байтный пакет)"
             kbc raw "$pid_auto" feature-send "$(packet_read 0x8a 0x0200)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
             echo "# feature-get 06 520"
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/06-color-table.txt" 2>&1 || true
+
+        # 7-8. Дампы keymap-таблиц (0x83): ремап F99 НЕ ревёрснут (10.66), этот
+        #       read-запрос — единственный способ проверить, читается ли на F99
+        #       канал ключевых карт (Default/FN1), знакомый нам по F75 (10.62).
+        #       Read-only: пишущая команда 0x03 в этом сборе НЕ используется.
+        echo "[7] дамп keymap Default (feature 0x83, слой 0)"
+        {
+            echo "# read-запрос keymap Default (read-only; write 0x03 не используется)"
+            kbc raw "$pid_auto" feature-send "$(packet_read_keymap 0)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            echo "# feature-get 06 520"
+            kbc raw "$pid_auto" feature-get 06 520
+        } > "$dir/07-keymap-default.txt" 2>&1 || true
+
+        echo "[8] дамп keymap FN1 (feature 0x83, слой 1)"
+        {
+            echo "# read-запрос keymap FN1 (read-only)"
+            kbc raw "$pid_auto" feature-send "$(packet_read_keymap 1)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            echo "# feature-get 06 520"
+            kbc raw "$pid_auto" feature-get 06 520
+        } > "$dir/08-keymap-fn1.txt" 2>&1 || true
+
+        # 9-11. Интерактивный дифф конфига: два read-only снимка (до/после)
+        #       действий на клавиатуре -> найти байты энкодера (ролик громкости)
+        #       и индикаторов (Caps/Num/Scroll) в конфиг-регионе (10.66/10.67).
+        echo "[9] снимок конфига ДО действий (read-only)"
+        {
+            echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
+            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            echo "# feature-get 06 520"
+            kbc raw "$pid_auto" feature-get 06 520
+        } > "$dir/09-config-before.txt" 2>&1 || true
+
+        echo "  Покрутите РОЛИК ГРОМКОСТИ на клавиатуре 3-4 раза в обе стороны,"
+        echo "  затем нажмите-отпустите Caps Lock, Num Lock, Scroll Lock (по одному разу)."
+        read -r -p "  Готово? Нажмите Enter: " _ </dev/tty || true
+
+        echo "[10] снимок конфига ПОСЛЕ действий (read-only)"
+        {
+            echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
+            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            echo "# feature-get 06 520"
+            kbc raw "$pid_auto" feature-get 06 520
+        } > "$dir/10-config-after.txt" 2>&1 || true
+
+        echo "[11] разница снимков (дифф)"
+        if command -v diff >/dev/null 2>&1; then
+            diff -u "$dir/09-config-before.txt" "$dir/10-config-after.txt" > "$dir/11-config-diff.txt" 2>&1 || true
+        else
+            echo "diff не найден — сравните 09 и 10 вручную" > "$dir/11-config-diff.txt"
+        fi
     else
-        echo "[5-6/7] дамп конфига пропущен (нужен AULA F99 по USB)"
+        echo "[5-11] дампы конфига пропущены (нужен AULA F99 по USB)"
         echo "пропущено (не применимо)" > "$dir/05-config-dump.txt"
         echo "пропущено (не применимо)" > "$dir/06-color-table.txt"
+        echo "пропущено (не применимо)" > "$dir/07-keymap-default.txt"
+        echo "пропущено (не применимо)" > "$dir/08-keymap-fn1.txt"
+        echo "пропущено (не применимо)" > "$dir/09-config-before.txt"
+        echo "пропущено (не применимо)" > "$dir/10-config-after.txt"
+        echo "пропущено (не применимо)" > "$dir/11-config-diff.txt"
     fi
 
-    # 7. Системная информация: lsusb + uevent hidraw
-    echo "[7/7] система (lsusb, uevent)"
+    # 12. Системная информация: lsusb + uevent hidraw
+    echo "[12] система (lsusb, uevent)"
     lsusb > "$dir/07-lsusb.txt" 2>&1 || true
     : > "$dir/08-uevent.txt"
     for h in /sys/class/hidraw/hidraw*/device/uevent; do
@@ -187,11 +247,14 @@ collect() {
         ls -1 "$dir"
         echo
         echo "Что проверять:"
-        echo "  * 01-kbc-list.txt    — видит ли сканер клавиатуру (PID ревизии)"
-        echo "  * 02-info.txt        — модель, подключение, батарея"
-        echo "  * 03-probe.txt       — интерфейсы/usage pages (ожидание: командный ≥0xFF00)"
-        echo "  * 05-config-dump.txt — конфиг-регион AULA (маркер 5A A5 в конце)"
-        echo "  * 06-color-table.txt — таблица цветов AULA (512 Б, если читается)"
+        echo "  * 01-kbc-list.txt     — видит ли сканер клавиатуру (PID ревизии)"
+        echo "  * 02-info.txt         — модель, подключение, батарея"
+        echo "  * 03-probe.txt        — интерфейсы/usage pages (ожидание: командный ≥0xFF00)"
+        echo "  * 05-config-dump.txt  — конфиг-регион AULA (маркер 5A A5 в конце)"
+        echo "  * 06-color-table.txt  — таблица цветов AULA (512 Б, если читается)"
+        echo "  * 07-keymap-default   — keymap Default (0x83): читается ли канал ремапа"
+        echo "  * 08-keymap-fn1       — keymap FN1 (0x83)"
+        echo "  * 09/10/11-конфиг     — снимки до/после + дифф (энкодер/индикаторы)"
     } > "$dir/09-сводка.txt"
 
     echo "Готово. Данные в: $dir"
@@ -208,6 +271,16 @@ packet_read() {
     hi=$(( (len >> 8) & 0xFF ))
     # print header "06 cmd 00 00 01 00 lo hi"
     printf '06 %02X 00 00 01 00 %02X %02X' "$cmd" "$lo" "$hi"
+    for ((i = 0; i < 512; i++)); do printf ' 00'; done
+}
+
+# --- read-запрос keymap-таблицы (0x83): формат по openaula/cloudglides (10.62) ---
+# Заголовок: 06 83 00 <layer> 01 00 00 02 + пад до 520. Layer: 0 = Default, 1 = FN1.
+# Read-only: write-команда 0x03 здесь не формируется.
+packet_read_keymap() {
+    local layer i
+    layer=$(( $1 ))
+    printf '06 83 00 %02X 01 00 00 02' "$layer"
     for ((i = 0; i < 512; i++)); do printf ' 00'; done
 }
 
