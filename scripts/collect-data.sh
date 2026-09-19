@@ -229,16 +229,27 @@ collect() {
         echo "пропущено (не применимо)" > "$dir/11-config-diff.txt"
     fi
 
-    # 12. Системная информация: lsusb + uevent hidraw
-    echo "[12] система (lsusb, uevent)"
-    lsusb > "$dir/07-lsusb.txt" 2>&1 || true
-    : > "$dir/08-uevent.txt"
+    # 12. Читаемая карта keymap (Default + FN1) — работает и на F99 (0x83,
+    #     журнал 10.62/10.70), и на Ajazz (GET_KEY/GET_FN_KEY). Вывод клиентской
+    #     команды `kbc remap --list` (read-only; запись в этом сборе не ведётся).
+    echo "[12] карта keymap (kbc remap --list, pid=$pid_auto)"
+    if [[ -n "$pid_auto" ]]; then
+        kbc remap "$pid_auto" --list > "$dir/12-keymap-list.txt" 2>&1 \
+            || echo "# kbc remap --list: не удалось (возможно, чтение keymap не поддержано)" > "$dir/12-keymap-list.txt"
+    else
+        echo "устройство не найдено в kbc list" > "$dir/12-keymap-list.txt"
+    fi
+
+    # 13. Системная информация: lsusb + uevent hidraw
+    echo "[13] система (lsusb, uevent)"
+    lsusb > "$dir/13-lsusb.txt" 2>&1 || true
+    : > "$dir/14-uevent.txt"
     for h in /sys/class/hidraw/hidraw*/device/uevent; do
         [[ -f "$h" ]] || continue
         {
             echo "=== $h ==="
             grep -E 'HID_ID|HID_NAME|DRIVER|PRODUCT' "$h" || cat "$h"
-        } >> "$dir/08-uevent.txt"
+        } >> "$dir/14-uevent.txt"
     done
 
     # Сводка — что куда легло
@@ -250,12 +261,15 @@ collect() {
         echo "  * 01-kbc-list.txt     — видит ли сканер клавиатуру (PID ревизии)"
         echo "  * 02-info.txt         — модель, подключение, батарея"
         echo "  * 03-probe.txt        — интерфейсы/usage pages (ожидание: командный ≥0xFF00)"
+        echo "  * 04-battery.txt      — заряд (F99: 2.4G-ресивер; Ajazz: USB)"
         echo "  * 05-config-dump.txt  — конфиг-регион AULA (маркер 5A A5 в конце)"
         echo "  * 06-color-table.txt  — таблица цветов AULA (512 Б, если читается)"
         echo "  * 07-keymap-default   — keymap Default (0x83): читается ли канал ремапа"
         echo "  * 08-keymap-fn1       — keymap FN1 (0x83)"
         echo "  * 09/10/11-конфиг     — снимки до/после + дифф (энкодер/индикаторы)"
-    } > "$dir/09-сводка.txt"
+        echo "  * 12-keymap-list.txt  — читаемая карта keymap Default+FN1 (kbc remap --list)"
+        echo "  * 13/14-lsusb-uevent  — дерево USB и usage pages hidraw"
+    } > "$dir/15-сводка.txt"
 
     echo "Готово. Данные в: $dir"
 }

@@ -17,6 +17,13 @@ use super::hid::HidBridge;
 use super::{Error, KeyboardDevice, Result};
 use crate::types::*;
 
+/// Размер keymap-таблицы F99: 128 слотов × 4 байта (как F75, журнал 10.62).
+const KEYMAP_SLOTS: usize = 128;
+/// Байт на слот keymap ([page, 0x00, 0x00, usage]).
+const KEYMAP_SLOT_BYTES: usize = 4;
+/// Полный размер таблицы слоя (Default/FN1), ровно 512 байт.
+const KEYMAP_BYTES: usize = 512;
+
 /// Количество клавиш в 96% раскладке F99.
 pub const KEY_COUNT: u16 = 100;
 
@@ -84,6 +91,52 @@ impl AulaF99 {
     fn effect_name(_idx: u8) -> &'static str {
         // Полного маппинга эффектов пока нет; уточнять по дампу прошивки.
         "Эффект"
+    }
+
+    // --- Keymap (ЧТЕНИЕ, по образцу F75, журнал 10.62/10.70) -------------
+    // F99 — тот же SinoWealth SH68F90, что и F75, поэтому keymap-канал
+    // чтения должен совпадать (опенаula/cloudglides: CMD 0x83, слой 0/1,
+    // 512 байт слотов). Подтверждено обозначением на железе НЕ было (F99
+    // физически у владельца нет) — это переносится по общему протоколу.
+
+    /// Прочитать таблицу keymap слоя `layer` (0=Default, 1=FN1) — ровно 512 байт.
+    /// Read-only (CMD 0x83): запрос `06 83 00 <layer> 01 00 00 02` + пад до 520
+    /// → GET 06 520. Валидно ТОЛЬКО по USB (wired), как у F75.
+    fn read_keymap_raw(&self, layer: u8) -> Result<Vec<u8>> {
+        if self.bridge.connection != ConnectionType::Usb {
+            return Err(Error::Unsupported(
+                "keymap F99 читается только по USB (wired); на 2.4G/BT запись настроек не реализована".into(),
+            ));
+        }
+        let req = Self::packet(&[0x83, 0x00, layer, 0x01, 0x00, 0x00, 0x02]);
+        self.bridge.send_feature(&req)?;
+        let report = self.bridge.read_feature(REPORT_FEATURE, PACKET_LEN)?;
+        if report.len() < 8 + KEYMAP_BYTES {
+            return Err(Error::Protocol(format!(
+                "keymap слоя {layer}: ответ неполный ({} байт, ожидается {})",
+                report.len(),
+                8 + KEYMAP_BYTES
+            )));
+        }
+        Ok(report[8..8 + KEYMAP_BYTES].to_vec())
+    }
+
+    /// Декодирование 4 байт слота keymap в действие (read-only).
+    /// Слоты со служебными page (13 = Fn и т.п.) возвращают None — их не
+    /// показываем как переназначаемые (та же модель, что у F75).
+    fn slot_decode(bytes: [u8; 4]) -> Option<KeyAction> {
+        match bytes[0] {
+            0x00 => {
+                let usage = bytes[3] as u16;
+                if usage == 0 {
+                    None // unbind
+                } else {
+                    Some(KeyAction::Press(usage))
+                }
+            }
+            0x02 => Some(KeyAction::Media(bytes[3] as u16)),
+            _ => None, // page 13 (Fn) и прочие служебные — не разбираем
+        }
     }
 }
 
@@ -183,17 +236,50 @@ impl KeyboardDevice for AulaF99 {
         }])
     }
 
-    // --- Keymap: канал ремапа не ревёрснут — честный отказ ------------
+    // --- Keymap: чтение ревёрснуто (как F75), запись НЕТ -----------------
+    // Чтение таблиц Default/FN1 совпадает с F75 (общий протокол), но канал
+    // ЗАПИСИ keymap на F99 подтверждён не был (openaula/cloudglides давали
+    // только проводной F75) — поэтому запись остаётся честным Unsupported,
+    // пока живая книга не подтвердит формат (журнал 10.59/10.66).
     fn remap_key(&self, _from: KeyId, _to: KeyAction) -> Result<()> {
-        Err(Error::Unsupported("ремап F99 не ревёрснут (протокол keymap неизвестен)"))
+        Err(Error::Unsupported(
+            "запись keymap F99 не ревёрснута: чтение таблиц работает (0x83), но формат записи (0x03) подтверждён только на F75 — ждёт живого теста",
+        ))
     }
 
     fn set_fn_layer(&self, _layer: FnLayer) -> Result<()> {
-        Err(Error::Unsupported("слой Fn F99 не ревёрснут (протокол keymap неизвестен)"))
+        Err(Error::Unsupported(
+            "запись слоя Fn F99 не ревёрснута: чтение работает (0x83, слой 1), запись (0x03) — ждёт живого теста на F75-протоколе",
+        ))
     }
 
+    // Чтение текущей карты: по образцу F75 (журнал 10.62/10.70). FN1 — пробной
+    // попыткой (формат чтения слоя 1 не сверен на F99), при неудаче — пустой слой.
     fn get_current_keymap(&self) -> Result<Keymap> {
-        Err(Error::Unsupported("считывание keymap F99 не ревёрснуто"))
+        let base_tab = self.read_keymap_raw(0)?;
+        let fn_tab = self.read_keymap_raw(1).unwrap_or_default();
+        let decode = |table: &[u8]| {
+            let mut out = Vec::new();
+            for i in 0..KEYMAP_SLOTS.saturating_sub(1) {
+                let off = i * KEYMAP_SLOT_BYTES;
+                let bytes = [
+                    table[off],
+                    table[off + 1],
+                    table[off + 2],
+                    table[off + 3],
+                ];
+                if let Some(act) = Self::slot_decode(bytes) {
+                    out.push((KeyId(i as u16), act));
+                }
+            }
+            out
+        };
+        Ok(Keymap {
+            base: decode(&base_tab),
+            fn_layer: FnLayer {
+                bindings: decode(&fn_tab),
+            },
+        })
     }
 
     // --- Screen (не поддерживается) ------------------------------------

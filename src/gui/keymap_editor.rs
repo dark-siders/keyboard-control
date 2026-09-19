@@ -1,5 +1,5 @@
 // --- Keymap & Fn-Layer Editor ---
-// Переназначение клавиш, слои Fn, макросы, энкодер.
+// Переназначение клавиш, слои Fn, макросы.
 
 use gtk::glib::clone;
 use gtk::prelude::*;
@@ -7,7 +7,7 @@ use gtk::prelude::*;
 use std::rc::Rc;
 
 use crate::devices::KeyboardDevice;
-use crate::types::{EncoderAction, FnLayer, KeyAction, KeyId, Keymap};
+use crate::types::{ConnectionType, KeyAction};
 
 /// Собрать панель редактора клавиш.
 pub fn build_keymap_editor(
@@ -22,7 +22,7 @@ pub fn build_keymap_editor(
     title.set_halign(gtk::Align::Start);
     panel.append(&title);
 
-    let hint = gtk::Label::new(Some("Кликните по клавише, чтобы переназначить её. Выберите действие в появившемся диалоге."));
+    let hint = gtk::Label::new(Some("Переназначение клавиш выполняется через CLI: `kbc remap <VID:PID> --list` (показать карту), `--key <слот> --to <usage>` (клавиша) или `--media <usage>` (кнопка мультимедиа). Кнопка ниже показывает текущую раскладку Default и FN1 — с меткой физической клавиши для каждого слота."));
     hint.add_css_class("dim-label");
     hint.set_wrap(true);
     hint.set_halign(gtk::Align::Start);
@@ -47,13 +47,23 @@ pub fn build_keymap_editor(
 
     // --- Назначенные действия ------------------------------------------
     let actions_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let actions_header = gtk::Label::new(Some("Текущие переназначения"));
+    actions_box.set_vexpand(true);
+    let actions_header = gtk::Label::new(Some("Текущая раскладка"));
     actions_header.add_css_class("heading");
     actions_header.set_halign(gtk::Align::Start);
     actions_box.append(&actions_header);
 
+    // Список раскладки прокручивается: при большом слое (F75 — 127 слотов
+    // Default + FN1) контент не должен уходить за край окна.
+    let list_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .max_content_height(320)
+        .build();
     let list = gtk::ListBox::builder().margin_top(4).build();
-    actions_box.append(&list);
+    list_scroll.set_child(Some(&list));
+    actions_box.append(&list_scroll);
     panel.append(&actions_box);
 
     // --- Макросы ---------------------------------------------------------
@@ -74,33 +84,7 @@ pub fn build_keymap_editor(
     panel.append(&macro_row2);
     let _ = macro_row;
 
-    // --- Энкодер/ролик --------------------------------------------------
-    let enc_header = gtk::Label::new(Some("Энкодер / ролик"));
-    enc_header.add_css_class("heading");
-    enc_header.set_halign(gtk::Align::Start);
-    panel.append(&enc_header);
-
-    let enc_dd = gtk::DropDown::builder().build();
-    let enc_model = gtk::StringList::new(&[
-        "Громкость",
-        "Медиа: следующий трек",
-        "Медиа: предыдущий трек",
-        "Медиа: play/pause",
-        "Медиа: mute",
-        "Прокрутка: вверх",
-        "Прокрутка: вниз",
-        "Яркость: вверх",
-        "Яркость: вниз",
-        "Отключено",
-    ]);
-    enc_dd.set_model(Some(&enc_model));
-    panel.append(&enc_dd);
-
-    let apply_enc = gtk::Button::with_label("Применить настройку энкодера");
-    apply_enc.add_css_class("suggested-action");
-    panel.append(&apply_enc);
-
-    let remap_apply = gtk::Button::with_label("Применить раскладку");
+    let remap_apply = gtk::Button::with_label("Показать раскладку");
     remap_apply.add_css_class("suggested-action");
     panel.append(&remap_apply);
 
@@ -108,23 +92,66 @@ pub fn build_keymap_editor(
     panel.append(&clear_all);
 
     // --- Обработчики --------------------------------------------------------
-    // Применение карты клавиш
+    // Показ карты клавиш: читаем текущую раскладку (Default + FN1) и
+    // выводим в списке слоты с меткой физической клавиши (карта F75).
+    // Переназначение — через CLI `kbc remap` (GUI-клик-редактор — TODO).
     let fetcher2 = fetcher.clone();
     remap_apply.connect_clicked(clone!(
         #[strong]
-        layout_area,
-        #[strong]
-        mode_sw,
+        list,
         move |_| {
-        if let Some(dev) = fetcher2() {
-            let km = Keymap {
-                base: Vec::new(),
-                fn_layer: FnLayer { bindings: Vec::new() },
-            };
-            let _ = dev.set_fn_layer(km.fn_layer.clone());
-            let _ = dev.remap_key(KeyId(0x2C), KeyAction::Press(0x2C));
+        let Some(dev) = fetcher2() else { return; };
+        // Очищаем старый список
+        while let Some(row) = list.first_child() {
+            list.remove(&row);
         }
-        let _ = (mode_sw.is_active(), layout_area.width_request());
+        let add = |text: String| {
+            let lbl = gtk::Label::new(Some(&text));
+            lbl.set_halign(gtk::Align::Start);
+            lbl.set_xalign(0.0);
+            list.append(&lbl);
+        };
+        match dev.get_current_keymap() {
+            Ok(km) => {
+                add("Default-слой:".to_string());
+                for (k, act) in &km.base {
+                    let label = dev.slot_label_name(k.0 as u8)
+                        .map(|l| format!(" [{l}]"))
+                        .unwrap_or_default();
+                    add(format!(
+                        "  слот {:>3} (0x{:02X}){} → {}",
+                        k.0,
+                        k.0,
+                        label,
+                        action_label(act)
+                    ));
+                }
+                add("FN1-слой:".to_string());
+                for (k, act) in &km.fn_layer.bindings {
+                    let label = dev.slot_label_name(k.0 as u8)
+                        .map(|l| format!(" [{l}]"))
+                        .unwrap_or_default();
+                    add(format!(
+                        "  слот {:>3} (0x{:02X}){} → {}",
+                        k.0,
+                        k.0,
+                        label,
+                        action_label(act)
+                    ));
+                }
+            }
+            Err(_) if dev.connection_type() != ConnectionType::Usb => {
+                // Ремап прошивки работает только по USB (wired): на 2.4G/BT
+                // радиоканал настройки не ревёрснут (journal 10.59/10.62).
+                add(
+                    "Раскладка доступна только при подключении по USB (кабель). \
+                     Сейчас клавиатура подключена по 2.4G — переключи на USB и \
+                     нажми «Показать раскладку» снова."
+                        .to_string(),
+                );
+            }
+            Err(e) => add(format!("Ошибка чтения раскладки: {e}")),
+        }
     }));
 
 // Сбросить всё: читаем заводскую раскладку (read-only, wsclx:
@@ -146,30 +173,6 @@ pub fn build_keymap_editor(
             Err(_) => println!("keyboard: заводская раскладка этим устройством не отдаётся"),
         }
     });
-
-    // Энкодер
-    let fetcher3 = fetcher.clone();
-    apply_enc.connect_clicked(clone!(
-        #[strong]
-        enc_dd,
-        move |_| {
-        let idx = enc_dd.selected();
-        let action = match idx {
-            0 => EncoderAction::Volume,
-            1 => EncoderAction::MediaNext,
-            2 => EncoderAction::MediaPrev,
-            3 => EncoderAction::PlayPause,
-            4 => EncoderAction::Mute,
-            5 => EncoderAction::ScrollUp,
-            6 => EncoderAction::ScrollDown,
-            7 => EncoderAction::BrightnessUp,
-            8 => EncoderAction::BrightnessDown,
-            _ => EncoderAction::None,
-        };
-        if let Some(dev) = fetcher3() {
-            let _ = dev.set_encoder_action(action);
-        }
-    }));
 
     // Макросы
     let fetcher4 = fetcher.clone();

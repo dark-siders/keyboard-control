@@ -23,7 +23,7 @@
 ./scripts/collect-data.sh --device ajazz
 ```
 
-Скрипт: определяет клавиатуру по `kbc list`, собирает info/probe/battery и дампы конфига **и таблицы цветов**, **keymap Default/FN1** и **интерактивный дифф** (энкодер/индикаторы) для F99, добавляет `lsusb` и uevent, кладёт всё в папку **`~/kbc-diag-ГГГГММДД-ЧЧММСС/`** (пример: `~/kbc-diag-20260917-231500/`) и упаковывает её в одноимённый архив **`~/kbc-diag-ГГГГММДД-ЧЧММСС.tar.gz`**.
+Скрипт: определяет клавиатуру по `kbc list`, собирает info/probe/battery и дампы конфига **и таблицы цветов**, **keymap Default/FN1** и **интерактивный дифф** (энкодер/индикаторы) для F99, кладёт **читаемую карту keymap** (`kbc remap --list`, Default+FN1) для F99 и Ajazz, добавляет `lsusb` и uevent, кладёт всё в папку **`~/kbc-diag-ГГГГММДД-ЧЧММСС/`** (пример: `~/kbc-diag-20260917-231500/`) и упаковывает её в одноимённый архив **`~/kbc-diag-ГГГГММДД-ЧЧММСС.tar.gz`**.
 
 > [!IMPORTANT]
 > **Имя папки с результатами — `~/kbc-diag-ГГГГММДД-ЧЧММСС/`** (без существующего каталога `~` — у вас в домашней директории). Архив — рядом, `~/kbc-diag-ГГГГММДД-ЧЧММСС.tar.gz`. Отправьте именно этот `.tar.gz`.
@@ -300,8 +300,9 @@ udevadm info --attribute-walk /dev/hidraw<номер> | grep -E "idVendor|idProd
 | 4 | дамп конфига (F99) / батарея (Ajazz) | `f99_config_dump.txt` / `kbc_battery.txt` |
 | 5 | дамп keymap Default+FN1 (F99, `0x83`) | `f99_keymap_default.txt`, `f99_keymap_fn1.txt` |
 | 6 | дифф конфига до/после ролика и Caps/Num/Scroll (F99) | `f99_cfg_before.txt`, `f99_cfg_after.txt` |
-| 7 | `lsusb` | `lsusb.txt` |
-| 8 | uevent командного hidraw | `uevent.txt` |
+| 7 | читаемая карта keymap (`kbc remap <pid> --list`, Default+FN1) — F99 и Ajazz | `12-keymap-list.txt` |
+| 8 | `lsusb` | `lsusb.txt` |
+| 9 | uevent командного hidraw | `uevent.txt` |
 
 Если какой-то шаг дал неожиданный результат (ошибка, другой PID, другой usage page) — обязательно приложите вывод: это не «провал», а ценная информация для поправки драйвера.
 

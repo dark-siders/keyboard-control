@@ -110,6 +110,13 @@ pub trait KeyboardDevice: Send {
     fn set_fn_layer(&self, layer: FnLayer) -> Result<()>;
     /// Прочитать текущую карту клавиш с устройства.
     fn get_current_keymap(&self) -> Result<Keymap>;
+    /// Метка физической клавиши по слоту keymap (для читаемого вывода списка
+    /// «слот → действие»). Карта слотов УСТРОЙСТВО-СПЕЦИФИЧНА: у AulaF75 она
+    /// подтверждена живым дампом (F75_SLOT_LABELS), у F99/Ajazz не выяснена —
+    /// поэтому дефолт None (метка не показывается), F75 переопределяет.
+    fn slot_label_name(&self, _slot: u8) -> Option<&'static str> {
+        None
+    }
     /// Прочитать текущий аппаратный эффект подсветки (код режима прошивки).
     /// Ajazz: GET_LED_EFFECT (19). Прочие — Unsupported.
     fn get_current_effect(&self) -> Result<u8> {

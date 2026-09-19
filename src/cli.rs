@@ -759,12 +759,41 @@ fn parse_usage(s: &str) -> anyhow::Result<u16> {
 fn action_short(a: &keyboard_center::types::KeyAction) -> String {
     use keyboard_center::types::KeyAction;
     match a {
-        KeyAction::Press(u) => format!("клавиша 0x{u:02X}"),
+        KeyAction::Press(u) => match hid_usage_name(*u) {
+            Some(n) => format!("клавиша 0x{u:02X} ({n})"),
+            None => format!("клавиша 0x{u:02X}"),
+        },
         KeyAction::Media(u) => format!("медиа 0x{u:02X}"),
         KeyAction::Modifier(m) => format!("модификатор {m:?}"),
         KeyAction::FnLayer(l) => format!("слой Fn#{l}"),
         KeyAction::Macro(id) => format!("макрос {id}"),
     }
+}
+
+/// Имя клавиши по USB HID usage (usage page 7, keyboard) — для читаемого вывода.
+fn hid_usage_name(u: u16) -> Option<&'static str> {
+    const NAMES: &[(u16, &str)] = &[
+        (0x04, "A"), (0x05, "B"), (0x06, "C"), (0x07, "D"), (0x08, "E"),
+        (0x09, "F"), (0x0A, "G"), (0x0B, "H"), (0x0C, "I"), (0x0D, "J"),
+        (0x0E, "K"), (0x0F, "L"), (0x10, "M"), (0x11, "N"), (0x12, "O"),
+        (0x13, "P"), (0x14, "Q"), (0x15, "R"), (0x16, "S"), (0x17, "T"),
+        (0x18, "U"), (0x19, "V"), (0x1A, "W"), (0x1B, "X"), (0x1C, "Y"),
+        (0x1D, "Z"), (0x1E, "1"), (0x1F, "2"), (0x20, "3"), (0x21, "4"),
+        (0x22, "5"), (0x23, "6"), (0x24, "7"), (0x25, "8"), (0x26, "9"),
+        (0x27, "0"), (0x28, "Enter"), (0x29, "Esc"), (0x2A, "Backspace"),
+        (0x2B, "Tab"), (0x2C, "Space"), (0x2D, "-"), (0x2E, "="),
+        (0x2F, "["), (0x30, "]"), (0x31, "\\"), (0x32, "#~"), (0x33, ";"),
+        (0x34, "'"), (0x35, "`"), (0x36, ","), (0x37, "."), (0x38, "/"),
+        (0x39, "Caps"), (0x3A, "F1"), (0x3B, "F2"), (0x3C, "F3"),
+        (0x3D, "F4"), (0x3E, "F5"), (0x3F, "F6"), (0x40, "F7"),
+        (0x41, "F8"), (0x42, "F9"), (0x43, "F10"), (0x44, "F11"),
+        (0x45, "F12"), (0x4B, "PgUp"), (0x4C, "Del"), (0x4D, "End"),
+        (0x4E, "PgDn"), (0x4F, "Right"), (0x50, "Left"), (0x51, "Down"),
+        (0x52, "Up"), (0x64, "Non-US \\"), (0xE0, "LCtrl"), (0xE1, "LShift"),
+        (0xE2, "LAlt"), (0xE3, "LWin"), (0xE4, "RCtrl"), (0xE5, "RShift"),
+        (0xE6, "RAlt"), (0xE7, "RWin"),
+    ];
+    NAMES.iter().find(|&&(code, _)| code == u).map(|&(_, n)| n)
 }
 
 fn cmd_remap(a: RemapArgs) -> anyhow::Result<u8> {
@@ -774,13 +803,19 @@ fn cmd_remap(a: RemapArgs) -> anyhow::Result<u8> {
 
     if a.list {
         let km = dev.get_current_keymap()?;
-        println!("Default-слой:");
+        println!("Default-слой (слоты и метки — по карте устройства):");
         for (k, act) in &km.base {
-            println!("  слот {:>3} (0x{:02X}) → {}", k.0, k.0, action_short(act));
+            let label = dev.slot_label_name(k.0 as u8)
+                .map(|l| format!(" [{l}]"))
+                .unwrap_or_default();
+            println!("  слот {:>3} (0x{:02X}){} → {}", k.0, k.0, label, action_short(act));
         }
         println!("FN1-слой:");
         for (k, act) in &km.fn_layer.bindings {
-            println!("  слот {:>3} (0x{:02X}) → {}", k.0, k.0, action_short(act));
+            let label = dev.slot_label_name(k.0 as u8)
+                .map(|l| format!(" [{l}]"))
+                .unwrap_or_default();
+            println!("  слот {:>3} (0x{:02X}){} → {}", k.0, k.0, label, action_short(act));
         }
         return Ok(0);
     }
