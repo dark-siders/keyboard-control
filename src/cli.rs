@@ -14,6 +14,13 @@
 //   kbc profile save <path> --device <vid:pid> --name "Pro"
 //   kbc profile load <path>
 //   kbc profile eeprom-save <slot>
+//   kbc daemon [--preset wave2] [--device vid:pid] [--mode wave --color FF0000 …]
+//              — host-движок эффектов по пресету до Ctrl-C
+//              (для 2.4G/Ajazz — запись в память и выход).
+//   kbc preset list
+//   kbc preset save <name> [--mode wave --color 00FF00 --brightness 200 --speed 60 --frame-ms 40]
+//   kbc preset apply <name> [--device vid:pid]
+//   kbc preset remove <name>
 //   kbc monitor                        — горячая замена (watch)
 //   kbc probe <vid:pid>                — разведка протокола (скан feature-репортов)
 //   kbc raw <vid:pid> feature-get <id> <len>
@@ -65,6 +72,11 @@ enum Commands {
     SetSleep(SetSec),
     /// Работа с профилями
     Profile(ProfileArgs),
+    /// Host-движок эффектов по пресету до Ctrl-C
+    /// (для 2.4G/Ajazz — запись эффекта в память и выход)
+    Daemon(DaemonArgs),
+    /// Управление пресетами подсветки (TOML в ~/.config/keyboard-center/presets)
+    Preset(PresetArgs),
     /// Отслеживание горячей замены устройств
     Monitor,
     /// Разведка HID-протокола: интерфейсы + скан feature-репортов
@@ -180,6 +192,88 @@ struct ProfileEeprom {
     slot: u8,
 }
 
+/// Параметры `kbc daemon`: пресет + необязательные оверрайды.
+/// Оверрайды применяются только на текущий запуск и НЕ сохраняются в файл.
+#[derive(Args)]
+struct DaemonArgs {
+    /// Имя пресета (по умолчанию «default»; создаётся автоматически)
+    #[arg(long, value_name = "NAME")]
+    preset: Option<String>,
+    /// Явный VID:PID; по умолчанию — автовыбор по приоритету
+    /// USB > 2.4G > Bluetooth
+    #[arg(long, value_name = "VID:PID")]
+    device: Option<String>,
+    /// Переопределить режим движка
+    #[arg(long)]
+    mode: Option<String>,
+    /// Переопределить базовый цвет: RRGGBB (hex)
+    #[arg(long)]
+    color: Option<String>,
+    /// Переопределить яркость 0..=255
+    #[arg(long)]
+    brightness: Option<u8>,
+    /// Переопределить скорость 1..=255
+    #[arg(long)]
+    speed: Option<u8>,
+    /// Переопределить период кадра, мс (1..=1000)
+    #[arg(long, value_name = "ms")]
+    frame_ms: Option<u64>,
+}
+
+#[derive(Args)]
+struct PresetArgs {
+    #[command(subcommand)]
+    action: PresetAction,
+}
+
+#[derive(Subcommand)]
+enum PresetAction {
+    /// Список пресетов
+    List,
+    /// Создать/изменить пресет. Пропущенные опции берутся из существующего
+    /// пресета или из значений по умолчанию.
+    Save(PresetSave),
+    /// Применить пресет (запускает `kbc daemon --preset <name>`)
+    Apply(PresetApply),
+    /// Удалить пресет
+    Remove(PresetRemove),
+}
+
+#[derive(Args)]
+struct PresetSave {
+    /// Имя пресета (по умолчанию «default»)
+    #[arg(value_name = "NAME", default_value = "default")]
+    preset: String,
+    #[arg(long)]
+    mode: Option<String>,
+    #[arg(long)]
+    color: Option<String>,
+    #[arg(long)]
+    brightness: Option<u8>,
+    #[arg(long)]
+    speed: Option<u8>,
+    /// Период кадра host-рендеринга, мс (1..=1000)
+    #[arg(long, value_name = "ms")]
+    frame_ms: Option<u64>,
+}
+
+#[derive(Args)]
+struct PresetApply {
+    /// Имя пресета (по умолчанию «default»)
+    #[arg(value_name = "NAME", default_value = "default")]
+    preset: String,
+    /// VID:PID устройства (иначе — автовыбор как в daemon)
+    #[arg(long, value_name = "VID:PID")]
+    device: Option<String>,
+}
+
+#[derive(Args)]
+struct PresetRemove {
+    /// Имя пресета
+    #[arg(value_name = "NAME")]
+    preset: String,
+}
+
 #[derive(Args)]
 struct ProbeArgs {
     #[arg(value_name = "VID:PID")]
@@ -247,6 +341,10 @@ struct RemapArgs {
     /// Назначить медиа-кнопку: consumer usage (hex, напр. E2 = пауза/плей)
     #[arg(long, value_name = "usage_hex")]
     media: Option<String>,
+    /// Назначить модификатор: 0=LCtrl 1=LShift 2=LAlt 3=LWin
+    /// 4=RCtrl 5=RShift 6=RAlt 7=RWin
+    #[arg(long, value_name = "0..7")]
+    modifier: Option<u8>,
     /// Слой: 0 = Default, 1 = FN1 (по умолчанию 0)
     #[arg(long, default_value_t = 0)]
     layer: u8,
@@ -321,6 +419,8 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
             Ok(0)
         }
         Commands::Profile(p) => cmd_profile(p),
+        Commands::Daemon(a) => cmd_daemon(a),
+        Commands::Preset(p) => cmd_preset(p),
         Commands::Monitor => cmd_monitor(),
         Commands::Probe(a) => cmd_probe(&a.device, a.len),
         Commands::Raw(a) => cmd_raw(a),
@@ -373,9 +473,11 @@ fn cmd_list() -> anyhow::Result<u8> {
     }
 
     for dev in &found {
+        // Реальная модель (если удалось открыть при сканировании) или карточка реестра.
+        let model = dev.model.as_deref().unwrap_or(dev.info.model);
         println!(
-            "  {:<24} {:04X}:{:04X}  {:<12}  layout={:<5}  path={}",
-            dev.info.model,
+            "  {:<22} {:04X}:{:04X}  {:<12}  layout={:<5}  path={}",
+            model,
             dev.info.vid,
             dev.info.pid,
             dev.info.connection.label(),
@@ -624,6 +726,230 @@ fn cmd_profile(p: ProfileArgs) -> anyhow::Result<u8> {
     }
 }
 
+/// `kbc daemon`: host-движок эффектов по пресету.
+///
+/// 1. Берёт пресет из `~/.config/keyboard-center/presets/<имя>.toml`
+///    (пресет «default» создаётся при первом запуске); оверрайды флагов
+///    применяются только на этот запуск.
+/// 2. Выбирает устройство: явный `--device` либо автовыбор по приоритету
+///    подключения USB → 2.4G → Bluetooth (берётся первое найденное).
+/// 3. Пробует аппаратную запись в память (`apply_rgb_persistent`): ресивер
+///    2.4G / Ajazz пишут эффект во флеш СРАЗУ — тогда печатается сообщение
+///    и daemon завершается (приложение больше не нужно).
+/// 4. Иначе — host-рендеринг кадрами с keepalive до Ctrl-C; при 10 ошибках
+///    подряд — переподключение к устройству (клавиатура пересоздаёт hidraw
+///    после киков сохранения, журнал 10.34).
+fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
+    use keyboard_center::devices::aula_f75::{host_frame_with, HostEffectParams};
+    use keyboard_center::devices::{open_vidpid, KeyboardDevice};
+    use keyboard_center::presets::{mode_name, PresetStore};
+    use keyboard_center::types::Color;
+
+    let store = PresetStore::open();
+    let name = args.preset.as_deref().unwrap_or(keyboard_center::presets::DEFAULT_NAME);
+    let mut preset = store.ensure(name)?;
+
+    // Оверрайды CLI (не сохраняются в файл пресета).
+    if let Some(m) = &args.mode {
+        preset.params.r#type = parse_rgb_mode(Some(m))?;
+    }
+    if let Some(c) = &args.color {
+        Color::from_hex_checked(c)
+            .ok_or_else(|| anyhow::anyhow!("неверный цвет: {c} (ожидается RRGGBB)"))?;
+        preset.params.color = c.clone();
+    }
+    if let Some(b) = args.brightness {
+        preset.params.brightness = b;
+    }
+    if let Some(s) = args.speed {
+        preset.params.speed = s;
+    }
+    let frame_ms = args.frame_ms.unwrap_or(preset.params.frame_ms).clamp(1, 1000) as u32;
+
+    let base = Color::from_hex_checked(&preset.params.color).ok_or_else(|| {
+        anyhow::anyhow!(
+            "цвет пресета не валиден: {} (ожидается #RRGGBB)",
+            preset.params.color
+        )
+    })?;
+    let params = HostEffectParams {
+        mode: preset.params.r#type,
+        base,
+        brightness: preset.params.brightness,
+        speed: preset.params.speed,
+    };
+    println!(
+        "пресет «{}»: {} цвет={} яркость={} скорость={} кадр={frame_ms} мс",
+        preset.name,
+        mode_name(preset.params.r#type),
+        preset.params.color,
+        preset.params.brightness,
+        preset.params.speed,
+    );
+
+    // Выбор устройства.
+    let mut dev: Box<dyn KeyboardDevice> = if let Some(d) = &args.device {
+        let (vid, pid) = parse_id(d)?;
+        open(vid, pid)?
+    } else {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let scanner = Scanner::new(tx)?;
+        let found = scanner.scan().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let mut best: Option<keyboard_center::devices::scanner::FoundDevice> = None;
+        let mut best_rank = 3u8;
+        for f in found {
+            if f.path.is_none() {
+                continue;
+            }
+            let rank = match f.info.connection {
+                ConnectionType::Usb => 0u8,
+                ConnectionType::Wireless2_4G => 1,
+                ConnectionType::Bluetooth => 2,
+            };
+            if rank < best_rank {
+                best_rank = rank;
+                best = Some(f);
+            }
+        }
+        let f = best.ok_or_else(|| {
+            anyhow::anyhow!("не найдено подключённых устройств — подключите клавиатуру")
+        })?;
+        open(f.info.vid, f.info.pid)?
+    };
+
+    let (vid, pid) = dev.vid_pid();
+
+    // Сначала — аппаратная запись в память (Ok(true) = применено, приложение
+    // не нужно). Ok(false) означает «устройство не умеет» → host-рендеринг.
+    if dev.apply_rgb_persistent(params.mode, Some(base), params.brightness, params.speed)? {
+        println!(
+            "{:?}: эффект записан в память устройства (держится без приложения); daemon завершается",
+            dev.connection_type()
+        );
+        return Ok(0);
+    }
+
+    // Host-рендеринг кадрами: keepalive loop до Ctrl-C.
+    let n = dev.led_count();
+    let cols = dev.led_cols();
+    println!(
+        "host-эффект до Ctrl-C: {} яркость={} скорость={} (матрица {n}×~{cols}, кадр {frame_ms} мс)",
+        mode_name(params.mode),
+        params.brightness,
+        params.speed,
+    );
+    let mut t_ms = 0u32;
+    let mut fails = 0u32;
+    loop {
+        let frame = host_frame_with(&params, t_ms, n, cols);
+        match dev.render_frame(&frame) {
+            Ok(()) => fails = 0,
+            Err(e) => {
+                fails += 1;
+                eprintln!("кадр: {e} ({fails}/10 ошибок подряд)");
+                if fails >= 10 {
+                    eprintln!("переподключение к {:04X}:{:04X}…", vid, pid);
+                    dev = open_vidpid(vid, pid)?;
+                    fails = 0;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(frame_ms)));
+        t_ms = t_ms.wrapping_add(frame_ms);
+    }
+}
+
+/// Управление пресетами подсветки в ~/.config/keyboard-center/presets.
+fn cmd_preset(p: PresetArgs) -> anyhow::Result<u8> {
+    use keyboard_center::presets::{mode_name, Preset, PresetStore};
+
+    let store = PresetStore::open();
+    match p.action {
+        PresetAction::List => {
+            let names = store.list();
+            if names.is_empty() {
+                println!("пресетов нет (создайте: kbc preset save <name> [--mode wave])");
+            } else {
+                println!("пресеты ({}):", store.dir().display());
+                for name in names {
+                    match store.load(&name) {
+                        Ok(p) => println!(
+                            "  {:<24} {} цвет={} яркость={} скорость={} кадр={} мс",
+                            p.name,
+                            mode_name(p.params.r#type),
+                            p.params.color,
+                            p.params.brightness,
+                            p.params.speed,
+                            p.params.frame_ms,
+                        ),
+                        Err(e) => println!("  {:<24} (ошибка: {e})", name),
+                    }
+                }
+            }
+            Ok(0)
+        }
+        PresetAction::Save(a) => {
+            let name = keyboard_center::presets::sanitize(&a.preset);
+            let mut preset = if store.has(&name) {
+                store.load(&name)?
+            } else {
+                let mut p = Preset::default();
+                p.name = name.clone();
+                p
+            };
+            if let Some(m) = &a.mode {
+                preset.params.r#type = parse_rgb_mode(Some(m))?;
+            }
+            if let Some(c) = &a.color {
+                keyboard_center::types::Color::from_hex_checked(c)
+                    .ok_or_else(|| anyhow::anyhow!("неверный цвет: {c} (ожидается RRGGBB)"))?;
+                preset.params.color = c.clone();
+            }
+            if let Some(b) = a.brightness {
+                preset.params.brightness = b;
+            }
+            if let Some(s) = a.speed {
+                preset.params.speed = s;
+            }
+            if let Some(f) = a.frame_ms {
+                if f == 0 || f > 1000 {
+                    return Err(anyhow::anyhow!("frame_ms должен быть в диапазоне 1..=1000"));
+                }
+                preset.params.frame_ms = f;
+            }
+            let path = store.save(&preset)?;
+            println!("пресет «{}» сохранён: {}", preset.name, path.display());
+            Ok(0)
+        }
+        PresetAction::Apply(a) => {
+            let daemon_args = DaemonArgs {
+                preset: Some(a.preset),
+                device: a.device,
+                mode: None,
+                color: None,
+                brightness: None,
+                speed: None,
+                frame_ms: None,
+            };
+            cmd_daemon(daemon_args)
+        }
+        PresetAction::Remove(a) => {
+            let name = keyboard_center::presets::sanitize(&a.preset);
+            if name == keyboard_center::presets::DEFAULT_NAME {
+                return Err(anyhow::anyhow!("пресет «default» нельзя удалить"));
+            }
+            if !store.has(&name) {
+                return Err(anyhow::anyhow!(
+                    "пресет «{name}» не найден (kbc preset list)"
+                ));
+            }
+            store.remove(&name)?;
+            println!("пресет «{name}» удалён");
+            Ok(0)
+        }
+    }
+}
+
 fn cmd_monitor() -> anyhow::Result<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut scanner = Scanner::new(tx)?;
@@ -764,7 +1090,10 @@ fn action_short(a: &keyboard_center::types::KeyAction) -> String {
             None => format!("клавиша 0x{u:02X}"),
         },
         KeyAction::Media(u) => format!("медиа 0x{u:02X}"),
-        KeyAction::Modifier(m) => format!("модификатор {m:?}"),
+        KeyAction::Modifier(m) => match hid_usage_name(0xE0 + u16::from(*m)) {
+            Some(n) => format!("модификатор 0xE0+{} ({n})", m),
+            None => format!("модификатор {m:?}"),
+        },
         KeyAction::FnLayer(l) => format!("слой Fn#{l}"),
         KeyAction::Macro(id) => format!("макрос {id}"),
     }
@@ -825,8 +1154,13 @@ fn cmd_remap(a: RemapArgs) -> anyhow::Result<u8> {
         KeyAction::Press(parse_usage(u)?)
     } else if let Some(m) = &a.media {
         KeyAction::Media(parse_usage(m)?)
+    } else if let Some(m) = a.modifier {
+        if m > 7 {
+            return Err(anyhow::anyhow!("модификатор должен быть в диапазоне 0..=7 (0=LCtrl … 7=RWin)"));
+        }
+        KeyAction::Modifier(m)
     } else {
-        return Err(anyhow::anyhow!("укажите --to <usage_hex> или --media <usage_hex>"));
+        return Err(anyhow::anyhow!("укажите --to <usage_hex>, --media <usage_hex> или --modifier <0..7>"));
     };
 
     if a.layer == 1 {

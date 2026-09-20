@@ -67,7 +67,7 @@ detect_device() {
     if pid="$(printf '%s\n' "$out" | grep -oE '258A:010C|258A:00(4[E-F]|50)' | head -n1)" && [[ -n "$pid" ]]; then
         # кандидат AULA (F75 или F99) — уточняем модель по PSD через kbc info
         kbd="$(kbc info "$pid" 2>&1 || true)"
-        if printf '%s\n' "$kbd" | grep -qiE 'Модель: AULA F99'; then
+        if printf '%s\n' "$kbd" | grep -qiE 'Модель:\s+AULA F99'; then
             DEVICE="f99"
         else
             echo "AULA-клавиатура найдена ($pid), но по PSD это не F99" >&2

@@ -344,7 +344,7 @@ impl KeyboardDevice for AulaF99 {
         }
         let mut data = vec![0u8; 128];
         data.copy_from_slice(&snap[8..136]);
-        for i in (58..98).step_by(2) {
+        for i in (58..126).step_by(2) {
             data[i] = 0x09; // свет включён полной яркостью для всех эффектов
         }
         self.write_config(&data)?;
@@ -367,7 +367,7 @@ impl KeyboardDevice for AulaF99 {
         let mut data = vec![0u8; 128];
         data.copy_from_slice(&snap[8..136]);
         data[10] = effect; // селектор активного эффекта
-        for i in (58..98).step_by(2) {
+        for i in (58..126).step_by(2) {
             data[i] = 0x09; // свет включаем полной яркостью для всех эффектов
         }
         self.write_config(&data)?;
@@ -397,8 +397,11 @@ impl KeyboardDevice for AulaF99 {
     }
 
     // Состояние подсветки в памяти для ВСЕХ эффектов: яркость a в слотах
-    // эффект-таблицы data[58..96] (шаг 2). 0x09 = вкл, 0x00 = выкл при старте.
+    // эффект-таблицы data[58..125] (шаг 2). 0x09 = вкл, 0x00 = выкл при старте.
     // Как F75 (журнал 10.36): тумблер — слоты эффектов, а не общий байт.
+    // ВАЖНО (10.70): у F99 слотов 34 пары (58..125), а не 20 как у USB-F75
+    // (58..96) — структура как у F75-ресивера 2.4G. Затирать только 20 было
+    // бы неполным «выключением света».
     fn save_hardware_light(&self, on: bool) -> Result<()> {
         let snap = self.read_config()?;
         if snap.len() < 136 {
@@ -407,7 +410,7 @@ impl KeyboardDevice for AulaF99 {
         let mut data = vec![0u8; 128];
         data.copy_from_slice(&snap[8..136]);
         let level = if on { 0x09 } else { 0x00 };
-        for i in (58..98).step_by(2) {
+        for i in (58..126).step_by(2) {
             data[i] = level;
         }
         self.write_config(&data)?;

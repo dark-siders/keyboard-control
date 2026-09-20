@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::devices::KeyboardDevice;
+use crate::presets::{ModeParams, Preset, PresetStore};
 use crate::types::{Color, ConnectionType, KeyId, RgbMode};
 
 // --- Фоновое переподключение HID-канала после кика -------------------
@@ -120,6 +121,20 @@ pub fn mode_from_index(idx: u32) -> RgbMode {
         5 => RgbMode::Rain,
         6 => RgbMode::Reactive,
         _ => RgbMode::Custom,
+    }
+}
+
+/// Обратное преобразование: режим Enum → индекс в dropdown-списке режимов.
+pub fn mode_to_index(mode: RgbMode) -> u32 {
+    match mode {
+        RgbMode::Static => 0,
+        RgbMode::Breathing => 1,
+        RgbMode::Wave => 2,
+        RgbMode::SpectrumCycle => 3,
+        RgbMode::Ripple => 4,
+        RgbMode::Rain => 5,
+        RgbMode::Reactive => 6,
+        RgbMode::Custom => 7,
     }
 }
 
@@ -373,6 +388,73 @@ pub fn build_rgb_studio(
     // (a=00 во всех слотах эффектов data[58..96]), а не «свет вкл».
     let light_off: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
+    // --- Файловые пресеты (kbc preset / TOML) ------------------------------
+    // Те же TOML-пресеты, что использует `kbc preset`/`kbc daemon`
+    // (~/.config/keyboard-center/presets): хранят комбинацию
+    // режим/цвет/яркость/скорость под именем и применяются из GUI.
+    // Встроенный «Пресеты» выше — быстрые пресеты; этот блок — файловые.
+    let pf_label = gtk::Label::new(Some("Файловые пресеты (kbc preset)"));
+    pf_label.add_css_class("heading");
+    pf_label.set_halign(gtk::Align::Start);
+
+    let pf_dd = gtk::DropDown::builder().build();
+    // Модель держим отдельным Rc: gtk::DropDown не отдаёт содержимое своей
+    // модели, а по индексу выбранного пресета нам нужно получить его имя.
+    let pf_model: Rc<RefCell<Option<gtk::StringList>>> = Rc::new(RefCell::new(None));
+
+    let pf_entry = gtk::Entry::builder()
+        .placeholder_text("имя нового пресета")
+        .halign(gtk::Align::Start)
+        .width_chars(20)
+        .build();
+
+    let pf_apply = gtk::Button::with_label("Применить пресет");
+    pf_apply.add_css_class("suggested-action");
+    pf_apply.set_halign(gtk::Align::Start);
+
+    let pf_save_btn = gtk::Button::with_label("Сохранить как…");
+    pf_save_btn.set_halign(gtk::Align::Start);
+
+    let pf_delete = gtk::Button::with_label("Удалить пресет");
+    pf_delete.set_halign(gtk::Align::Start);
+
+    let pf_refresh = gtk::Button::with_label("Обновить");
+    pf_refresh.set_halign(gtk::Align::Start);
+
+    let pf_note = gtk::Label::new(Some(&format!(
+        "Хранилище: {} (создаётся `kbc preset save <имя>`, кнопкой ниже или в CLI)",
+        PresetStore::default_dir().display()
+    )));
+    pf_note.add_css_class("dim-label");
+    pf_note.set_halign(gtk::Align::Start);
+    pf_note.set_wrap(true);
+
+    // Перечитать список пресетов из хранилища и перестроить dropdown.
+    // Возвращает модель, чтобы вызывающий мог (например) найти индекс и
+    // выбрать пресет по имени после сохранения.
+    fn refresh_presets(
+        dd: &gtk::DropDown,
+        store: &Rc<RefCell<Option<gtk::StringList>>>,
+    ) -> gtk::StringList {
+        let names = PresetStore::open().list();
+        let names_s: Vec<&str> = names.iter().map(String::as_str).collect();
+        let model = gtk::StringList::new(&names_s);
+        let prev = dd.selected() as usize;
+        let sel = if names.is_empty() || prev >= names.len() {
+            0
+        } else {
+            prev
+        };
+        *store.borrow_mut() = Some(model.clone());
+        dd.set_model(Some(&model));
+        if !names.is_empty() {
+            dd.set_selected(sel as u32);
+        }
+        model
+    }
+    // Первичное заполнение списка при открытии страницы.
+    let _ = refresh_presets(&pf_dd, &pf_model);
+
     // --- Сборка ------------------------------------------------------------
     panel.append(&mode_label_l);
     panel.append(&mode_dd);
@@ -382,6 +464,14 @@ pub fn build_rgb_studio(
     panel.append(&speed_row);
     panel.append(&preset_label);
     panel.append(&preset_dd);
+    panel.append(&pf_label);
+    panel.append(&pf_dd);
+    panel.append(&pf_entry);
+    panel.append(&pf_apply);
+    panel.append(&pf_save_btn);
+    panel.append(&pf_delete);
+    panel.append(&pf_refresh);
+    panel.append(&pf_note);
     panel.append(&hw_label);
     panel.append(&hw_dd);
     panel.append(&hw_note);
@@ -541,6 +631,170 @@ pub fn build_rgb_studio(
                         glib::ControlFlow::Continue
                     },
                 );
+            }
+        }
+    ));
+
+    // --- Файловые пресеты: применение / сохранение / удаление ------------
+    // Четыре кнопки блока «Файловые пресеты» (виджеты созданы выше, вместе с
+    // `refresh_presets`). Кнопки привязываются ПОСЛЕ блока «Применить» — там
+    // ещё живы оригиналы `mode_dd` / `bright_scale` / `speed_scale` /
+    // `live_entry` / `apply` / `live_status` (apply-блок берёт их клонами через
+    // `clone!`, а `save_to_board` ниже уже их перемещает в move-замыкание).
+    let pf_model_a = pf_model.clone();
+    pf_apply.connect_clicked(clone!(
+        #[strong]
+        pf_dd,
+        #[strong]
+        pf_model_a,
+        #[strong]
+        mode_dd,
+        #[strong]
+        bright_scale,
+        #[strong]
+        speed_scale,
+        #[strong]
+        live_entry,
+        #[strong]
+        apply,
+        #[strong]
+        live_status,
+        move |_| {
+            let idx = pf_dd.selected();
+            let name = pf_model_a
+                .borrow()
+                .as_ref()
+                .and_then(|m| m.string(idx))
+                .map(|g| g.to_string())
+                .unwrap_or_default();
+            if name.trim().is_empty() {
+                live_status.set_text("Пресет не выбран — выберите пресет в списке");
+                return;
+            }
+            match PresetStore::open().load(&name) {
+                Ok(preset) => {
+                    mode_dd.set_selected(mode_to_index(preset.params.r#type));
+                    bright_scale.set_value(preset.params.brightness as f64);
+                    speed_scale.set_value(preset.params.speed as f64);
+                    live_entry.set_text(&preset.params.color);
+                    apply.emit_clicked();
+                    live_status.set_text(&format!(
+                        "Применён пресет «{}» ({}): цвет {}, яркость {}, скорость {}",
+                        preset.name,
+                        crate::presets::mode_name(preset.params.r#type),
+                        preset.params.color,
+                        preset.params.brightness,
+                        preset.params.speed,
+                    ));
+                }
+                Err(e) => live_status.set_text(&format!("Не удалось применить пресет: {e}")),
+            }
+        }
+    ));
+
+    pf_save_btn.connect_clicked(clone!(
+        #[strong]
+        pf_dd,
+        #[strong]
+        pf_model,
+        #[strong]
+        pf_entry,
+        #[strong]
+        mode_dd,
+        #[strong]
+        bright_scale,
+        #[strong]
+        speed_scale,
+        #[strong]
+        live_entry,
+        #[strong]
+        live_status,
+        move |_| {
+            let raw = pf_entry.text().trim().to_string();
+            let name = crate::presets::sanitize(&raw);
+            if name == crate::presets::DEFAULT_NAME && !raw.is_empty() {
+                live_status.set_text(&format!(
+                    "Имя «{raw}» ненормализуемое — пресет будет сохранён как «default»"
+                ));
+                return;
+            }
+            let color = live_entry.text().trim().to_string();
+            let params = ModeParams {
+                r#type: mode_from_index(mode_dd.selected()),
+                color: if color.is_empty() { "#FF5A00".to_string() } else { color },
+                brightness: bright_scale.value().round() as u8,
+                speed: speed_scale.value().round() as u8,
+                frame_ms: crate::presets::DEFAULT_FRAME_MS,
+            };
+            let preset = Preset { name, params };
+            match PresetStore::open().save(&preset) {
+                Ok(path) => {
+                    let _ = refresh_presets(&pf_dd, &pf_model);
+                    if let Some(model) = pf_model.borrow().as_ref() {
+                        for i in 0..model.n_items() {
+                            if model.string(i).map(|g| g.as_str() == preset.name).unwrap_or(false) {
+                                pf_dd.set_selected(i);
+                                break;
+                            }
+                        }
+                    }
+                    live_status.set_text(&format!(
+                        "Пресет «{}» сохранён: {}",
+                        preset.name,
+                        path.display()
+                    ));
+                }
+                Err(e) => live_status.set_text(&format!("Не удалось сохранить пресет: {e}")),
+            }
+        }
+    ));
+
+    pf_delete.connect_clicked(clone!(
+        #[strong]
+        pf_dd,
+        #[strong]
+        pf_model,
+        #[strong]
+        live_status,
+        move |_| {
+            let idx = pf_dd.selected();
+            let name = pf_model
+                .borrow()
+                .as_ref()
+                .and_then(|m| m.string(idx))
+                .map(|g| g.to_string())
+                .unwrap_or_default();
+            if name.trim().is_empty() {
+                live_status.set_text("Пресет не выбран — выберите пресет в списке");
+                return;
+            }
+            if name == crate::presets::DEFAULT_NAME {
+                live_status.set_text("Пресет «default» удалить нельзя");
+                return;
+            }
+            match PresetStore::open().remove(&name) {
+                Ok(()) => {
+                    let _ = refresh_presets(&pf_dd, &pf_model);
+                    live_status.set_text(&format!("Пресет «{name}» удалён"));
+                }
+                Err(e) => live_status.set_text(&format!("Не удалось удалить пресет: {e}")),
+            }
+        }
+    ));
+
+    pf_refresh.connect_clicked(clone!(
+        #[strong]
+        pf_dd,
+        #[strong]
+        pf_model,
+        #[strong]
+        live_status,
+        move |_| {
+            let model = refresh_presets(&pf_dd, &pf_model);
+            if model.n_items() == 0 {
+                live_status.set_text("Пресеты не найдены — создайте через «Сохранить как…» или `kbc preset save`");
+            } else {
+                live_status.set_text(&format!("Список пресетов обновлён ({} шт.)", model.n_items()));
             }
         }
     ));

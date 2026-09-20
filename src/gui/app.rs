@@ -377,9 +377,13 @@ fn build_device_row(
         .halign(gtk::Align::Start)
         .build();
 
+    let model_txt = dev
+        .model
+        .as_deref()
+        .unwrap_or(dev.info.model);
     let name = gtk::Label::new(Some(&format!(
         "{} — {}",
-        dev.info.model,
+        model_txt,
         dev.info.connection.label()
     )));
     name.set_halign(gtk::Align::Start);

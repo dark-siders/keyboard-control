@@ -17,8 +17,10 @@ pub struct DeviceRow {
 
 impl DeviceRow {
     /// Названия моделей в форме «model (mode)».
-    pub fn title(info: &crate::devices::DeviceInfo) -> String {
-        format!("{} — {}", info.model, info.connection.label())
+    /// `detected` — реальная модель из драйвера (косметика F75/F99, 10.78),
+    /// если её удалось определить при сканировании (иначе карточка реестра).
+    pub fn title(info: &crate::devices::DeviceInfo, detected: Option<&str>) -> String {
+        format!("{} — {}", detected.unwrap_or(info.model), info.connection.label())
     }
 
     pub fn layout_name(layout: Layout) -> &'static str {
@@ -66,7 +68,7 @@ pub fn build_device_list_box(devices: &[FoundDevice], on_select: impl Fn(&FoundD
             .halign(gtk::Align::Start)
             .build();
 
-        let name = gtk::Label::new(Some(&DeviceRow::title(dev.info)));
+        let name = gtk::Label::new(Some(&DeviceRow::title(dev.info, dev.model.as_deref())));
         name.set_halign(gtk::Align::Start);
         name.add_css_class("body");
 

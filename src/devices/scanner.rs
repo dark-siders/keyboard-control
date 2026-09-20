@@ -33,6 +33,11 @@ pub struct FoundDevice {
     pub info: &'static DeviceInfo,
     pub path: Option<String>,
     pub busy: bool,
+    /// Реальное имя модели (из драйвера, stdout `name()`), если удалось
+    /// открыть устройство при сканировании. Косметика (журнал 10.78):
+    /// PID 0x010C делят F75/F99, в реестре по PID имя всегда «AULA F75».
+    /// `None` — доступ к устройству не получен, показывать `info.model`.
+    pub model: Option<String>,
 }
 
 /// Сканер: держит HidApi и опрашивает список каждые N мс.
@@ -86,10 +91,23 @@ impl Scanner {
             } else {
                 Some(c.to_string_lossy().to_string())
             };
+            // Косметика: общий PID 0x010C у F75/F99 даёт в реестре «AULA F75»,
+            // хотя физически может быть F99. Уточняем модель открытием только
+            // для этого PID (не открываем всё подряд). Ошибка открытия (нет
+            // прав/устройство занято) не роняет сканирование — Fallback на
+            // карточку реестра.
+            let model = if vid == 0x258A && pid == 0x010C {
+                self.open_device(vid, pid, path.as_deref())
+                    .ok()
+                    .map(|d| d.name().to_string())
+            } else {
+                None
+            };
             found.push(FoundDevice {
                 info: find_device_info(vid, pid).expect("известный VID/PID"),
                 path,
                 busy: false,
+                model,
             });
         }
         Ok(found)

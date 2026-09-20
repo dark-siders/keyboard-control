@@ -3,6 +3,7 @@
 
 pub mod devices;
 pub mod gui;
+pub mod presets;
 pub mod profiles;
 pub mod screen;
 
