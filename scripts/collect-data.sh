@@ -396,6 +396,123 @@ collect() {
         echo "=== ДОПОЛНИТЕЛЬНЫЕ ДИАГНОСТИКИ ЗАВЕРШЕНЫ ==="
     fi
 
+    # --- 2.4G ТЕСТЫ ДЛЯ F99 (через ресивер 3554:FA09) ---
+    # Эти шаги нужны, когда ресивер подключен и клавиатура в режиме 2.4G.
+    # Проверяют: батарея, RGB-эффекты, яркость, скорость, выбор эффекта, гашение света.
+    if [[ "$DEVICE" == "f99" && -n "$pid_wl" ]]; then
+        echo
+        echo "=== 2.4G ТЕСТЫ F99 (ресивер 3554:FA09) ==="
+        echo "Клавиатура должна быть в режиме 2.4G, НЕ спать (нажать любую клавишу перед стартом)."
+        echo "Если клавиатура спит — батарея вернёт «спит на линке», эффекты не применятся."
+        echo
+
+        # 2.4G Battery (already done in step 4, but repeat for completeness)
+        echo "[2.4G-1] Батарея ресивера (kbc battery)"
+        kbc battery "$pid_wl" > "$dir/30-battery-2g4.txt" 2>&1 || true
+        cat "$dir/30-battery-2g4.txt"
+        echo
+
+        # 2.4G RGB effect apply (kbc rgb)
+        echo "[2.4G-2] Тест RGB-эффекта через kbc rgb (запись в память ресивера)"
+        echo "  Доступные эффекты (WL_EFFECTS):"
+        echo "    1=Steady, 3=Breathing, 2=Rainbow, 12=Sine Wave, 5=Retro Snake,"
+        echo "    7=Neon Stream, 8=Retinue Scanning, 13=Rainbow Wheel, 14=Blossoming,"
+        echo "    15=Raindrops, 16=Stars Twinkle, 17=Reaction, 18=Shadow Disappear,"
+        echo "    19=Flash Away, 20=Ripple Shining, 28=Rotating Windmill,"
+        echo "    29=Rotating Storm, 30=Colorful Waterfall"
+        read -r -p "  Запустить тест Breathing (mode=3, bri=200, speed=60)? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            kbc rgb "$pid_wl" --mode breathing --brightness 200 --speed 60 \
+                > "$dir/31-rgb-breathing.txt" 2>&1 || true
+            cat "$dir/31-rgb-breathing.txt"
+            echo "  Эффект записан в память ресивера (держится без приложения)."
+            echo "  Наблюдайте за клавиатурой: должно быть плавное «дыхание» всех цветов."
+            read -r -p "  Эффект виден? Нажмите Enter для продолжения..." _ </dev/tty || true
+        else
+            echo "  Пропущено."
+        fi
+
+        # 2.4G Light off/on
+        echo
+        echo "[2.4G-3] Гашение света (kbc light off) и включение (kbc light on)"
+        read -r -p "  Выключить свет (kbc light off)? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            kbc light "$pid_wl" off > "$dir/32-light-off.txt" 2>&1 || true
+            cat "$dir/32-light-off.txt"
+            echo "  Свет должен погаснуть и сохраниться в памяти."
+            read -r -p "  Свет погас? Нажмите Enter..." _ </dev/tty || true
+        else
+            echo "  Пропущено."
+        fi
+
+        read -r -p "  Включить свет (kbc light on)? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            kbc light "$pid_wl" on > "$dir/33-light-on.txt" 2>&1 || true
+            cat "$dir/33-light-on.txt"
+            echo "  Свет должен загореться (последний эффект + яркость)."
+            read -r -p "  Свет загорелся? Нажмите Enter..." _ </dev/tty || true
+        else
+            echo "  Пропущено."
+        fi
+
+        # 2.4G Read LED config (0x44) and RGB table (0x49) via raw
+        echo
+        echo "[2.4G-4] Чтение LED-config ресивера (feature 0x44) и RGB-table (0x49)"
+        echo "  Это read-only снимки для анализа протокола 0x13."
+        read -r -p "  Сделать снимки? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            echo "[read] LED-config (0x44, 128 байт через 0x13 protocol)..."
+            # Note: 0x13 protocol uses multi-page reads, kbc raw feature-get 06 520 returns constant block
+            # For 2.4G we need output report 0x13 with cmd 0x44, but kbc raw doesn't support output-send for 0x13 yet
+            # So we document this as known limitation
+            echo "  [INFO] 0x13 protocol (20-byte output reports) не поддерживается kbc raw feature-get."
+            echo "  Для чтения 0x44/0x49 нужен output-send + input-read на hidraw1 (0x13)."
+            echo "  Это известное ограничение — см. aula_f75.rs wl_read_pages/wl_write_pages."
+            echo "  Сохраняем заглушку для справки."
+            echo "# 2.4G LED-config (0x44) — требует output report 0x13, не feature 0x06" > "$dir/34-led-config-2g4.txt"
+            echo "# 2.4G RGB-table (0x49) — требует output report 0x13, не feature 0x06" >> "$dir/34-led-config-2g4.txt"
+            cat "$dir/34-led-config-2g4.txt"
+        else
+            echo "  Пропущено."
+        fi
+
+        # 2.4G Effect selection test (list WL_EFFECTS)
+        echo
+        echo "[2.4G-5] Список эффектов 2.4G (WL_EFFECTS) — для справки"
+        cat > "$dir/35-wl-effects-list.txt" << 'EOF'
+WL_EFFECTS (коды led[10] для ресивера 3554:FA09, протокол 0x13):
+  0x01 = Steady (постоянный цвет)
+  0x02 = Rainbow (радуга)
+  0x03 = Breathing (дыхание)
+  0x05 = Retro Snake (змейка)
+  0x07 = Neon Stream (неоновый поток)
+  0x08 = Retinue Scanning (сопровождение сканирование)
+  0x0C = Sine Wave (синусоидальная волна)
+  0x0D = Rainbow Wheel (радужное колесо)
+  0x0E = Blossoming (расцветание)
+  0x0F = Raindrops (капли дождя)
+  0x10 = Stars Twinkle (звёзды)
+  0x11 = Reaction (реактивная)
+  0x12 = Shadow Disappear (исчезновение тени)
+  0x13 = Flash Away (вспышка)
+  0x14 = Ripple Shining (мерцание рябью)
+  0x1C = Rotating Windmill (вращающаяся ветряная мельница)
+  0x1D = Rotating Storm (вращающийся шторм)
+  0x1E = Colorful Waterfall (цветной водопад)
+
+Применение через: kbc rgb 3554:FA09 --mode <effect> --brightness <0-255> --speed <0-255>
+Яркость/скорость пишутся в слот активного эффекта [58+2*(led[10]-1)] (байт a / старшая тетрада b).
+EOF
+        cat "$dir/35-wl-effects-list.txt"
+        echo
+
+        echo "=== 2.4G ТЕСТЫ ЗАВЕРШЕНЫ ==="
+    elif [[ "$DEVICE" == "f99" && -z "$pid_wl" ]]; then
+        echo
+        echo "[INFO] Ресивер 2.4G (3554:FA09) не обнаружен в kbc list."
+        echo "Для 2.4G тестов подключите ресивер и переключите клавиатуру в режим 2.4G."
+    fi
+
     # 12. Читаемая карта keymap (Default + FN1) — работает и на F99 (0x83,
     #     журнал 10.62/10.70), и на Ajazz (GET_KEY/GET_FN_KEY). Вывод клиентской
     #     команды `kbc remap --list` (read-only; запись в этом сборе не ведётся).
@@ -440,6 +557,12 @@ collect() {
         echo "  * 19/20/21 — F99: config индикаторы до/после/дифф (B2.6, чистый дифф Caps/Num/Scroll)"
         echo "  * 22/23/24 — F99: config debounce/sleep до/после/дифф (B2.7)"
         echo "  * 25/26/27 — F99: ресивер LED-config до/после/дифф (B2.8, per-key 2.4G)"
+        echo "  * 30-battery-2g4.txt  — батарея 2.4G (повтор для 2.4G секции)"
+        echo "  * 31-rgb-breathing.txt — тест RGB Breathing 2.4G (запись в память)"
+        echo "  * 32-light-off.txt    — гашение света 2.4G (kbc light off)"
+        echo "  * 33-light-on.txt     — включение света 2.4G (kbc light on)"
+        echo "  * 34-led-config-2g4.txt — заметка про 0x13 protocol (LED-config/RGB-table)"
+        echo "  * 35-wl-effects-list.txt — справочник WL_EFFECTS (коды led[10] для 2.4G)"
     } > "$dir/15-сводка.txt"
 
     echo "Готово. Данные в: $dir"
