@@ -406,13 +406,39 @@ collect() {
     if [[ "$DEVICE" == "f99" && -n "$pid_wl" ]]; then
         echo
         echo "=== 2.4G ТЕСТЫ F99 (ресивер 3554:FA09) ==="
-        echo "Клавиатура должна быть в режиме 2.4G, НЕ спать (нажать любую клавишу перед стартом)."
+        echo "ВАЖНО: клавиатура должна быть в режиме 2.4G (переключить Fn+1/2/3/4),"
+        echo "спейрена с ресивером, и НЕ спать (нажать любую клавишу перед стартом)."
         echo "Если клавиатура спит — батарея вернёт «спит на линке», эффекты не применятся."
         echo
 
-        # 2.4G Battery (already done in step 4, but repeat for completeness)
-        echo "[2.4G-1] Батарея ресивера (kbc battery)"
+        # 2.4G-0: Пробуждение/проверка линка
+        echo "[2.4G-0] Проверка готовности 2.4G линка (пробуждение клавиатуры)..."
+        echo "  Нажмите ЛЮБУЮ клавишу на клавиатуре сейчас, чтобы разбудить её."
+        if [[ "$AUTO" -eq 0 ]]; then
+            read -r -p "  Готово? Нажмите Enter..." _ </dev/tty || true
+        fi
+        echo "  Проверка батареи (также разбудит клавиатуру)..."
         kbc battery "$pid_wl" > "$dir/30-battery-2g4.txt" 2>&1 || true
+        cat "$dir/30-battery-2g4.txt"
+        echo
+
+        # Проверка: если батарея "спит", предупреждаем
+        if grep -q "спит на линке" "$dir/30-battery-2g4.txt"; then
+            echo "  [!] ВНИМАНИЕ: клавиатура спит на линке!"
+            echo "      Переключите клавиатуру в режим 2.4G (Fn+1/2/3/4),"
+            echo "      убедитесь, что ресивер спейрен, нажмите клавишу."
+            if [[ "$AUTO" -eq 0 ]]; then
+                read -r -p "  Повторить проверку батареи? [y/N]: " _ans </dev/tty || _ans="n"
+                if [[ "$_ans" =~ ^[Yy]$ ]]; then
+                    kbc battery "$pid_wl" > "$dir/30-battery-2g4.txt" 2>&1 || true
+                    cat "$dir/30-battery-2g4.txt"
+                fi
+            fi
+        fi
+        echo
+
+        # 2.4G Battery (already done in step 4, but repeat for completeness)
+        echo "[2.4G-1] Батарея ресивера (kbc battery) — подтверждённая"
         cat "$dir/30-battery-2g4.txt"
         echo
 
