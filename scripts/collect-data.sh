@@ -190,8 +190,11 @@ collect() {
         } > "$dir/08-keymap-fn1.txt" 2>&1 || true
 
         # 9-11. Интерактивный дифф конфига: два read-only снимка (до/после)
-        #       действий на клавиатуре -> найти байты энкодера (ролик громкости)
-        #       и индикаторов (Caps/Num/Scroll) в конфиг-регионе (10.66/10.67).
+        #       действий на клавиатуре -> найти байты индикаторов (Caps/Num/Scroll)
+        #       в конфиг-регионе (10.66/10.67). ВНИМАНИЕ: у AULA F99 РОЛИКА
+        #       ГРОМКОСТИ НЕТ физически (ролик есть только у Ajazz AK820 Pro,
+        #       10.70: пустой 11-config-diff в живой диагностике F99) — поэтому
+        #       ролик в этом вопросе для F99 не упоминается.
         echo "[9] снимок конфига ДО действий (read-only)"
         {
             echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
@@ -200,8 +203,8 @@ collect() {
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/09-config-before.txt" 2>&1 || true
 
-        echo "  Покрутите РОЛИК ГРОМКОСТИ на клавиатуре 3-4 раза в обе стороны,"
-        echo "  затем нажмите-отпустите Caps Lock, Num Lock, Scroll Lock (по одному разу)."
+        echo "  Нажмите-отпустите Caps Lock, Num Lock, Scroll Lock (по одному разу),"
+        echo "  затем наберите несколько букв (например 'qwerty')."
         read -r -p "  Готово? Нажмите Enter: " _ </dev/tty || true
 
         echo "[10] снимок конфига ПОСЛЕ действий (read-only)"
@@ -227,6 +230,145 @@ collect() {
         echo "пропущено (не применимо)" > "$dir/09-config-before.txt"
         echo "пропущено (не применимо)" > "$dir/10-config-after.txt"
         echo "пропущено (не применимо)" > "$dir/11-config-diff.txt"
+    fi
+
+    # --- ДОПОЛНИТЕЛЬНЫЕ ШАГИ ДЛЯ F99 (B2.5–B2.8) ---
+    # Эти шаги нужны ТОЛЬКО для F99 по USB, чтобы найти каналы записи
+    # (ремап, индикаторы, debounce/sleep, per-key 2.4G).
+    # Запускаются ТОЛЬКО если DEVICE=f99 и есть USB-клавиатура.
+    if [[ "$DEVICE" == "f99" && -n "$pid_auto" ]]; then
+        echo
+        echo "=== ДОПОЛНИТЕЛЬНЫЕ ДИАГНОСТИКИ F99 (B2.5–B2.8) ==="
+        echo "Для этих тестов нужен ОФИЦИАЛЬНЫЙ Windows-софт AULA F99 (под Wine или на Windows)."
+        echo "Если софта нет — просто нажмите Enter на каждом вопросе, шаги пропустятся."
+        echo
+
+        # B2.5: Remap write channel discovery
+        echo "[B2.5] Поиск канала ЗАПИСИ ремапа (config diff до/после Windows-софта)"
+        echo "  1) Откройте AULA F99 Windows-софт, НЕ меняйте раскладку пока."
+        read -r -p "  Сделать снимок конфига ДО? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            {
+                echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
+                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                echo "# feature-get 06 520"
+                kbc raw "$pid_auto" feature-get 06 520
+            } > "$dir/16-config-remap-before.txt" 2>&1 || true
+            echo "  Снимок сохранён: $dir/16-config-remap-before.txt"
+            echo "  Теперь в софте: переназначьте ОДНУ клавишу (напр. слот 73 '=' -> 'A'),"
+            echo "  нажмите «Применить/Сохранить в память», затем вернитесь сюда."
+            read -r -p "  Готово? Сделать снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            if [[ "$_ans2" =~ ^[Yy]$ ]]; then
+                {
+                    echo "# feature-send: чтение конфига ПОСЛЕ записи ремапа"
+                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                    echo "# feature-get 06 520"
+                    kbc raw "$pid_auto" feature-get 06 520
+                } > "$dir/17-config-remap-after.txt" 2>&1 || true
+                echo "  Снимок сохранён: $dir/17-config-remap-after.txt"
+                if command -v diff >/dev/null 2>&1; then
+                    diff -u "$dir/16-config-remap-before.txt" "$dir/17-config-remap-after.txt" > "$dir/18-config-remap-diff.txt" 2>&1 || true
+                    echo "  Дифф: $dir/18-config-remap-diff.txt"
+                fi
+            fi
+        else
+            echo "  Пропущено."
+        fi
+
+        # B2.6: Indicators bits (Caps/Num/Scroll) - already covered by steps 9-11,
+        # but here's a dedicated cleaner prompt for just indicators
+        echo
+        echo "[B2.6] Поиск байтов ИНДИКАТОРОВ Caps/Num/Scroll (config diff)"
+        echo "  (Отдельный чистый дифф только для индикаторов, без набора букв)"
+        read -r -p "  Сделать снимок ДО нажатий индикаторов? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            {
+                echo "# feature-send: чтение конфига ДО индикаторов"
+                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                echo "# feature-get 06 520"
+                kbc raw "$pid_auto" feature-get 06 520
+            } > "$dir/19-config-ind-before.txt" 2>&1 || true
+            echo "  Снимок сохранён: $dir/19-config-ind-before.txt"
+            echo "  Нажмите-отпустите Caps Lock, Num Lock, Scroll Lock (по одному разу)."
+            read -r -p "  Готово? Снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            if [[ "$_ans2" =~ ^[Yy]$ ]]; then
+                {
+                    echo "# feature-send: чтение конфига ПОСЛЕ индикаторов"
+                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                    echo "# feature-get 06 520"
+                    kbc raw "$pid_auto" feature-get 06 520
+                } > "$dir/20-config-ind-after.txt" 2>&1 || true
+                echo "  Снимок сохранён: $dir/20-config-ind-after.txt"
+                if command -v diff >/dev/null 2>&1; then
+                    diff -u "$dir/19-config-ind-before.txt" "$dir/20-config-ind-after.txt" > "$dir/21-config-ind-diff.txt" 2>&1 || true
+                    echo "  Дифф: $dir/21-config-ind-diff.txt"
+                fi
+            fi
+        else
+            echo "  Пропущено (дифф индикаторов уже есть в 09/10/11)."
+        fi
+
+        # B2.7: Debounce / sleep timer
+        echo
+        echo "[B2.7] Debounce / sleep timer (config diff, если есть в софте)"
+        read -r -p "  Есть доступ к настройке debounce/sleep в софте? Снимок ДО? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            {
+                echo "# feature-send: чтение конфига ДО debounce/sleep"
+                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                echo "# feature-get 06 520"
+                kbc raw "$pid_auto" feature-get 06 520
+            } > "$dir/22-config-db-before.txt" 2>&1 || true
+            echo "  Снимок сохранён: $dir/22-config-db-before.txt"
+            echo "  В софте: измените debounce и/или sleep timer, нажмите «Применить»."
+            read -r -p "  Готово? Снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            if [[ "$_ans2" =~ ^[Yy]$ ]]; then
+                {
+                    echo "# feature-send: чтение конфига ПОСЛЕ debounce/sleep"
+                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                    echo "# feature-get 06 520"
+                    kbc raw "$pid_auto" feature-get 06 520
+                } > "$dir/23-config-db-after.txt" 2>&1 || true
+                echo "  Снимок сохранён: $dir/23-config-db-after.txt"
+                if command -v diff >/dev/null 2>&1; then
+                    diff -u "$dir/22-config-db-before.txt" "$dir/23-config-db-after.txt" > "$dir/24-config-db-diff.txt" 2>&1 || true
+                    echo "  Дифф: $dir/24-config-db-diff.txt"
+                fi
+            fi
+        else
+            echo "  Пропущено."
+        fi
+
+        # B2.8: Per-key RGB on 2.4G (receiver)
+        echo
+        echo "[B2.8] Per-key RGB на 2.4G (ресивер 3554:FA09) — опционально"
+        echo "  Нужен ресивер, клавиатура в 2.4G, НЕ спит (нажать клавишу перед стартом)."
+        read -r -p "  Ресивер подключен, клава не спит? Снимок LED-config ДО? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            {
+                echo "# feature-get 06 520 (LED-config ресивера, read-only)"
+                kbc raw "3554:FA09" feature-get 06 520
+            } > "$dir/25-led-config-before.txt" 2>&1 || true
+            echo "  Снимок сохранён: $dir/25-led-config-before.txt"
+            echo "  В Windows-софте (через ресивер): задайте per-key цвета (разные клавиши — разные цвета), «Применить»."
+            read -r -p "  Готово? Снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            if [[ "$_ans2" =~ ^[Yy]$ ]]; then
+                {
+                    echo "# feature-get 06 520 ПОСЛЕ per-key записи"
+                    kbc raw "3554:FA09" feature-get 06 520
+                } > "$dir/26-led-config-after.txt" 2>&1 || true
+                echo "  Снимок сохранён: $dir/26-led-config-after.txt"
+                if command -v diff >/dev/null 2>&1; then
+                    diff -u "$dir/25-led-config-before.txt" "$dir/26-led-config-after.txt" > "$dir/27-led-config-diff.txt" 2>&1 || true
+                    echo "  Дифф: $dir/27-led-config-diff.txt"
+                fi
+            fi
+        else
+            echo "  Пропущено."
+        fi
+
+        echo
+        echo "=== ДОПОЛНИТЕЛЬНЫЕ ДИАГНОСТИКИ ЗАВЕРШЕНЫ ==="
     fi
 
     # 12. Читаемая карта keymap (Default + FN1) — работает и на F99 (0x83,
@@ -266,9 +408,13 @@ collect() {
         echo "  * 06-color-table.txt  — таблица цветов AULA (512 Б, если читается)"
         echo "  * 07-keymap-default   — keymap Default (0x83): читается ли канал ремапа"
         echo "  * 08-keymap-fn1       — keymap FN1 (0x83)"
-        echo "  * 09/10/11-конфиг     — снимки до/после + дифф (энкодер/индикаторы)"
+        echo "  * 09/10/11-конфиг     — снимки до/после + дифф (индикаторы Caps/Num/Scroll)"
         echo "  * 12-keymap-list.txt  — читаемая карта keymap Default+FN1 (kbc remap --list)"
         echo "  * 13/14-lsusb-uevent  — дерево USB и usage pages hidraw"
+        echo "  * 16/17/18 — F99: config remap до/после/дифф (B2.5, запись ремапа в софте)"
+        echo "  * 19/20/21 — F99: config индикаторы до/после/дифф (B2.6, чистый дифф Caps/Num/Scroll)"
+        echo "  * 22/23/24 — F99: config debounce/sleep до/после/дифф (B2.7)"
+        echo "  * 25/26/27 — F99: ресивер LED-config до/после/дифф (B2.8, per-key 2.4G)"
     } > "$dir/15-сводка.txt"
 
     echo "Готово. Данные в: $dir"
