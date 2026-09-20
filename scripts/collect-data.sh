@@ -27,13 +27,15 @@ USE_SG=0
 # ВНИМАНИЕ: использовать `type -P`, а НЕ `command -v`! Ниже объявлена функция
 # с именем `kbc`, поэтому `command -v kbc` вернёт имя функции (рекурсия → SIGSEGV).
 find_kbc() {
-    if type -P kbc >/dev/null 2>&1; then
-        KBC="$(type -P kbc)"
-    elif [[ -x "$ROOT/target/release/kbc" ]]; then
+    # СНАЧАЛА — локальная сборка (приоритет над системной)
+    if [[ -x "$ROOT/target/release/kbc" ]]; then
         KBC="$ROOT/target/release/kbc"
+        echo "[i] использую локальную сборку: $KBC" >&2
+    elif type -P kbc >/dev/null 2>&1; then
+        KBC="$(type -P kbc)"
+        echo "[i] использую системный kbc: $KBC" >&2
     else
         echo "не найден бинарник kbc. Соберите его (один раз) и повторите:" >&2
-        echo "  sudo ./fedora_install.sh --install-deps   # Fedora и др." >&2
         echo "  make release" >&2
         echo "  # либо: nix develop . --command cargo build --release" >&2
         exit 1
@@ -432,25 +434,33 @@ collect() {
             echo "  Пропущено."
         fi
 
-        # 2.4G Light off/on
+        # 2.4G Light off/on (через kbc rgb --light-off/--light-on)
         echo
-        echo "[2.4G-3] Гашение света (kbc light off) и включение (kbc light on)"
-        read -r -p "  Выключить свет (kbc light off)? [y/N]: " _ans </dev/tty || _ans="n"
+        echo "[2.4G-3] Гашение/включение света (kbc rgb --light-off/--light-on)"
+        if [[ "$AUTO" -eq 1 ]]; then
+            _ans="y"
+        else
+            read -r -p "  Выключить свет (kbc rgb --light-off)? [y/N]: " _ans </dev/tty || _ans="n"
+        fi
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
-            kbc light "$pid_wl" off > "$dir/32-light-off.txt" 2>&1 || true
+            kbc rgb "$pid_wl" --light-off > "$dir/32-light-off.txt" 2>&1 || true
             cat "$dir/32-light-off.txt"
             echo "  Свет должен погаснуть и сохраниться в памяти."
-            read -r -p "  Свет погас? Нажмите Enter..." _ </dev/tty || true
+            if [[ "$AUTO" -eq 0 ]]; then read -r -p "  Свет погас? Нажмите Enter..." _ </dev/tty || true; fi
         else
             echo "  Пропущено."
         fi
 
-        read -r -p "  Включить свет (kbc light on)? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$AUTO" -eq 1 ]]; then
+            _ans="y"
+        else
+            read -r -p "  Включить свет (kbc rgb --light-on)? [y/N]: " _ans </dev/tty || _ans="n"
+        fi
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
-            kbc light "$pid_wl" on > "$dir/33-light-on.txt" 2>&1 || true
+            kbc rgb "$pid_wl" --light-on > "$dir/33-light-on.txt" 2>&1 || true
             cat "$dir/33-light-on.txt"
             echo "  Свет должен загореться (последний эффект + яркость)."
-            read -r -p "  Свет загорелся? Нажмите Enter..." _ </dev/tty || true
+            if [[ "$AUTO" -eq 0 ]]; then read -r -p "  Свет загорелся? Нажмите Enter..." _ </dev/tty || true; fi
         else
             echo "  Пропущено."
         fi
