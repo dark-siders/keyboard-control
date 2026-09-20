@@ -94,6 +94,12 @@ find_pid() {
     grep -oE '[0-9A-F]{4}:[0-9A-F]{4}' "$2" | grep -m1 -E "$1" || true
 }
 
+# --- уточнить модель F99 через kbc info (PID 010C общий с F75) ----------
+confirm_f99_model() {
+    # $1 — pid (258A:010C), возвращает 0 если это F99, 1 если нет
+    kbc info "$1" 2>/dev/null | grep -qi 'AULA F99'
+}
+
 # --- главная сборка -------------------------------------------------------
 collect() {
     local dir="$1"
@@ -119,6 +125,24 @@ collect() {
         # в kbc info). 258A:004E–50 — резерв по таблице (некоторые ревизии).
         pid_auto="$(find_pid '258A:010C|258A:00(4[E-F]|50)' "$list_file")" || true
         pid_wl="$(find_pid '3554:FA09' "$list_file")" || true
+
+        # Уточнить модель через kbc info (PID 010C общий с F75)
+        if [[ -n "$pid_auto" ]]; then
+            if ! confirm_f99_model "$pid_auto"; then
+                echo "[!] PID $pid_auto найден в списке, но kbc info не подтверждает F99 — возможно, это F75" >&2
+                # Не сбрасываем pid_auto — пусть пользователь решает
+            fi
+        else
+            # Fallback: иногда kbc list не показывает PID, но устройство есть
+            # Пробуем известные PID напрямую
+            for test_pid in 258A:010C 258A:004E 258A:004F 258A:0050; do
+                if confirm_f99_model "$test_pid"; then
+                    pid_auto="$test_pid"
+                    echo "[!] Автодетект через kbc list не сработал, но kbc info подтверждает F99 на $pid_auto" >&2
+                    break
+                fi
+            done
+        fi
     else
         pid_auto="$(find_pid '0C45:800[9A]|0C45:8099' "$list_file")" || true
         pid_wl=""
@@ -154,9 +178,10 @@ collect() {
     #    Для Ajazz пропускаем: у него другой транспорт (output-репорты), тыкать не будем.
     if [[ "$DEVICE" = f99 && -n "$pid_auto" ]]; then
         echo "[5] дамп конфиг-региона (feature 0x84, F99)"
+        # ВАЖНО: через kbc-обёртку (sg plugdev если --sg), 2>&1 чтобы не потерять вывод
         {
             echo "# feature-send: SET_тема чтения конфига (полный 520-байтный пакет)"
-            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
             echo "# feature-get 06 520"
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/05-config-dump.txt" 2>&1 || true
@@ -164,7 +189,7 @@ collect() {
         echo "[6] дамп таблицы цветов (feature 0x8a, F99)"
         {
             echo "# feature-send: SET_тема чтения таблицы цветов (полный 520-байтный пакет)"
-            kbc raw "$pid_auto" feature-send "$(packet_read 0x8a 0x0200)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            kbc raw "$pid_auto" feature-send "$(packet_read 0x8a 0x0200)" 2>&1 || echo "# feature-send: не удалось"
             echo "# feature-get 06 520"
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/06-color-table.txt" 2>&1 || true
@@ -176,7 +201,7 @@ collect() {
         echo "[7] дамп keymap Default (feature 0x83, слой 0)"
         {
             echo "# read-запрос keymap Default (read-only; write 0x03 не используется)"
-            kbc raw "$pid_auto" feature-send "$(packet_read_keymap 0)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            kbc raw "$pid_auto" feature-send "$(packet_read_keymap 0)" 2>&1 || echo "# feature-send: не удалось"
             echo "# feature-get 06 520"
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/07-keymap-default.txt" 2>&1 || true
@@ -184,7 +209,7 @@ collect() {
         echo "[8] дамп keymap FN1 (feature 0x83, слой 1)"
         {
             echo "# read-запрос keymap FN1 (read-only)"
-            kbc raw "$pid_auto" feature-send "$(packet_read_keymap 1)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            kbc raw "$pid_auto" feature-send "$(packet_read_keymap 1)" 2>&1 || echo "# feature-send: не удалось"
             echo "# feature-get 06 520"
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/08-keymap-fn1.txt" 2>&1 || true
@@ -198,7 +223,7 @@ collect() {
         echo "[9] снимок конфига ДО действий (read-only)"
         {
             echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
-            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
             echo "# feature-get 06 520"
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/09-config-before.txt" 2>&1 || true
@@ -210,7 +235,7 @@ collect() {
         echo "[10] снимок конфига ПОСЛЕ действий (read-only)"
         {
             echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
-            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+            kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
             echo "# feature-get 06 520"
             kbc raw "$pid_auto" feature-get 06 520
         } > "$dir/10-config-after.txt" 2>&1 || true
@@ -250,7 +275,7 @@ collect() {
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             {
                 echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
-                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
                 echo "# feature-get 06 520"
                 kbc raw "$pid_auto" feature-get 06 520
             } > "$dir/16-config-remap-before.txt" 2>&1 || true
@@ -261,7 +286,7 @@ collect() {
             if [[ "$_ans2" =~ ^[Yy]$ ]]; then
                 {
                     echo "# feature-send: чтение конфига ПОСЛЕ записи ремапа"
-                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
                     echo "# feature-get 06 520"
                     kbc raw "$pid_auto" feature-get 06 520
                 } > "$dir/17-config-remap-after.txt" 2>&1 || true
@@ -284,7 +309,7 @@ collect() {
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             {
                 echo "# feature-send: чтение конфига ДО индикаторов"
-                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
                 echo "# feature-get 06 520"
                 kbc raw "$pid_auto" feature-get 06 520
             } > "$dir/19-config-ind-before.txt" 2>&1 || true
@@ -294,7 +319,7 @@ collect() {
             if [[ "$_ans2" =~ ^[Yy]$ ]]; then
                 {
                     echo "# feature-send: чтение конфига ПОСЛЕ индикаторов"
-                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
                     echo "# feature-get 06 520"
                     kbc raw "$pid_auto" feature-get 06 520
                 } > "$dir/20-config-ind-after.txt" 2>&1 || true
@@ -315,7 +340,7 @@ collect() {
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             {
                 echo "# feature-send: чтение конфига ДО debounce/sleep"
-                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
                 echo "# feature-get 06 520"
                 kbc raw "$pid_auto" feature-get 06 520
             } > "$dir/22-config-db-before.txt" 2>&1 || true
@@ -325,7 +350,7 @@ collect() {
             if [[ "$_ans2" =~ ^[Yy]$ ]]; then
                 {
                     echo "# feature-send: чтение конфига ПОСЛЕ debounce/sleep"
-                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1 || echo "# feature-send: не удалось"
+                    kbc raw "$pid_auto" feature-send "$(packet_read 0x84 0x0080)" 2>&1 || echo "# feature-send: не удалось"
                     echo "# feature-get 06 520"
                     kbc raw "$pid_auto" feature-get 06 520
                 } > "$dir/23-config-db-after.txt" 2>&1 || true
