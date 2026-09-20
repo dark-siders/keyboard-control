@@ -174,7 +174,7 @@ impl KeyboardDevice for AulaF99 {
     }
 
     fn led_cols(&self) -> usize {
-        RGB_COLS
+        24 // 96% раскладка с NumPad (F99): ~24 колонки вместо 22 у 75% (F75)
     }
 
     // --- RGB -----------------------------------------------------------
