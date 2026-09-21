@@ -322,6 +322,12 @@ struct SaveArgs {
     /// прошивки в память. Без флага — сохранить конфиг без смены эффекта.
     #[arg(long)]
     effect: Option<String>,
+    /// Яркость 0..=255 (для сохранения эффекта с настройками)
+    #[arg(long)]
+    brightness: Option<u8>,
+    /// Скорость 0..=255 (для сохранения эффекта с настройками)
+    #[arg(long)]
+    speed: Option<u8>,
 }
 
 #[derive(Args)]
@@ -645,21 +651,28 @@ fn cmd_light_persistent(dev: &dyn KeyboardDevice, on: bool) -> anyhow::Result<u8
 fn cmd_save(a: SaveArgs) -> anyhow::Result<u8> {
     let (vid, pid) = parse_id(&a.device)?;
     let dev = open(vid, pid)?;
-    match &a.effect {
-        Some(e) => {
-            let hex = e.trim_start_matches("0x").trim_start_matches("0X");
-            let code =
-                u8::from_str_radix(hex, 16).map_err(|_| anyhow::anyhow!("неверный код эффекта: {e} (hex)"))?;
+    if let Some(e) = &a.effect {
+        let hex = e.trim_start_matches("0x").trim_start_matches("0X");
+        let code =
+            u8::from_str_radix(hex, 16).map_err(|_| anyhow::anyhow!("неверный код эффекта: {e} (hex)"))?;
+        if a.brightness.is_some() || a.speed.is_some() {
+            let brightness = a.brightness.unwrap_or(255);
+            let speed = a.speed.unwrap_or(60);
+            dev.save_effect_with_style(code, brightness, speed)?;
+            println!(
+                "аппаратный эффект 0x{code:02X} ({:?}) + яркость={brightness} скорость={speed} записан в память",
+                keyboard_center::devices::aula_f75::hw_effect_name(code)
+            );
+        } else {
             dev.save_hardware_effect(code)?;
             println!(
                 "аппаратный эффект 0x{code:02X} ({:?}) записан в память клавиатуры",
                 keyboard_center::devices::aula_f75::hw_effect_name(code)
             );
         }
-        None => {
-            dev.save_profile_to_eeprom(0)?;
-            println!("конфиг подсветки записан в память клавиатуры (свет включён, держится без приложения)");
-        }
+    } else {
+        dev.save_profile_to_eeprom(0)?;
+        println!("конфиг подсветки записан в память клавиатуры (свет включён, держится без приложения)");
     }
     Ok(0)
 }

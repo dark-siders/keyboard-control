@@ -43,7 +43,7 @@ impl Default for Color {
 
 /// Идентификатор физической клавиши в макете.
 /// Обычно совпадает с «скэнкодом» (keycode) клавиатуры.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct KeyId(pub u16);
 
 /// Действие, на которое можно переназначить клавишу.

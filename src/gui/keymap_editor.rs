@@ -254,23 +254,91 @@ pub fn build_keymap_editor(
         });
     }
 
-// Сбросить всё: читаем заводскую раскладку (read-only, wsclx:
-    // GET_DEFAULT_KEY_MATRIX/FN) — эталон для черновика. Полный заводской
-    // сброс (factory_reset, SET_FACTORY_RESET 0xFF) по кнопке НЕ вызываем:
-    // он стирает профили и подсветку, требует явного подтверждения и
-    // живого железа. Метод остаётся доступен драйверу/CLI.
+// Сбросить на заводские: читаем заводскую раскладку (GET_DEFAULT_*) и
+    // записываем её обратно в клавиатуру (remap_key + set_fn_layer).
+    // Для F75 (нет GET_DEFAULT_*) — используем жёстко заданный заводской дефолт
+    // из дампа (журнал 10.72). Клавиатура кикается после каждой записи —
+    // переподключаемся через fetcher после каждого ремапа.
     let fetcher_clear = fetcher.clone();
+    let status_clear = assign_status.clone();
+    let list_clear = list.clone();
     clear_all.connect_clicked(move |_| {
-        let Some(dev) = fetcher_clear() else {
-            return;
+        // Запоминаем VID:PID для переподключения
+        let Some(dev0) = fetcher_clear() else { return; };
+        let target_vidpid = dev0.vid_pid();
+        drop(dev0);
+
+        status_clear.set_text("Чтение заводской раскладки…");
+        let km = match fetcher_clear() {
+            Some(dev) => match dev.get_factory_keymap() {
+                Ok(km) => km,
+                Err(_) => {
+                    // Фоллбек для F75: жёстко заданный заводской дефолт (дамп 10.72)
+                    if dev.connection_type() == crate::types::ConnectionType::Usb {
+                        status_clear.set_text("Восстановление заводского дефолта F75 (hardcoded)…");
+                        crate::devices::aula_f75::factory_keymap_f75()
+                    } else {
+                        status_clear.set_text("Не удалось прочитать заводскую раскладку: устройство не поддерживает эту функцию");
+                        return;
+                    }
+                }
+            },
+            None => {
+                status_clear.set_text("Устройство не найдено");
+                return;
+            }
         };
-        match dev.get_factory_keymap() {
-            Ok(km) => println!(
-                "keyboard: заводская раскладка прочитана (base={}, fn={})",
-                km.base.len(),
-                km.fn_layer.bindings.len()
-            ),
-            Err(_) => println!("keyboard: заводская раскладка этим устройством не отдаётся"),
+
+        // Вспомогательная функция: переподключение к тому же VID:PID
+        let reconnect = || -> Result<_, String> {
+            let Some(dev) = fetcher_clear() else { return Err("устройство не найдено".to_string()); };
+            if dev.vid_pid() == target_vidpid { return Ok(dev); }
+            // Ищем в fetcher'е
+            for _ in 0..20 {
+                if let Some(dev) = fetcher_clear() {
+                    if dev.vid_pid() == target_vidpid { return Ok(dev); }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err("устройство не переподключилось".to_string())
+        };
+
+        // Восстанавливаем Default-слой (пропускаем залоченные слоты)
+        for (k, act) in &km.base {
+            let mut dev = match reconnect() { Ok(d) => d, Err(e) => { status_clear.set_text(&e); return; } };
+            match dev.remap_key(*k, act.clone()) {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("залочен") || msg.contains("защищено") || msg.contains("запрещена") {
+                        continue;
+                    }
+                    status_clear.set_text(&format!("Ошибка сброса слота {}: {e}", k.0));
+                    return;
+                }
+            }
+        }
+        // Восстанавливаем FN1-слой (пропускаем залоченные слоты)
+        for (k, act) in &km.fn_layer.bindings {
+            let mut dev = match reconnect() { Ok(d) => d, Err(e) => { status_clear.set_text(&e); return; } };
+            match dev.set_fn_layer(crate::types::FnLayer {
+                bindings: vec![(*k, act.clone())],
+            }) {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("залочен") || msg.contains("защищено") || msg.contains("запрещена") {
+                        continue;
+                    }
+                    status_clear.set_text(&format!("Ошибка сброса FN1 слота {}: {e}", k.0));
+                    return;
+                }
+            }
+        }
+        status_clear.set_text("Заводская раскладка восстановлена (Default + FN1).");
+        // Финальное переподключение для обновления списка
+        if let Ok(dev) = reconnect() {
+            fill_keymap_list(dev.as_ref(), &list_clear);
         }
     });
 

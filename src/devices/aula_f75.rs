@@ -1490,3 +1490,122 @@ pub fn slot_for_keycode(keycode: u16) -> Option<u8> {
         .find(|&&(_, k)| k == keycode)
         .map(|&(s, _)| s)
 }
+
+/// Заводской дефолт кеймапа F75 (Default + FN1 идентичны).
+/// Основан на дампе прошивки (журнал 10.72).
+pub fn factory_keymap_f75() -> crate::types::Keymap {
+    use crate::types::{FnLayer, KeyAction, Keymap, KeyId};
+    let mut base = Vec::new();
+    let mut fn_bindings = Vec::new();
+
+    // Вспомогательные макросы для краткости
+    macro_rules! press {
+        ($slot:expr, $usage:expr) => {{
+            base.push((KeyId($slot), KeyAction::Press($usage)));
+            fn_bindings.push((KeyId($slot), KeyAction::Press($usage)));
+        }};
+    }
+    macro_rules! modifier {
+        ($slot:expr, $m:expr) => {{
+            base.push((KeyId($slot), KeyAction::Modifier($m)));
+            fn_bindings.push((KeyId($slot), KeyAction::Modifier($m)));
+        }};
+    }
+
+    // === Default / FN1 identical factory map (журнал 10.72) ===
+    // Esc, `~, Tab, Caps
+    press!(0, 0x29);  // Esc
+    press!(1, 0x35);  // `~
+    press!(2, 0x2B);  // Tab
+    press!(3, 0x39);  // Caps
+    // Modifiers row
+    modifier!(4, 1);   // LShift
+    modifier!(5, 0);   // LCtrl
+    modifier!(11, 3);  // LWin
+    modifier!(17, 2);  // LAlt
+    modifier!(59, 4);  // RCtrl
+    modifier!(70, 5);  // RShift
+    // Number row
+    press!(7, 0x1E);   // 1
+    press!(13, 0x1F);  // 2
+    press!(19, 0x20);  // 3
+    press!(25, 0x21);  // 4
+    press!(31, 0x22);  // 5
+    press!(37, 0x23);  // 6
+    press!(43, 0x24);  // 7
+    press!(49, 0x25);  // 8
+    press!(55, 0x26);  // 9
+    press!(61, 0x27);  // 0
+    press!(67, 0x2D);  // -
+    press!(73, 0x2E);  // =
+    // F-row (step 6)
+    press!(12, 0x3A);  // F1
+    press!(18, 0x3B);  // F2
+    press!(24, 0x3C);  // F3
+    press!(30, 0x3D);  // F4
+    press!(36, 0x3E);  // F5
+    press!(42, 0x3F);  // F6
+    press!(48, 0x40);  // F7
+    press!(54, 0x41);  // F8
+    press!(60, 0x42);  // F9
+    press!(66, 0x43);  // F10
+    press!(72, 0x44);  // F11
+    press!(78, 0x45);  // F12
+    // QWERTY row
+    press!(8, 0x14);   // Q
+    press!(14, 0x1A);  // W
+    press!(20, 0x08);  // E
+    press!(26, 0x15);  // R
+    press!(32, 0x17);  // T
+    press!(38, 0x1C);  // Y
+    press!(44, 0x18);  // U
+    press!(50, 0x0C);  // I
+    press!(56, 0x12);  // O
+    press!(62, 0x13);  // P
+    press!(68, 0x2F);  // [
+    press!(69, 0x34);  // '
+    press!(74, 0x30);  // ]
+    press!(75, 0x32);  // #~
+    press!(76, 0x64);  // Non-US \
+    // ASDF row
+    press!(9, 0x04);   // A
+    press!(15, 0x16);  // S
+    press!(21, 0x07);  // D
+    press!(27, 0x09);  // F
+    press!(33, 0x0A);  // G
+    press!(39, 0x0B);  // H
+    press!(45, 0x0D);  // J
+    press!(51, 0x0E);  // K
+    press!(57, 0x0F);  // L
+    press!(63, 0x33);  // ;
+    press!(64, 0x38);  // /
+    // ZXCV row
+    press!(10, 0x1D);  // Z
+    press!(16, 0x1B);  // X
+    press!(22, 0x06);  // C
+    press!(28, 0x19);  // V
+    press!(34, 0x05);  // B
+    press!(40, 0x11);  // N
+    press!(46, 0x10);  // M
+    press!(52, 0x36);  // ,
+    press!(58, 0x37);  // .
+    // Nav / right block
+    press!(77, 0x50);  // Left
+    press!(82, 0x52);  // Up
+    press!(83, 0x51);  // Down
+    press!(85, 0x4C);  // Del
+    press!(86, 0x4B);  // PgUp
+    press!(87, 0x4E);  // PgDn
+    press!(88, 0x4D);  // End
+    press!(89, 0x4F);  // Right
+    // Space, Enter, Backspace, \
+    press!(35, 0x2C);  // Space
+    press!(79, 0x2A);  // Backspace
+    press!(81, 0x28);  // Enter
+    press!(80, 0x31);  // \
+
+    Keymap {
+        base,
+        fn_layer: crate::types::FnLayer { bindings: fn_bindings },
+    }
+}

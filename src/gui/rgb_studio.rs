@@ -873,12 +873,8 @@ pub fn build_rgb_studio(
                         // Слайдеры яркости/скорости применяем вместе с эффектом
                         // (для ресивера — слот активного эффекта в LED config;
                         // для USB — слот эффект-таблицы).
-                        if is_wl {
-                            dev.save_effect_with_style(code, bri, spd)
-                                .map_err(|e| e.to_string())?;
-                        } else {
-                            dev.save_hardware_effect(code).map_err(|e| e.to_string())?
-                        }
+                        dev.save_effect_with_style(code, bri, spd)
+                            .map_err(|e| e.to_string())?;
                     }
                     SaveKind::LightOff => {
                         dev.save_hardware_light(false).map_err(|e| e.to_string())?
