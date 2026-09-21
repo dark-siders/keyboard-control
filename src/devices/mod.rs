@@ -117,6 +117,14 @@ pub trait KeyboardDevice: Send {
     fn slot_label_name(&self, _slot: u8) -> Option<&'static str> {
         None
     }
+    /// Найти слот keymap по HID usage (page 7) физической клавиши.
+    /// Обратная к `slot_label_name` операция: для GUI-клик-редактора — клик по
+    /// экранной клавише (usage) должен выбрать слот. Карта слотов
+    /// УСТРОЙСТВО-СПЕЦИФИЧНА (та же, что `slot_label_name`): AulaF75 — живой
+    /// дамп, прочие — None (не выяснена).
+    fn slot_for_keycode(&self, _keycode: u16) -> Option<u8> {
+        None
+    }
     /// Прочитать текущий аппаратный эффект подсветки (код режима прошивки).
     /// Ajazz: GET_LED_EFFECT (19). Прочие — Unsupported.
     fn get_current_effect(&self) -> Result<u8> {

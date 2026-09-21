@@ -4,10 +4,11 @@
 use gtk::glib::clone;
 use gtk::prelude::*;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::devices::KeyboardDevice;
-use crate::types::{ConnectionType, KeyAction};
+use crate::types::{Color, ConnectionType, FnLayer, KeyAction, KeyId};
 
 /// Собрать панель редактора клавиш.
 pub fn build_keymap_editor(
@@ -22,7 +23,7 @@ pub fn build_keymap_editor(
     title.set_halign(gtk::Align::Start);
     panel.append(&title);
 
-    let hint = gtk::Label::new(Some("Переназначение клавиш выполняется через CLI: `kbc remap <VID:PID> --list` (показать карту), `--key <слот> --to <usage>` (клавиша) или `--media <usage>` (кнопка мультимедиа). Кнопка ниже показывает текущую раскладку Default и FN1 — с меткой физической клавиши для каждого слота."));
+    let hint = gtk::Label::new(Some("Кликните по клавише раскладки, чтобы выбрать её слот, затем задайте новое действие справа и нажмите «Назначить». Работает только при подключении по USB. Подробная карта и переназначение доступны и через CLI: `kbc remap <VID:PID> --list`, `--key <слот> --to <usage>` (клавиша), `--media <usage>` (кнопка мультимедиа) или `--modifier 0..7` (модификатор). Кнопка «Показать раскладку» выводит текущую карту Default и FN1 с меткой физической клавиши для каждого слота."));
     hint.add_css_class("dim-label");
     hint.set_wrap(true);
     hint.set_halign(gtk::Align::Start);
@@ -39,11 +40,38 @@ pub fn build_keymap_editor(
     panel.append(&mode_sw_row);
 
     // Область макета (переиспользуем LayoutWidget)
-    let (layout_area, _colors) = crate::gui::keyboard_layout::LayoutWidget::new_drawing_area(
-        crate::gui::keyboard_layout::Layout::for_layout(crate::devices::Layout::L75),
-    );
+    let layout = crate::gui::keyboard_layout::Layout::for_layout(crate::devices::Layout::L75);
+    let (layout_area, colors) =
+        crate::gui::keyboard_layout::LayoutWidget::new_drawing_area(layout.clone());
     layout_area.set_height_request(280);
     panel.append(&layout_area);
+
+    // --- Клик-редактор: выбор слота по клику -----------------------------
+    let sel_lbl = gtk::Label::new(Some("Кликните по клавише в раскладке, чтобы выбрать слот."));
+    sel_lbl.add_css_class("dim-label");
+    sel_lbl.set_wrap(true);
+    sel_lbl.set_halign(gtk::Align::Start);
+    panel.append(&sel_lbl);
+
+    let assign_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let type_dd = gtk::DropDown::from_strings(&["Клавиша (hex)", "Медиа (hex)", "Модификатор (0..7)"]);
+    type_dd.set_selected(0);
+    let usage_entry = gtk::Entry::builder()
+        .placeholder_text("usage, напр. 2C")
+        .width_chars(10)
+        .build();
+    let assign_btn = gtk::Button::with_label("Назначить");
+    assign_btn.add_css_class("suggested-action");
+    assign_row.append(&type_dd);
+    assign_row.append(&usage_entry);
+    assign_row.append(&assign_btn);
+    panel.append(&assign_row);
+
+    let assign_status = gtk::Label::new(Some(""));
+    assign_status.add_css_class("dim-label");
+    assign_status.set_wrap(true);
+    assign_status.set_halign(gtk::Align::Start);
+    panel.append(&assign_status);
 
     // --- Назначенные действия ------------------------------------------
     let actions_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -94,65 +122,137 @@ pub fn build_keymap_editor(
     // --- Обработчики --------------------------------------------------------
     // Показ карты клавиш: читаем текущую раскладку (Default + FN1) и
     // выводим в списке слоты с меткой физической клавиши (карта F75).
-    // Переназначение — через CLI `kbc remap` (GUI-клик-редактор — TODO).
-    let fetcher2 = fetcher.clone();
-    remap_apply.connect_clicked(clone!(
-        #[strong]
-        list,
-        move |_| {
-        let Some(dev) = fetcher2() else { return; };
-        // Очищаем старый список
-        while let Some(row) = list.first_child() {
-            list.remove(&row);
-        }
-        let add = |text: String| {
-            let lbl = gtk::Label::new(Some(&text));
-            lbl.set_halign(gtk::Align::Start);
-            lbl.set_xalign(0.0);
-            list.append(&lbl);
-        };
-        match dev.get_current_keymap() {
-            Ok(km) => {
-                add("Default-слой:".to_string());
-                for (k, act) in &km.base {
-                    let label = dev.slot_label_name(k.0 as u8)
-                        .map(|l| format!(" [{l}]"))
-                        .unwrap_or_default();
-                    add(format!(
-                        "  слот {:>3} (0x{:02X}){} → {}",
-                        k.0,
-                        k.0,
-                        label,
-                        action_label(act)
-                    ));
-                }
-                add("FN1-слой:".to_string());
-                for (k, act) in &km.fn_layer.bindings {
-                    let label = dev.slot_label_name(k.0 as u8)
-                        .map(|l| format!(" [{l}]"))
-                        .unwrap_or_default();
-                    add(format!(
-                        "  слот {:>3} (0x{:02X}){} → {}",
-                        k.0,
-                        k.0,
-                        label,
-                        action_label(act)
-                    ));
-                }
+    {
+        let fetcher2 = fetcher.clone();
+        remap_apply.connect_clicked(clone!(
+            #[strong]
+            list,
+            move |_| {
+            let Some(dev) = fetcher2() else { return; };
+            fill_keymap_list(dev.as_ref(), &list);
+        }));
+    }
+
+    // Клик по макету: выбираем слот, подсвечиваем клавишу через colors.
+    let selected_slot: Rc<Cell<Option<u8>>> = Rc::new(Cell::new(None));
+    let last_key: Rc<Cell<Option<u16>>> = Rc::new(Cell::new(None));
+    {
+        let fetcher_clk = fetcher.clone();
+        let colors_clk = colors.clone();
+        let layout_clk = layout.clone();
+        let area_clk = layout_area.clone();
+        let sel_lbl_clk = sel_lbl.clone();
+        let assign_status_clk = assign_status.clone();
+        let sel_clk = selected_slot.clone();
+        let last_clk = last_key.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(1);
+        gesture.connect_pressed(move |_g, _n, x, y| {
+            let Some(dev) = fetcher_clk() else { return; };
+            let w = area_clk.width() as f64;
+            let h = area_clk.height() as f64;
+            if w <= 0.0 || h <= 0.0 {
+                assign_status_clk.set_text("Область макета ещё не отрисована — попробуйте снова.");
+                return;
             }
-            Err(_) if dev.connection_type() != ConnectionType::Usb => {
-                // Ремап прошивки работает только по USB (wired): на 2.4G/BT
-                // радиоканал настройки не ревёрснут (journal 10.59/10.62).
-                add(
-                    "Раскладка доступна только при подключении по USB (кабель). \
-                     Сейчас клавиатура подключена по 2.4G — переключи на USB и \
-                     нажми «Показать раскладку» снова."
-                        .to_string(),
-                );
+            let Some(keycode) = layout_clk.key_at(x, y, w, h) else {
+                assign_status_clk.set_text("Клик мимо клавиш раскладки.");
+                return;
+            };
+            let Some(slot) = dev.slot_for_keycode(keycode) else {
+                assign_status_clk.set_text("Клавиша не поддерживает переназначение этим устройством.");
+                return;
+            };
+            // Сброс подсветки ранее выбранной клавиши
+            if let Some(prev) = last_clk.get() {
+                colors_clk.borrow_mut().remove(&KeyId(prev));
             }
-            Err(e) => add(format!("Ошибка чтения раскладки: {e}")),
-        }
-    }));
+            colors_clk
+                .borrow_mut()
+                .insert(KeyId(keycode), Color { r: 255, g: 160, b: 0 });
+            last_clk.set(Some(keycode));
+            sel_clk.set(Some(slot));
+            area_clk.queue_draw();
+            let label = dev
+                .slot_label_name(slot)
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default();
+            let cur = dev
+                .get_current_keymap()
+                .ok()
+                .and_then(|km| current_action(&km, slot).map(|a| action_label(a)))
+                .unwrap_or_else(|| "не назначено".to_string());
+            sel_lbl_clk.set_text(&format!(
+                "Выбран слот {slot}{label} — текущее действие: {cur}. \
+                 Введите новое действие справа и нажмите «Назначить»."
+            ));
+        });
+        layout_area.add_controller(gesture);
+    }
+
+    // Назначение действия на выбранный слот
+    {
+        let fetcher_as = fetcher.clone();
+        let sel_as = selected_slot.clone();
+        let mode_as = mode_sw.clone();
+        let type_as = type_dd.clone();
+        let usage_as = usage_entry.clone();
+        let status_as = assign_status.clone();
+        let list_as = list.clone();
+        assign_btn.connect_clicked(move |_| {
+            let Some(dev) = fetcher_as() else { return; };
+            let Some(slot) = sel_as.get() else {
+                status_as.set_text("Сначала кликните по клавише в раскладке.");
+                return;
+            };
+            let trimmed = usage_as.text().trim().to_string();
+            if trimmed.is_empty() {
+                status_as.set_text("Введите usage нового действия.");
+                return;
+            }
+            let act = match type_as.selected() {
+                0 => match parse_hex_usage(&trimmed) {
+                    Ok(u) => KeyAction::Press(u),
+                    Err(e) => {
+                        status_as.set_text(&format!("Неверный hex usage клавиши (например 2C): {e}."));
+                        return;
+                    }
+                },
+                1 => match parse_hex_usage(&trimmed) {
+                    Ok(u) => KeyAction::Media(u),
+                    Err(e) => {
+                        status_as.set_text(&format!("Неверный hex usage медиа (например E2): {e}."));
+                        return;
+                    }
+                },
+                _ => match trimmed.parse::<u8>() {
+                    Ok(m) if m <= 7 => KeyAction::Modifier(m),
+                    _ => {
+                        status_as.set_text("Модификатор: число 0..7 (0=LCtrl..7=RWin).");
+                        return;
+                    }
+                },
+            };
+            let layer = if mode_as.is_active() { "FN1" } else { "Default" };
+            let result = if mode_as.is_active() {
+                dev.set_fn_layer(FnLayer {
+                    bindings: vec![(KeyId(slot as u16), act.clone())],
+                })
+            } else {
+                dev.remap_key(KeyId(slot as u16), act.clone())
+            };
+            match result {
+                Ok(_) => {
+                    status_as.set_text(&format!(
+                        "Слот {slot} записан в слой {layer}: {} (read-modify-write, память клавиатуры).",
+                        action_label(&act)
+                    ));
+                    fill_keymap_list(dev.as_ref(), &list_as);
+                }
+                Err(e) => status_as.set_text(&format!("Запись не удалась: {e}")),
+            }
+        });
+    }
 
 // Сбросить всё: читаем заводскую раскладку (read-only, wsclx:
     // GET_DEFAULT_KEY_MATRIX/FN) — эталон для черновика. Полный заводской
@@ -193,6 +293,83 @@ pub fn build_keymap_editor(
     });
 
     panel
+}
+
+/// Очистить ListBox и вывести карту раскладки (Default + FN1).
+fn fill_keymap_list(dev: &dyn KeyboardDevice, list: &gtk::ListBox) {
+    while let Some(row) = list.first_child() {
+        list.remove(&row);
+    }
+    let add = |text: String| {
+        let lbl = gtk::Label::new(Some(&text));
+        lbl.set_halign(gtk::Align::Start);
+        lbl.set_xalign(0.0);
+        list.append(&lbl);
+    };
+    match dev.get_current_keymap() {
+        Ok(km) => {
+            add("Default-слой:".to_string());
+            for (k, act) in &km.base {
+                let label = dev
+                    .slot_label_name(k.0 as u8)
+                    .map(|l| format!(" [{l}]"))
+                    .unwrap_or_default();
+                add(format!(
+                    "  слот {:>3} (0x{:02X}){} → {}",
+                    k.0,
+                    k.0,
+                    label,
+                    action_label(act)
+                ));
+            }
+            add("FN1-слой:".to_string());
+            for (k, act) in &km.fn_layer.bindings {
+                let label = dev
+                    .slot_label_name(k.0 as u8)
+                    .map(|l| format!(" [{l}]"))
+                    .unwrap_or_default();
+                add(format!(
+                    "  слот {:>3} (0x{:02X}){} → {}",
+                    k.0,
+                    k.0,
+                    label,
+                    action_label(act)
+                ));
+            }
+        }
+        Err(_) if dev.connection_type() != ConnectionType::Usb => {
+            // Ремап прошивки работает только по USB (wired): на 2.4G/BT
+            // радиоканал настройки не ревёрснут (journal 10.59/10.62).
+            add(
+                "Раскладка доступна только при подключении по USB (кабель). \
+                 Сейчас клавиатура подключена по 2.4G — переключи на USB и \
+                 нажми «Показать раскладку» снова."
+                    .to_string(),
+            );
+        }
+        Err(e) => add(format!("Ошибка чтения раскладки: {e}")),
+    }
+}
+
+/// Текущее действие для слота (или `None`, если слот не назначен).
+fn current_action<'a>(km: &'a crate::types::Keymap, slot: u8) -> Option<&'a KeyAction> {
+    km.base
+        .iter()
+        .find(|(k, _)| k.0 == slot as u16)
+        .map(|(_, a)| a)
+        .or_else(|| {
+            km.fn_layer
+                .bindings
+                .iter()
+                .find(|(k, _)| k.0 == slot as u16)
+                .map(|(_, a)| a)
+        })
+}
+
+/// Распарсить hex usage: с/без префикса 0x.
+pub fn parse_hex_usage(s: &str) -> Result<u16, String> {
+    let t = s.trim().strip_prefix("0x").unwrap_or(s.trim());
+    u16::from_str_radix(t, 16).map_err(|e| e.to_string())
 }
 
 /// Превратить KeyAction в строку для отображения.

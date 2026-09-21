@@ -43,6 +43,26 @@ impl Layout {
     pub fn find(&self, keycode: u16) -> Option<&KeyPos> {
         self.keys.iter().find(|k| k.keycode == keycode)
     }
+
+    /// Hit-test: клик по раскладке в координатах виджета → keycode клавиши.
+    /// Геометрия строго повторяет `draw_layout` (margin=14, gap=3, десятые доли
+    /// сетки по col/row). Возвращает None, если клик пришёлся в промежуток.
+    pub fn key_at(&self, x: f64, y: f64, w: f64, h: f64) -> Option<u16> {
+        let margin = 14.0;
+        let gap = 3.0;
+        let key_w = (w - margin * 2.0) / self.cols as f64;
+        let key_h =
+            (h - margin * 2.0 - (self.rows as f64 - 1.0) * gap) / self.rows as f64;
+        for key in &self.keys {
+            let rx = margin + key.col as f64 * key_w;
+            let ry = margin + key.row as f64 * (key_h + gap);
+            let rw = key.width * key_w;
+            if x >= rx && x <= rx + rw && y >= ry && y <= ry + key_h {
+                return Some(key.keycode);
+            }
+        }
+        None
+    }
 }
 
 /// Вспомогательная функция: добавить строку клавиш в список.
