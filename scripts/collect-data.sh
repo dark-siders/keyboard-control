@@ -25,6 +25,21 @@ DEVICE=""      # автодетект по умолчанию
 USE_SG=0
 AUTO=0
 
+# --- ask_yn: вопрос [y/N] ---------------------------------------------------
+# ЕДИНЫЙ хелпер для всех y/n-вопросов. В --auto-режиме НЕ задаёт вопрос и
+# возвращает дефолт (чтобы не блокироваться на tty в живом терминале), иначе
+# читает из /dev/tty (при EOF — дефолт как у обычного read).
+ask_yn() {
+    local default="${2:-n}"
+    if [[ "$AUTO" -eq 1 ]]; then
+        echo "$default"
+        return 0
+    fi
+    local _read_ans
+    read -r -p "$1" _read_ans </dev/tty || _read_ans=""
+    echo "${_read_ans:-$default}"
+}
+
 # --- поиск бинарника kbc -------------------------------------------------
 # ВНИМАНИЕ: использовать `type -P`, а НЕ `command -v`! Ниже объявлена функция
 # с именем `kbc`, поэтому `command -v kbc` вернёт имя функции (рекурсия → SIGSEGV).
@@ -234,7 +249,9 @@ collect() {
 
         echo "  Нажмите-отпустите Caps Lock, Num Lock, Scroll Lock (по одному разу),"
         echo "  затем наберите несколько букв (например 'qwerty')."
-        read -r -p "  Готово? Нажмите Enter: " _ </dev/tty || true
+        if [[ "$AUTO" -eq 0 ]]; then
+            read -r -p "  Готово? Нажмите Enter: " _ </dev/tty || true
+        fi
 
         echo "[10] снимок конфига ПОСЛЕ действий (read-only)"
         {
@@ -275,7 +292,7 @@ collect() {
         # B2.5: Remap write channel discovery
         echo "[B2.5] Поиск канала ЗАПИСИ ремапа (config diff до/после Windows-софта)"
         echo "  1) Откройте AULA F99 Windows-софт, НЕ меняйте раскладку пока."
-        read -r -p "  Сделать снимок конфига ДО? [y/N]: " _ans </dev/tty || _ans="n"
+        _ans="$(ask_yn "  Сделать снимок конфига ДО? [y/N]: " n)"
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             {
                 echo "# feature-send: чтение конфига (полный 520-байтный пакет)"
@@ -286,7 +303,7 @@ collect() {
             echo "  Снимок сохранён: $dir/16-config-remap-before.txt"
             echo "  Теперь в софте: переназначьте ОДНУ клавишу (напр. слот 73 '=' -> 'A'),"
             echo "  нажмите «Применить/Сохранить в память», затем вернитесь сюда."
-            read -r -p "  Готово? Сделать снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            _ans2="$(ask_yn "  Готово? Сделать снимок ПОСЛЕ? [y/N]: " n)"
             if [[ "$_ans2" =~ ^[Yy]$ ]]; then
                 {
                     echo "# feature-send: чтение конфига ПОСЛЕ записи ремапа"
@@ -309,7 +326,7 @@ collect() {
         echo
         echo "[B2.6] Поиск байтов ИНДИКАТОРОВ Caps/Num/Scroll (config diff)"
         echo "  (Отдельный чистый дифф только для индикаторов, без набора букв)"
-        read -r -p "  Сделать снимок ДО нажатий индикаторов? [y/N]: " _ans </dev/tty || _ans="n"
+        _ans="$(ask_yn "  Сделать снимок ДО нажатий индикаторов? [y/N]: " n)"
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             {
                 echo "# feature-send: чтение конфига ДО индикаторов"
@@ -319,7 +336,7 @@ collect() {
             } > "$dir/19-config-ind-before.txt" 2>&1 || true
             echo "  Снимок сохранён: $dir/19-config-ind-before.txt"
             echo "  Нажмите-отпустите Caps Lock, Num Lock, Scroll Lock (по одному разу)."
-            read -r -p "  Готово? Снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            _ans2="$(ask_yn "  Готово? Снимок ПОСЛЕ? [y/N]: " n)"
             if [[ "$_ans2" =~ ^[Yy]$ ]]; then
                 {
                     echo "# feature-send: чтение конфига ПОСЛЕ индикаторов"
@@ -340,7 +357,7 @@ collect() {
         # B2.7: Debounce / sleep timer
         echo
         echo "[B2.7] Debounce / sleep timer (config diff, если есть в софте)"
-        read -r -p "  Есть доступ к настройке debounce/sleep в софте? Снимок ДО? [y/N]: " _ans </dev/tty || _ans="n"
+        _ans="$(ask_yn "  Есть доступ к настройке debounce/sleep в софте? Снимок ДО? [y/N]: " n)"
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             {
                 echo "# feature-send: чтение конфига ДО debounce/sleep"
@@ -350,7 +367,7 @@ collect() {
             } > "$dir/22-config-db-before.txt" 2>&1 || true
             echo "  Снимок сохранён: $dir/22-config-db-before.txt"
             echo "  В софте: измените debounce и/или sleep timer, нажмите «Применить»."
-            read -r -p "  Готово? Снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            _ans2="$(ask_yn "  Готово? Снимок ПОСЛЕ? [y/N]: " n)"
             if [[ "$_ans2" =~ ^[Yy]$ ]]; then
                 {
                     echo "# feature-send: чтение конфига ПОСЛЕ debounce/sleep"
@@ -372,7 +389,7 @@ collect() {
         echo
         echo "[B2.8] Per-key RGB на 2.4G (ресивер 3554:FA09) — опционально"
         echo "  Нужен ресивер, клавиатура в 2.4G, НЕ спит (нажать клавишу перед стартом)."
-        read -r -p "  Ресивер подключен, клава не спит? Снимок LED-config ДО? [y/N]: " _ans </dev/tty || _ans="n"
+        _ans="$(ask_yn "  Ресивер подключен, клава не спит? Снимок LED-config ДО? [y/N]: " n)"
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             {
                 echo "# feature-get 06 520 (LED-config ресивера, read-only)"
@@ -380,7 +397,7 @@ collect() {
             } > "$dir/25-led-config-before.txt" 2>&1 || true
             echo "  Снимок сохранён: $dir/25-led-config-before.txt"
             echo "  В Windows-софте (через ресивер): задайте per-key цвета (разные клавиши — разные цвета), «Применить»."
-            read -r -p "  Готово? Снимок ПОСЛЕ? [y/N]: " _ans2 </dev/tty || _ans2="n"
+            _ans2="$(ask_yn "  Готово? Снимок ПОСЛЕ? [y/N]: " n)"
             if [[ "$_ans2" =~ ^[Yy]$ ]]; then
                 {
                     echo "# feature-get 06 520 ПОСЛЕ per-key записи"
@@ -487,14 +504,18 @@ collect() {
         echo "    15=Raindrops, 16=Stars Twinkle, 17=Reaction, 18=Shadow Disappear,"
         echo "    19=Flash Away, 20=Ripple Shining, 28=Rotating Windmill,"
         echo "    29=Rotating Storm, 30=Colorful Waterfall"
-        read -r -p "  Запустить тест Breathing (mode=3, bri=200, speed=60)? [y/N]: " _ans </dev/tty || _ans="n"
+        if [[ "$AUTO" -eq 1 ]]; then
+            _ans="y"
+        else
+            read -r -p "  Запустить тест Breathing (mode=3, bri=200, speed=60)? [y/N]: " _ans </dev/tty || _ans="n"
+        fi
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             kbc rgb "$pid_wl" --mode breathing --brightness 200 --speed 60 \
                 > "$dir/31-rgb-breathing.txt" 2>&1 || true
             cat "$dir/31-rgb-breathing.txt"
             echo "  Эффект записан в память ресивера (держится без приложения)."
             echo "  Наблюдайте за клавиатурой: должно быть плавное «дыхание» всех цветов."
-            read -r -p "  Эффект виден? Нажмите Enter для продолжения..." _ </dev/tty || true
+            if [[ "$AUTO" -eq 0 ]]; then read -r -p "  Эффект виден? Нажмите Enter для продолжения..." _ </dev/tty || true; fi
         else
             echo "  Пропущено."
         fi
@@ -534,7 +555,7 @@ collect() {
         echo
         echo "[2.4G-4] Чтение LED-config ресивера (feature 0x44) и RGB-table (0x49)"
         echo "  Это read-only снимки для анализа протокола 0x13."
-        read -r -p "  Сделать снимки? [y/N]: " _ans </dev/tty || _ans="n"
+        _ans="$(ask_yn "  Сделать снимки? [y/N]: " y)"
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
             echo "[read] LED-config (0x44, 128 байт через 0x13 protocol)..."
             # Note: 0x13 protocol uses multi-page reads, kbc raw feature-get 06 520 returns constant block

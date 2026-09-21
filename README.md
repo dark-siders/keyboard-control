@@ -361,9 +361,11 @@ keyboard-control/
 ├── default.nix               # легаси-обёртка без флейка (nix-build)
 ├── 99-keyboard-center.rules  # udev-правила (доступ к hidraw)
 ├── docs/
-│   └── collect-data.md       # инструкция владельцам F99/Ajazz (read-only сбор данных)
+│   ├── collect-data.md       # инструкция владельцам F99/Ajazz (read-only сбор данных)
+│   └── f99-guide.md          # руководство владельцам AULA F99 (протокол/тесты/ремап)
 ├── scripts/
-│   └── collect-data.sh       # автособирает read-only диагностику и упаковывает в tar.gz
+│   ├── collect-data.sh       # автособирает read-only диагностику и упаковывает в tar.gz
+│   └── f99-usb-rev.sh        # реверс-диагностика USB-канала F99 (дампы + по желанию write-тесты)
 ├── data/
 │   ├── keyboard-center.desktop
 │   ├── keyboard-center.svg   # иконка приложения
