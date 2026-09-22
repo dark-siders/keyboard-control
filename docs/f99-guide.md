@@ -282,6 +282,8 @@ $ KBC remap 258A:010C --list | grep "слот  73"
 
 Скрипт `scripts/f99-usb-rev.sh` собирает тот же read-only набор (дампы конфига/цветов/keymap, probe, lsusb), что и `collect-data.sh`, но дополнительно умеет **write-тесты T1–T3** (только с флагом `--write-tests`). Каждый тест после себя **восстанавливает исходные данные**, маркер `5A A5` (data[126..127]) не трогается.
 
+> Те же write-тесты можно запустить прямо из основного скрипта: `./scripts/collect-data.sh --device f99 --sg --write-tests` — `collect-data.sh` сам делегирует их в `f99-usb-rev.sh` (см. `docs/collect-data.md`, раздел 0).
+
 ```bash
 # read-only (безопасно, ничего не пишет):
 ./scripts/f99-usb-rev.sh --device f99 --sg
@@ -392,6 +394,7 @@ kbd.render_frame(&frame);                           // сам делает па�
 |---|---|
 | Свежая сборка | `nix develop . --command cargo build --release` |
 | Полный read-only сбор | `./scripts/collect-data.sh --device f99 --sg` |
+| Тот же сбор + write-тесты (T1–T3) | `./scripts/collect-data.sh --device f99 --sg --write-tests` (делегирует в `f99-usb-rev.sh`) |
 | Дифф индикаторов (Caps/Num/Scroll) | в составе скрипта (файл `11-config-diff.txt`) |
 | Чтение карты клавиш | `target/release/kbc remap 258A:010C --list` |
 | Тест W-записи ремапа (+откат!) | B2 выше |

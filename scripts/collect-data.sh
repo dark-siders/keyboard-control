@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # ─── Сбор диагностических данных с клавиатуры (AULA F99 / Ajazz AK820 Pro) ───
 # Владельцам реального железа: запустить и прислать архив из ~/kbc-diag-*/
-# ТОЛЬКО чтение: list/info/probe/battery + read-запросы feature-get. Никаких
-# записей в память (save/rgb/screen/time/set-*) скрипт не выполняет.
+# По умолчанию — ТОЛЬКО чтение: list/info/probe/battery + read-запросы feature-get.
+# Записей в память (save/rgb/screen/time/set-*) скрипт не выполняет, кроме
+# --write-tests, который делегирует пакет write-тестов в scripts/f99-usb-rev.sh
+# (F99-USB-реверс: запись конфига 06 04, индикаторы, self-define селектор;
+# каждый тест после себя восстанавливает исход).
 #
 # Параметры:
 #   --device f99|ajazz   клавиатура явно (по умолчанию — автодетект по kbc list)
 #   --sg                 запускать kbc через `sg plugdev -c` (если нет перелогина)
 #   --auto               не задавать интерактивные вопросы (авто-yes для тестов)
+#   --write-tests        (F99) пакет write-тестов через scripts/f99-usb-rev.sh
 #   -h|--help            эта справка
 #
 # Примеры:
 #   ./scripts/collect-data.sh
 #   ./scripts/collect-data.sh --device ajazz --sg
-#   sg plugdev -c "./scripts/collect-data.sh --device f99"
+#   sg plugdev -c "./scripts/collect-data.sh --device f99 --write-tests"
 #
 # Результат: папка $HOME/kbc-diag-ГГГГММДД-ЧЧММСС/ + одноимённый tar.gz в $HOME.
 set -euo pipefail
@@ -24,6 +28,7 @@ KBC=""
 DEVICE=""      # автодетект по умолчанию
 USE_SG=0
 AUTO=0
+WRITE_TESTS=0  # F99: пакет write-тестов через scripts/f99-usb-rev.sh
 
 # --- ask_yn: вопрос [y/N] ---------------------------------------------------
 # ЕДИНЫЙ хелпер для всех y/n-вопросов. В --auto-режиме НЕ задаёт вопрос и
@@ -610,6 +615,28 @@ EOF
         echo "Для 2.4G тестов подключите ресивер и переключите клавиатуру в режим 2.4G."
     fi
 
+    # 11.9. WRITE-ТЕСТЫ F99 (делегирование в scripts/f99-usb-rev.sh) ----------
+    # Только при --write-tests: F99-USB-реверс (запись конфига 06 04 и поиск
+    # latch, индикаторы boot output-report, self-define селектор; каждый тест
+    # после себя восстанавливает исход — см. scripts/f99-usb-rev.sh). По
+    # умолчанию сбор остаётся read-only. Аргумент --kbc НЕ передаётся (рев-
+    # скрипт сам находит kbc). Каталог/тарбол у f99-usb-rev.sh тот же
+    # (~/kbc-diag-*), поэтому его файлы попадут в этот же каталог сбора.
+    if [[ "$DEVICE" == "f99" && -n "$pid_auto" && "$WRITE_TESTS" -eq 1 ]]; then
+        local _rev_args=("--device" "f99")
+        [[ "$USE_SG" -eq 1 ]] && _rev_args+=("--sg")
+        [[ "$AUTO" -eq 1 ]] && _rev_args+=("--auto")
+        _rev_args+=("--write-tests")
+        echo
+        echo "[WRITE-TESTS] запуск scripts/f99-usb-rev.sh ${_rev_args[*]}"
+        if bash "$ROOT/scripts/f99-usb-rev.sh" "${_rev_args[@]}"; then
+            echo "[WRITE-TESTS] готово (см. вывод f99-usb-rev.sh)."
+        else
+            _rev_rc=$?
+            echo "[WRITE-TESTS] ВНИМАНИЕ: f99-usb-rev.sh завершился с кодом $_rev_rc." >&2
+        fi
+    fi
+
     # 12. Читаемая карта keymap (Default + FN1) — работает и на F99 (0x83,
     #     журнал 10.62/10.70), и на Ajazz (GET_KEY/GET_FN_KEY). Вывод клиентской
     #     команды `kbc remap --list` (read-only; запись в этом сборе не ведётся).
@@ -695,8 +722,10 @@ while [[ $# -gt 0 ]]; do
         --device) DEVICE="$2"; shift 2 ;;
         --sg)     USE_SG=1; shift ;;
         --auto)   AUTO=1; shift ;;
+        --write-tests)
+            WRITE_TESTS=1; shift ;;
         -h|--help)
-            sed -n '1,16p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '1,22p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "неизвестный аргумент: $1 (см. './scripts/collect-data.sh --help')" >&2; exit 2 ;;
