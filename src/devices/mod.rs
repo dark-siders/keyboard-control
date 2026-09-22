@@ -248,6 +248,21 @@ pub trait KeyboardDevice: Send {
     ) -> Result<bool> {
         Ok(false)
     }
+    /// Попробовать применить КОНКРЕТНЫЙ аппаратный эффект по коду ресивера
+    /// АППАРАТНО (в память). Отличие от `apply_rgb_persistent`: `hw_effect` —
+    /// код селектора `led[10]` из `WL_EFFECTS`, а не маппинг из host-режима
+    /// (позволяет записать эффекты, недостижимые через `wl_effect_for_mode`,
+    /// напр. Ripple Shining 0x14). Возвращает `true`, если применено в память,
+    /// и `false`, если устройство не умеет (тогда — host-rendering).
+    fn apply_rgb_persistent_code(
+        &self,
+        _hw_effect: u8,
+        _color: Option<Color>,
+        _brightness: u8,
+        _speed: u8,
+    ) -> Result<bool> {
+        Ok(false)
+    }
     /// Попробовать включить/выключить свет АППАРАТНО (в память).
     fn apply_light_persistent(&self, _on: bool) -> Result<bool> {
         Ok(false)

@@ -32,6 +32,7 @@ use clap::{Args, Parser, Subcommand};
 use hidapi::HidApi;
 use std::process::ExitCode;
 
+use keyboard_center::devices::aula_f75::wl_effect_name;
 use keyboard_center::devices::hidshell;
 use keyboard_center::devices::scanner::Scanner;
 use keyboard_center::devices::{ConnectionType, KeyboardDevice, RgbMode};
@@ -102,6 +103,10 @@ struct RgbArgs {
     brightness: Option<u8>,
     #[arg(long)]
     speed: Option<u8>,
+    /// [2.4G] Задать конкретный аппаратный эффект по коду (hex, напр. 0x14)
+    /// вместо маппинга из --mode (официальные коды ресивера F99)
+    #[arg(long, value_name = "HEX")]
+    hw_effect: Option<String>,
     /// Покрасить все LED в один цвет прямым кадром: RRGGBB (hex)
     #[arg(long)]
     color: Option<String>,
@@ -304,6 +309,9 @@ enum RawOp {
     OutputSend(HexArg),
     /// Прочитать input-репорт: len — длина данных, timeout — мс
     InputRead { len: usize, timeout_ms: i32 },
+    /// Ресивер 2.4G: прочитать многостраничный блок по output-каналу 0x13.
+    /// CMD — hex (0x44 — LED config, 0x49 — RGB table), need — минимум байт.
+    WlReadPages { cmd: String, need: usize },
 }
 
 #[derive(Args)]
@@ -525,7 +533,6 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
     // скорость держатся без приложения. Контракт хука: Ok(true) = применено
     // аппаратно; Ok(false) = устройство не умеет (внизу — host-рендеринг).
     if dev.connection_type() == ConnectionType::Wireless2_4G {
-        let mode = parse_rgb_mode(args.mode.as_deref())?;
         let color = match &args.color {
             Some(c) => Some(
                 keyboard_center::types::Color::from_hex_checked(c)
@@ -535,6 +542,28 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
         };
         let brightness = args.brightness.unwrap_or(128);
         let speed = args.speed.unwrap_or(60);
+        // Явный аппаратный код эффекта (--hw-effect) имеет приоритет над
+        // маппингом из --mode: позволяет записать эффекты, недостижимые через
+        // wl_effect_for_mode (напр. Ripple Shining 0x14 по офиц. списку F99,
+        // журнал AGENTS.md 10.91).
+        if let Some(hw_hex) = &args.hw_effect {
+            let hw = parse_hw_effect(hw_hex)?;
+            return match dev.apply_rgb_persistent_code(hw, color, brightness, speed)? {
+                true => {
+                    let name = wl_effect_name(hw)
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default();
+                    println!(
+                        "2.4G: аппаратный эффект 0x{hw:02X}{name}, яркость={brightness}, скорость={speed} записаны в память ресивера (держится без приложения)"
+                    );
+                    Ok(0)
+                }
+                false => Err(anyhow::anyhow!(
+                    "ресивер не поддерживает запись аппаратного эффекта в память"
+                )),
+            };
+        }
+        let mode = parse_rgb_mode(args.mode.as_deref())?;
         return match dev.apply_rgb_persistent(mode, color, brightness, speed)? {
             true => {
                 println!(
@@ -1067,8 +1096,78 @@ fn cmd_raw(a: RawArgs) -> anyhow::Result<u8> {
                 }
             }
         }
+        RawOp::WlReadPages { cmd, need } => {
+            let cmd = parse_hw_effect(cmd)?;
+            match cmd_wl_read_pages(&dev, cmd, *need) {
+                Ok(data) => println!("{}", hidshell::hex_dump(&data)),
+                Err(e) => {
+                    eprintln!("wl read 0x{cmd:02X}: {e}");
+                    return Ok(1);
+                }
+            }
+        }
     }
     Ok(0)
+}
+
+/// Прочитать многостраничный блок по протоколу ресивера 2.4G (output report 0x13).
+/// Формат запроса: `[0]=0x13, [1]=cmd`. Клавиатура отвечает страницами
+/// `[0]=0x13, [1]=resp, [2]=total, [3]=page_idx, [4]=len, [5..]=data(≤14), [19]=cs`.
+/// resp принимается равным cmd, `cmd & 0x3F` или ACK 0x0A. Максимум 2 попытки,
+/// каждая с дедлайном ~1.5 с. Ресивер отвечает только пока клавиатура не спит
+/// на линке — иначе ошибка с подсказкой «нажмите клавишу».
+fn cmd_wl_read_pages(dev: &hidapi::HidDevice, cmd: u8, need: usize) -> anyhow::Result<Vec<u8>> {
+    const REPORT: u8 = 0x13;
+    const ATTEMPTS: usize = 2;
+    const DEADLINE_MS: u128 = 1500;
+    const NEXT_ATTEMPT_MS: u64 = 250;
+
+    let mut pages: Vec<(u8, Vec<u8>)> = Vec::new();
+    for attempt in 0..ATTEMPTS {
+        // Пропустить всё, что накопилось во входном буфере (предыдущие остатки).
+        let _ = hidshell::read_input(dev, 63, 20);
+
+        let req = [REPORT, cmd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        hidshell::send_output(dev, &req)?;
+
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() < DEADLINE_MS {
+            let buf = match hidshell::read_input(dev, 63, 200) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if buf.len() < 5 || buf[0] != REPORT {
+                continue;
+            }
+            let resp_cmd = buf[1];
+            if resp_cmd != cmd && (resp_cmd & 0x3F) != (cmd & 0x3F) && resp_cmd != 0x0A {
+                continue;
+            }
+            let idx = buf[3];
+            let plen = (buf[4] as usize).min(14);
+            let mut data = buf[5..5 + plen].to_vec();
+            if let Some(slot) = pages.iter_mut().find(|(i, _)| *i == idx) {
+                slot.1 = data;
+            } else {
+                pages.push((idx, std::mem::take(&mut data)));
+            }
+            let got: usize = pages.iter().map(|(_, d)| d.len()).sum();
+            if got >= need {
+                pages.sort_by_key(|(i, _)| *i);
+                let mut out = Vec::new();
+                for (_, d) in pages {
+                    out.extend_from_slice(&d);
+                }
+                return Ok(out);
+            }
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(NEXT_ATTEMPT_MS));
+        }
+    }
+    Err(anyhow::anyhow!(
+        "клавиатура спит на линке 2.4G — нажмите клавишу и повторите"
+    ))
 }
 
 /// Распарсить строку HEX-байтов: "02 01 00" или "020100".
@@ -1091,6 +1190,14 @@ fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
 fn parse_usage(s: &str) -> anyhow::Result<u16> {
     let t = s.strip_prefix("0x").unwrap_or(s);
     let v = u16::from_str_radix(t, 16).map_err(|e| anyhow::anyhow!("usage должен быть hex: {s} ({e})"))?;
+    Ok(v)
+}
+
+/// Распарсить код аппаратного эффекта ресивера: hex с или без префикса 0x.
+fn parse_hw_effect(s: &str) -> anyhow::Result<u8> {
+    let t = s.strip_prefix("0x").unwrap_or(s);
+    let v = u8::from_str_radix(t, 16)
+        .map_err(|e| anyhow::anyhow!("hw-эффект должен быть hex 0x00..=0xFF: {s} ({e})"))?;
     Ok(v)
 }
 

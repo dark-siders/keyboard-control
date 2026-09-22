@@ -556,23 +556,21 @@ collect() {
             echo "  Пропущено."
         fi
 
-        # 2.4G Read LED config (0x44) and RGB table (0x49) via raw
+        # 2.4G Read LED config (0x44) and RGB table (0x49) via wl-read-pages
         echo
-        echo "[2.4G-4] Чтение LED-config ресивера (feature 0x44) и RGB-table (0x49)"
-        echo "  Это read-only снимки для анализа протокола 0x13."
+        echo "[2.4G-4] Чтение LED-config ресивера (0x44) и RGB-table (0x49) через wl-read-pages"
+        echo "  Read-only снимки для анализа протокола 0x13 (многостраничные output-репорты)."
+        echo "  ВАЖНО: ресивер отвечает только пока клавиатура НЕ спит на линке 2.4G."
+        echo "  Если в выводе «клавиатура спит на линке» — нажмите клавишу и повторите."
         _ans="$(ask_yn "  Сделать снимки? [y/N]: " y)"
         if [[ "$_ans" =~ ^[Yy]$ ]]; then
-            echo "[read] LED-config (0x44, 128 байт через 0x13 protocol)..."
-            # Note: 0x13 protocol uses multi-page reads, kbc raw feature-get 06 520 returns constant block
-            # For 2.4G we need output report 0x13 with cmd 0x44, but kbc raw doesn't support output-send for 0x13 yet
-            # So we document this as known limitation
-            echo "  [INFO] 0x13 protocol (20-byte output reports) не поддерживается kbc raw feature-get."
-            echo "  Для чтения 0x44/0x49 нужен output-send + input-read на hidraw1 (0x13)."
-            echo "  Это известное ограничение — см. aula_f75.rs wl_read_pages/wl_write_pages."
-            echo "  Сохраняем заглушку для справки."
-            echo "# 2.4G LED-config (0x44) — требует output report 0x13, не feature 0x06" > "$dir/34-led-config-2g4.txt"
-            echo "# 2.4G RGB-table (0x49) — требует output report 0x13, не feature 0x06" >> "$dir/34-led-config-2g4.txt"
+            echo "[read] LED-config (0x44, 128 байт через 0x13)..."
+            kbc raw "$pid_wl" wl-read-pages 0x44 128 > "$dir/34-led-config-2g4.txt" 2>&1 || true
             cat "$dir/34-led-config-2g4.txt"
+            echo
+            echo "[read] RGB-table (0x49, ~490 байт через 0x13)..."
+            kbc raw "$pid_wl" wl-read-pages 0x49 490 > "$dir/36-rgb-table-2g4.txt" 2>&1 || true
+            cat "$dir/36-rgb-table-2g4.txt"
         else
             echo "  Пропущено."
         fi
@@ -606,6 +604,69 @@ WL_EFFECTS (коды led[10] для ресивера 3554:FA09, протокол
 EOF
         cat "$dir/35-wl-effects-list.txt"
         echo
+
+        # 2.4G Effect-code sweep (WRITE — только при --write-tests)
+        echo "[2.4G-6] Перебор аппаратных эффектов 2.4G по кодам led[10]"
+        echo "  ЗАПИСЬ в память ресивера: применяет каждый эффект из списка"
+        echo "  (--hw-effect 0xNN) с яркостью ~200 и скоростью ~60, между кодами"
+        echo "  снимает readback LED-config (0x44) для наблюдения отклонений."
+        echo "  В конце восстанавливает исходный эффект и его слот яркости/скорости"
+        echo "  из снимка [2.4G-4] (34-led-config-2g4.txt). НЕ запускается без --write-tests."
+        echo "  ВАЖНО: ресивер отвечает только пока клавиатура НЕ спит на линке 2.4G."
+        if [[ "$WRITE_TESTS" -eq 1 ]]; then
+            _ans="$(ask_yn "  Запустить перебор (18 кодов)? [y/N]: " y)"
+            if [[ "$_ans" =~ ^[Yy]$ ]]; then
+                # Исходный эффект и его слот — из снимка [2.4G-4] (байт 10 = led[10],
+                # слот яркости/скорости = [58 + 2*(led[10]-1)])
+                if [[ ! -s "$dir/34-led-config-2g4.txt" ]]; then
+                    echo "  ! Нет снимка 34-led-config-2g4.txt — перебор не запущен."
+                else
+                    _orig_eff_hex=$(awk '/^[0-9A-Fa-f ]+$/{print $11; exit}' "$dir/34-led-config-2g4.txt")
+                    if [[ -z "$_orig_eff_hex" || ! "$_orig_eff_hex" =~ ^[0-9A-Fa-f]{2}$ ]]; then
+                        echo "  ! Не удалось определить исходный эффект из снимка — перебор не запущен."
+                    else
+                        # bash не умеет 10#0A — конвертация hex->dec через printf
+                        _orig_eff=$(printf '%d' "0x$_orig_eff_hex")
+                        if [[ "$_orig_eff" -ge 1 && "$_orig_eff" -le 126 ]]; then
+                            _pos_a=$(( 59 + 2 * (_orig_eff - 1) ))
+                            _pos_b=$(( _pos_a + 1 ))
+                            _orig_a_hex=$(awk -v p="$_pos_a" '/^[0-9A-Fa-f ]+$/{print $p; exit}' "$dir/34-led-config-2g4.txt")
+                            _orig_b_hex=$(awk -v p="$_pos_b" '/^[0-9A-Fa-f ]+$/{print $p; exit}' "$dir/34-led-config-2g4.txt")
+                            _orig_a=$(printf '%d' "0x${_orig_a_hex:-0}")
+                            _orig_b=$(printf '%d' "0x${_orig_b_hex:-0}")
+                            _restore_bri=$(( (_orig_a * 255) / 9 ))
+                            _restore_spd=$(( ((_orig_b >> 4) * 255) / 4 ))
+                            [[ "$_restore_spd" -gt 255 ]] && _restore_spd=255
+                            _restore_eff="$(printf '0x%02X' "$_orig_eff")"
+                            echo "  Записано будет восстановлено: эффект $_restore_eff, яркость $_restore_bri, скорость $_restore_spd"
+                            {
+                                echo "=== 2.4G-6 перебор кодов эффектов (led[10]) ==="
+                                echo "исходный эффект: $_restore_eff, яркость $_restore_bri, скорость $_restore_spd"
+                                for _code in 01 02 03 05 07 08 0C 0D 0E 0F 10 11 12 13 14 1C 1D 1E; do
+                                    echo
+                                    echo "--- эффект 0x$_code ---"
+                                    kbc rgb "$pid_wl" --hw-effect "0x$_code" --brightness 200 --speed 60 2>&1 || true
+                                    sleep 1
+                                    echo "[readback 0x44]"
+                                    kbc raw "$pid_wl" wl-read-pages 0x44 128 2>&1 || true
+                                    sleep 1
+                                done
+                            } > "$dir/37-effect-sweep-2g4.txt" 2>&1
+                            cat "$dir/37-effect-sweep-2g4.txt"
+                            echo "  Восстанавливаю исходный эффект $_restore_eff (яркость $_restore_bri, скорость $_restore_spd)..."
+                            kbc rgb "$pid_wl" --hw-effect "$_restore_eff" --brightness "$_restore_bri" --speed "$_restore_spd" 2>&1 || true
+                            echo "  Восстановление отправлено (readback-проверка — вручную, kbc remap/rgb --list)."
+                        else
+                            echo "  ! Вне допустимого диапазона слота (1..126) — перебор не запущен."
+                        fi
+                    fi
+                fi
+            else
+                echo "  Пропущено."
+            fi
+        else
+            echo "  Пропущено (нужен --write-tests)."
+        fi
 
         echo "=== 2.4G ТЕСТЫ ЗАВЕРШЕНЫ ==="
     fi

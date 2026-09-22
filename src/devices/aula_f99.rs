@@ -13,6 +13,7 @@
 // подтверждено эмпирически на F75 и по KB.ini F99; на физическом F99
 // НЕ проверялось (железа у владельца нет).
 
+use super::aula_f75::hw_effect_name;
 use super::hid::HidBridge;
 use super::{Error, KeyboardDevice, Result};
 use crate::types::*;
@@ -85,12 +86,6 @@ impl AulaF99 {
         buf[8..136].copy_from_slice(data);
         self.bridge.send_feature(&buf)?;
         Ok(())
-    }
-
-    /// Название режима подсветки по индексу из эффект-таблицы (приблизительно).
-    fn effect_name(_idx: u8) -> &'static str {
-        // Полного маппинга эффектов пока нет; уточнять по дампу прошивки.
-        "Эффект"
     }
 
     // --- Keymap (ЧТЕНИЕ, по образцу F75, журнал 10.62/10.70) -------------
@@ -220,15 +215,22 @@ impl KeyboardDevice for AulaF99 {
     }
 
     /// Прочитать текущий эффект из конфига (реально, через read_config).
+    /// По образцу F75 (журнал 10.67): селектор активного эффекта = cfg[10],
+    /// активный слот эффект-таблицы = 58 + 2*(селектор-1) (для F99 — 34 пары,
+    /// журнал 10.78).
     fn get_rgb_preset(&self) -> Result<Vec<RgbPreset>> {
         let data = self.read_config()?;
-        // data[0] = report id, [1..8] — эхо-заголовок, [8..] — 128 байт config + 5A A5
-        let cfg = &data[8..data.len().min(8 + 128)];
-        // Эффект-таблица: пары (a,b) с offset 58; берём первую пару как текущую.
-        let a = cfg.get(58).copied().unwrap_or(0x09); // яркость
-        let b = cfg.get(59).copied().unwrap_or(0); // (speed << 4) | color
+        // data[0] = report id, [1..8] — эхо-заголовок, [8..136] — config (128 б), после — 5A A5
+        if data.len() < 8 + 128 {
+            return Err(Error::Protocol("короткий ответ конфига".into()));
+        }
+        let cfg = &data[8..8 + 128];
+        let sel = cfg.get(10).copied().unwrap_or(0); // селектор активного эффекта
+        let slot = 58 + 2 * (sel as usize).saturating_sub(1); // слот активного эффекта
+        let a = cfg.get(slot).copied().unwrap_or(0x09); // яркость
+        let b = cfg.get(slot + 1).copied().unwrap_or(0); // (speed << 4) | color
         Ok(vec![RgbPreset {
-            name: format!("{} (из прошивки)", Self::effect_name(b & 0x0F)),
+            name: format!("{} (из прошивки)", hw_effect_name(sel).unwrap_or("Эффект")),
             mode: RgbMode::Custom,
             colors: vec![],
             brightness: a,

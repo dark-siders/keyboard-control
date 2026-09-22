@@ -84,8 +84,17 @@ pub const HW_EFFECTS: &[(u8, &str)] = &[
 /// другого чипа) и НЕ синонимичны USB-кодам `data[10]` из `HW_EFFECTS`.
 /// `led[1]` селектором НЕ является (запись туда визуально ничего не меняла).
 /// Пишутся через 0x04 сразу во флеш — держатся без приложения.
+/// Коды 0x02/0x0C/0x0E/0x14/0x1C/0x1D/0x1E добавлены по ОФИЦИАЛЬНОМУ списку
+/// F99 (scripts/collect-data.sh, диагностика 2026-09-22) — до живого теста
+/// были помечены «(офиц. список, не подтверждено)». 0x14 ПОДТВЕРЖДЁН на
+/// железе F75 (2026-09-23): запись `--hw-effect 0x14` → визуально
+/// «разноцветная волна слева направо», держится в памяти ресивера после
+/// power-cycle. Сразу после записи подсветка на мгновение гаснет — это
+/// штатное поведение записи LED-config (flash-and-revert у dnviti), не «выкл».
+/// Эмпирические названия (совпадающих кодов) имеют приоритет.
 pub const WL_EFFECTS: &[(u8, &str)] = &[
     (0x01, "Радужная статика"),
+    (0x02, "Радуга (офиц. список, не подтверждено)"),
     (0x03, "Смена цветов (статично)"),
     (0x04, "Линия"),
     (0x05, "Дождь"),
@@ -93,12 +102,18 @@ pub const WL_EFFECTS: &[(u8, &str)] = &[
     (0x07, "Мерцание разных букв"),
     (0x08, "Змейка"),
     (0x0A, "Пульсация из центра по сторонам"),
+    (0x0C, "Sine Wave (офиц. список, не подтверждено)"),
     (0x0D, "Ободок по периметру"),
+    (0x0E, "Blossoming (офиц. список, не подтверждено)"),
     (0x0F, "Волны между рядами (сверху вниз)"),
     (0x10, "Волны вправо-влево от центра"),
     (0x11, "Эффект 0x11 (не выяснен)"),
     (0x12, "Эффект 0x12 (не выяснен)"),
     (0x13, "Выкл (нет подсветки)"),
+    (0x14, "Ripple Shining: разноцветная волна слева направо (подтверждено на F75)"),
+    (0x1C, "Rotating Windmill (офиц. список, не подтверждено)"),
+    (0x1D, "Rotating Storm (офиц. список, не подтверждено)"),
+    (0x1E, "Colorful Waterfall (офиц. список, не подтверждено)"),
 ];
 
 /// Найти имя аппаратного эффекта по коду (для отладки/GUI).
@@ -482,20 +497,25 @@ impl AulaF75 {
         }
     }
 
-    /// Применить эффект/цвет/яркость/скорость в память ресивера (0x13).
+    /// Применить эффект по КОНКРЕТНОМУ коду ресивера (0x13) в память.
     /// Запись идёт сразу во флеш — держится без приложения. Порядок по
     /// dnviti (cmd_set_led): LED config → RGB table → LED config ПОВТОРНО
     /// ПОСЛЕДНИМ (иначе «LED changes flash and revert»).
-    fn wireless_apply_effect(
+    ///
+    /// `hw_effect` — код селектора `led[10]` из `WL_EFFECTS` (по коду, а не по
+    /// маппингу режима). Позволяет записать эффекты, отсутствующие в
+    /// `wl_effect_for_mode` (напр. Ripple Shining 0x14 по офиц. списку F99,
+    /// журнал AGENTS.md 10.91).
+    fn wireless_apply_effect_code(
         &self,
-        mode: RgbMode,
+        hw_effect: u8,
         color: Option<Color>,
         brightness: u8,
         speed: u8,
     ) -> Result<()> {
         let mut led = self.wl_led_config()?;
         // Селектор эффекта на ресивере — led[10] (эмпирика 2026-09-15).
-        led[10] = Self::wl_effect_for_mode(mode);
+        led[10] = hw_effect;
         // Яркость/скорость ЖИВУТ В СЛОТАХ ЭФФЕКТОВ: слот активного эффекта =
         // [58 + 2*(led[10]-1)], пара (a=яркость, b=(speed<<4)|color). Записываем
         // туда, НЕ трогая led[3]/led[4] (они на ресивере не используются,
@@ -529,6 +549,18 @@ impl AulaF75 {
             self.wl_write_pages(0x04, &led)?;
         }
         Ok(())
+    }
+
+    /// Применить эффект по host-режиму: маппинг режима → код ресивера,
+    /// затем — `wireless_apply_effect_code` (общий путь).
+    fn wireless_apply_effect(
+        &self,
+        mode: RgbMode,
+        color: Option<Color>,
+        brightness: u8,
+        speed: u8,
+    ) -> Result<()> {
+        self.wireless_apply_effect_code(Self::wl_effect_for_mode(mode), color, brightness, speed)
     }
 
     /// Включить/выключить свет на ресивере в память.
@@ -1095,6 +1127,28 @@ fn vid_pid(&self) -> (u16, u16) {
         }
     }
 
+    // Применить конкретный аппаратный эффект по КОДУ ресивера (led[10],
+    // WL_EFFECTS) — недостижим через маппинг режимов (напр. Ripple Shining
+    // 0x14 по официальному списку F99). Цвет/яркость/скорость — как в
+    // wireless_apply_effect. Ресивер сразу пишет во флеш (dnviti).
+    fn apply_rgb_persistent_code(
+        &self,
+        hw_effect: u8,
+        color: Option<Color>,
+        brightness: u8,
+        speed: u8,
+    ) -> Result<bool> {
+        match self.bridge.connection {
+            ConnectionType::Wireless2_4G => {
+                self.wireless_apply_effect_code(hw_effect, color, brightness, speed)?;
+                Ok(true)
+            }
+            // Проводной F75 — host-рендеринг обёртками не управляем, код здесь
+            // бесполезен (у USB нет канала записи аппаратных эффектов без latch).
+            _ => Ok(false),
+        }
+    }
+
     // Выключить/включить свет НАВСЕГДА (яркость LED config ресивера).
     fn apply_light_persistent(&self, on: bool) -> Result<bool> {
         match self.bridge.connection {
@@ -1494,7 +1548,7 @@ pub fn slot_for_keycode(keycode: u16) -> Option<u8> {
 /// Заводской дефолт кеймапа F75 (Default + FN1 идентичны).
 /// Основан на дампе прошивки (журнал 10.72).
 pub fn factory_keymap_f75() -> crate::types::Keymap {
-    use crate::types::{FnLayer, KeyAction, Keymap, KeyId};
+    use crate::types::{KeyAction, Keymap, KeyId};
     let mut base = Vec::new();
     let mut fn_bindings = Vec::new();
 
