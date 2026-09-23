@@ -720,6 +720,7 @@ pub fn build_rgb_studio(
             }
             let color = live_entry.text().trim().to_string();
             let params = ModeParams {
+                version: crate::presets::PRESET_FORMAT_VERSION,
                 r#type: mode_from_index(mode_dd.selected()),
                 color: if color.is_empty() { "#FF5A00".to_string() } else { color },
                 brightness: bright_scale.value().round() as u8,

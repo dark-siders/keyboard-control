@@ -1663,3 +1663,51 @@ pub fn factory_keymap_f75() -> crate::types::Keymap {
         fn_layer: crate::types::FnLayer { bindings: fn_bindings },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::types::KeyAction;
+    use super::*;
+
+    #[test]
+    fn slot_encode_press_media_modifier_roundtrip() {
+        let cases = [
+            (KeyAction::Press(0x2C), [0x00, 0x00, 0x00, 0x2C]),
+            (KeyAction::Media(0xE2), [0x02, 0x00, 0x00, 0xE2]),
+            (KeyAction::Modifier(1), [0x00, 0x00, 0x00, 0xE1]),
+            (KeyAction::Modifier(7), [0x00, 0x00, 0x00, 0xE7]),
+        ];
+        for (action, want) in cases {
+            let encoded = AulaF75::slot_encode(&action).unwrap();
+            assert_eq!(encoded, want, "кодирование {action:?}");
+            let decoded = AulaF75::slot_decode(encoded).unwrap();
+            assert_eq!(decoded, action, "декодирование {action:?}");
+        }
+    }
+
+    #[test]
+    fn slot_encode_modifier_masks_out_of_range() {
+        // Индекс модификатора за диапазон маскируется & 0x07 (0xE0..0xE7).
+        // 9 & 0x07 = 1 → 0xE1, декод обратно даёт Modifier(1).
+        let encoded = AulaF75::slot_encode(&KeyAction::Modifier(9)).unwrap();
+        assert_eq!(encoded, [0x00, 0x00, 0x00, 0xE1]);
+        assert_eq!(AulaF75::slot_decode(encoded).unwrap(), KeyAction::Modifier(1));
+    }
+
+    #[test]
+    fn slot_decode_returns_none_for_unbind_and_service_pages() {
+        assert_eq!(AulaF75::slot_decode([0x00, 0x00, 0x00, 0x00]), None, "unbind");
+        assert_eq!(AulaF75::slot_decode([0x0D, 0x00, 0x00, 0x00]), None, "page 13 = Fn");
+        assert_eq!(AulaF75::slot_decode([0x03, 0x00, 0x00, 0x2C]), None, "page 3 = mouse");
+    }
+
+    #[test]
+    fn check_writable_slot_rejects_fn_fkeys_and_trailer() {
+        assert!(AulaF75::check_writable_slot(53).is_err(), "Fn #53 защищён");
+        for slot in LOCKED_F_KEYS {
+            assert!(AulaF75::check_writable_slot(slot).is_err(), "F-клавиша {slot} залочена");
+        }
+        assert!(AulaF75::check_writable_slot(127).is_err(), "трейлер 5A A5");
+        assert!(AulaF75::check_writable_slot(44).is_ok(), "обычный слот писать можно");
+    }
+}

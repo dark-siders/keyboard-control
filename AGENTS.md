@@ -270,9 +270,9 @@ pub trait KeyboardDevice {
 ### Инфраструктура проекта
 
 - Rust edition 2021; GUI GTK4 + Libadwaita (`adw 0.7`/`gtk4 0.9`); `hidapi 2.5`, `image 0.25`, `serde/toml`, `chrono 0.4` (синк часов Ajazz), `clap`, `anyhow/thiserror`. Сборка: flake crane, `nix develop . --command cargo …` (`cargo` напрямую без обёртки не запускается).
-- CLI `kbc`: `list / info / probe / raw feature-send/feature-get/output-send/input-read / wl-read-pages / rgb [--mode|--color|--brightness|--speed|--hold|--hw-effect] / light on|off / battery / save [--effect NN] / remap --list|--key|--to|--media|--modifier|--layer / monitor / preset save|list|apply|remove / daemon [--preset|--frame-ms|…]`.
+- CLI `kbc`: `list / info / probe / raw feature-send/feature-get/output-send/input-read / wl-read-pages / rgb [--mode|--color|--brightness|--speed|--hold|--hw-effect|--light-on/--light-off] / screen --image / time / battery / save [--effect NN|--brightness|--speed] / remap --list|--key|--to|--media|--modifier|--layer / set-poll <Hz> / set-debounce <ms> / set-sleep <sec> / profile save|load|eeprom-save / monitor / preset save|list|apply|remove / daemon [--preset|--frame-ms|…]`.
 - GUI `keyboard-center`: Вкладки — Устройства, RGB Studio (host-движок + persistent хуки 2.4G, файловые пресеты TOML, сохранить в память, гашение), Screen Manager (TFT Ajazz), Keymap & Fn Layer (клик-редактор F75: Press/Media/Modifier, показ раскладки, сброс), Settings (Status/battery). Потоки — через каналы + `frame_gen` (поколение кадров вместо `SourceId::remove()` — больше никаких паник glib, 10.39). Автосейв при закрытии окна (10.38).
-- Пресеты TOML: `$XDG_DATA_HOME/kbc-presets` (по умолч. `~/.local/share/kbc-presets`), структура `{mode, color, brightness, speed, frame_ms}`, пресет `default` неудаляем.
+- Пресеты TOML: `$XDG_CONFIG_HOME/keyboard-center/presets` (по умолч. `~/.config/keyboard-center/presets`), структура `{version, type, color, brightness, speed, frame_ms}`, пресет `default` неудаляем.
 - Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `258a:004e/004f/0050`, `0328:8207/8208/8209`.
 - Fedora: `Makefile` (`make release`, `install/install-user/install-udev/uninstall/clean/help/install-deps`), `fedora_install.sh` (`--user/--system/--udev-only/--install-deps/--dry-run/--uninstall`), CI-джоб `fedora-build` (dnf-пакеты одной строкой в `.gitlab-ci.yml`, без `\`-переносов — иначе YAML-folding склеивает, 10.58).
 - Диагностика: `scripts/collect-data.sh` (read-only, `--device f99|ajazz`, `--sg`, `--auto`, результат `~/kbc-diag-ГГГГММДД-ЧЧММСС/{01..37}*.txt` + tar.gz; для F99 `--write-tests` делегирует в `scripts/f99-usb-rev.sh`), `docs/collect-data.md`, `docs/f99-guide.md` (для владельцев F99). Дамп прошивки F75: `data/firmware/f75_firmware.hex` (61440 б, Intel HEX; read-only, MD5 прошивки `564524ecd3aed509c3bba432f0398aca`).
@@ -364,7 +364,7 @@ pub trait KeyboardDevice {
 
 10.42 — 2026-09-14 — RGB на ресивере 2.4G часть 1: двухфазный выбор hidraw; trait-хуки `apply_rgb_persistent`/`apply_light_persistent`; протокол 0x13 (wl_read/wl_write_pages). СЕССИЯ ОСТАНОВЛЕНА НА ПОЛОВИНЕ.
 
-10.42a — 2026-09-14 — закрыто CLI/GUI: `cmd_rgb` ветвление 2.4G (persistent, в память), `kbc light on|off`, GUI `WlTask`/`spawn_wl_task` (запись в фоновом потоке); ресивер — без «Записать в память» (пишет сразу). Live: линк спит — ждём физ. переключение клавиатуры.
+10.42a — 2026-09-14 — закрыто CLI/GUI: `cmd_rgb` ветвление 2.4G (persistent, в память), флаги `kbc rgb ... --light-on/--light-off`, GUI `WlTask`/`spawn_wl_task` (запись в фоновом потоке); ресивер — без «Записать в память» (пишет сразу). Live: линк спит — ждём физ. переключение клавиатуры.
 
 10.43 — 2026-09-14 — живой тест ресивера ПОДТВЕРЖДЁН: батарея cmd **0x05** (не 0x0B!) → 0x0A байт[6]; RGB/свет в память ресивера; свет off = обнуление всех 34 слотов.
 
@@ -438,7 +438,7 @@ pub trait KeyboardDevice {
 
 10.78 — 2026-09-20 — фикс F99 по живой диагностике: 34 пары слотов [58..125] (не 20); баг автодетекта (5 пробелов в `kbc info` — regex `Модель:\s+`).
 
-10.79 — 2026-09-20 — `kbc daemon` + TOML-пресеты (`$XDG_DATA_HOME/kbc-presets`) + systemd-user unit в home-module; тесты 5/5.
+10.79 — 2026-09-20 — `kbc daemon` + TOML-пресеты (`$XDG_CONFIG_HOME/keyboard-center/presets`) + systemd-user unit в home-module; тесты 5/5.
 
 10.80 — 2026-09-20 — GUI «Файловые пресеты» подключены к PresetStore (apply/save/delete/refresh; sanitize имён).
 
@@ -467,6 +467,10 @@ pub trait KeyboardDevice {
 10.92 — 2026-09-23 — аудит F99 USB по коду: поддержка НЕ полная (ремап read-only, per-key Unsupported, индикаторы/polling/debounce/sleep — не ревёрснуты); апдейт get_rgb_preset — TODO.
 
 10.93 — 2026-09-23 — F99/2.4G: `kbc raw wl-read-pages` (дампы 0x44/0x49), sweep кодов эффектов под `--write-tests`, `--hw-effect` с приоритетом над `--mode`, порт get_rgb_preset F99 по образцу F75.
+
+10.95 — 2026-09-23 — аудит API перед заморозкой: `trait KeyboardDevice` — внутренний (не экспортируется), публичные контракты = CLI `kbc` + TOML-пресеты + udev/nix/systemd. Решение: функциональный код НЕ менять (мёртвые методы — честный «задел под Ajazz», не баг); версия поднята 0.2.0 → 0.3.0; сборка после бампа зелёная (check 0 ошибок / тесты 5/5 / release OK). Подробности — блок «10.95 АУДИТ API» ниже.
+
+10.96 — 2026-09-24 — «полноценная API»: версионированы TOML-пресеты (`version = 1`, fallback для старых файлов, отказ от новее-1, `validate()` при загрузке); справочник CLI-команд и формат TOML-пресета в README; исправлены расхождения журнала (сводка CLI: добавлены screen/time/set-*/profile, `light` → флаги `--light-on/--light-off`); юнит-тесты протокола F75/F99/Ajazz (slot encode/decode, защита слотов, build_frame, actions_from_keys; 17/17); путь пресетов в README/журнале приведён к фактическому `~/.config/keyboard-center/presets`. Подробности — блок «10.96 ПОЛНОЦЕННАЯ API» ниже.
 
 ---
 
@@ -499,3 +503,61 @@ pub trait KeyboardDevice {
 - Живой прогон чек-листа 10.93 на F99/receciver (`3554:FA09`): дампы [2.4G-4], sweep [2.4G-6], `--hw-effect 0x14`, `get_rgb_preset` — от или владельца F99; до результатов ничего не менять.
 - Ремап-запись F99 (W-канал не 0x03, 10.82); per-key, индикаторы, polling/debounce/sleep — по 10.92.
 - Ajazz на железе; откат временных правок `~/nixosniri` (10.2); публикация — по решению владельца.
+
+---
+
+## 10.95 АУДИТ API ПЕРЕД ЗАМОРОЗКОЙ (сессия 2026-09-23)
+
+> Просьба владельца: разобраться с API перед версией 1.0. Решение владельца: «что сделать на данном этапе правильно и безопасно» → принято: **функциональный код НЕ менять**, зафиксировать тракт и задокументировать задел.
+
+### ГРАНИЦЫ API
+- **Внутренний (не публичный):** `trait KeyboardDevice` (`src/devices/mod.rs:72`) — 43 метода, 7 блоков (базовое / RGB / keymap-Fn / screen / encoder / macros / system / EEPROM / persistent 2.4G). lib входит ТОЛЬКО в бинарник, наружу не экспортируется.
+- **Публичные контракты (это и есть «API» для пользователя):** CLI `kbc`, формат TOML-пресетов (`RgbPreset {mode,color,brightness,speed,frame_ms}`, serde snake_case), udev-правила, nix-модули, systemd-unit `keyboard-center-daemon`.
+
+### ЧТО НАШЛИ (аудит вызовов метода trait из CLI/GUI — `set_*`/`get_*` по grep)
+- **Мёртвые методы (не вызываются нигде, реализованы как честный `Unsupported` или задел):**
+  - `set_encoder_action` — GUI блок энкодера удалён (10.74); у всех трёх драйверов Unsupported.
+  - `set_macro` — не вызывается (в GUI только `record_macro`/`stop_macro`, keymap_editor 353/359).
+  - `get_macros`, `get_current_effect`, `factory_reset` — реализованы только у Ajazz, из приложения не вызываются (GUI «Сбросить всё» идёт через `get_factory_keymap` → `set_fn_layer`).
+  - `set_rgb_brightness`/`set_rgb_speed` — вызовов нет: яркость/скорость идут через host-параметры (`HostEffectParams`) и `apply_rgb_persistent`.
+- **Пересечение «запись в память» (5 методов):** `apply_rgb_persistent`, `apply_rgb_persistent_code`, `save_hardware_effect`, `save_effect_with_style`, `save_hardware_light` — семантически накладываются; менять не стали (риск регрессии на живом F75).
+- **Непоследовательность «обязательные vs дефолтные»:** ~20 обязательных методов в большинстве драйверов — честные Unsupported-заглушки; `set_screen_image` обязателен, хотя `set_screen_animation` дефолтный.
+
+### РЕШЕНИЕ
+- Код НЕ трогаем: мёртвые методы — это «задел под Ajazz/будущее» с честным `Unsupported`, не баг. Чистка trait без живого железа по всем трём моделям = риск регрессии без пользы.
+- Версия поднята **0.2.0 → 0.3.0** (Cargo.toml / flake.nix / README badge) — новое функциональное наполнение vs 0.2.0 (F75 USB+2.4G, host-движок, пресеты+daemon, ремап, F99, Ajazz+Screen Manager, Fedora/Makefile).
+- Сборка после бампа зелёная: `cargo check --all-targets` — 0 ошибок (2 предсуществующих `unused_mut` в `keymap_editor.rs` 308/323, вне скоупа); `cargo test --lib` — 5/5; `cargo build --release` — OK.
+
+### НА БУДУЩЕЕ (к чему вернуться при подготовке 1.0)
+- Решение судьбы мёртвых методов trait (удалить или оставить задел) — при согласовании с владельцем, лучше после живого теста Ajazz.
+- Стабилизировать CLI-сабкоманды и TOML-формат документально (тест `preset_roundtrip` уже покрывает сериализацию).
+- Отличия обязательных методов → дефолтные заглушки — по желанию, не критично.
+
+---
+
+## 10.96 ПОЛНОЦЕННАЯ API (сессия 2026-09-24)
+
+> Просьба владельца: «что нам ещё нужно для полноценной api» → команда «сделай всё, что необходимо» (явное разрешение на правки кода и документации). Итог: TOML-пресеты версионированы (обратная совместимость), CLI-контракт зафиксирован в README, протокольные декодеры покрыты юнит-тестами.
+
+### ЧТО СДЕЛАНО
+- **Версионирование TOML-пресетов** (`src/presets.rs`):
+  - добавлено поле `version: u32` в `ModeParams` (текущая `PRESET_FORMAT_VERSION = 1`).
+  - `#[serde(default = "default_format_version")]` — старые файлы без `version` читаются как v1 (обратная совместимость, подтверждено тестом).
+  - метод `ModeParams::validate()`: версия > понятной (`PRESET_FORMAT_VERSION`) → ошибка «пресет из новой схемы» с подсказкой; вызывается при загрузке в `PresetStore::load`.
+  - инициализаторы обновлены: `Default` (presets.rs), GUI-сохранение пресета (`rgb_studio.rs:722`); дефолт путь `DEFAULT_FRAME_MS` не менялся.
+- **Путь пресетов приведён в соответствие с кодом:** фактический `$XDG_CONFIG_HOME/keyboard-center/presets` (fallback `~/.config/...`), `src/presets.rs:86`. Были `~/.local/share/kbc-presets` в README и журнале — исправлено в README:88 и AGENTS.md (сводка + структура + п.10.79). nix-модули путь не упоминают.
+- **Справочник CLI-контракта в README** (после блока примеров `kbc`): таблица всех сабкоманд (`list/info/rgb/screen/time/battery/save/remap/set-poll/set-debounce/set-sleep/profile/preset/daemon/monitor/probe/raw`), ключевые флаги, формат `VID:PID`/цвета/эффектов, пометка experimental (`--hw-effect`, `wl-read-pages`). Рядом — раздел «Формат TOML-пресета» с `version`.
+- **Журнал приведён к фактическому CLI:** в сводке команд `light on|off` заменено на флаги `rgb --light-on/--light-off` (отдельной команды `light` в коде НЕТ — только флаги, `cli.rs:118/121`); добавлены `screen/time/set-*/profile`, `save [--effect|--brightness|--speed]`, `wl-read-pages`. Запись 10.42a поправлена аналогично.
+- **Юнит-тесты протокола** (в добавленных `#[cfg(test)]`-модулях драйверов):
+  - `aula_f75.rs`: slot encode/decode roundtrip (Press/Media/Modifier), маскирование модификатора `& 0x07` (9→0xE1, обратно Modifier(1)), decode None для unbind/page 13/page 3, защита слотов (Fn#53, F1–F12, трейлер 127).
+  - `aula_f99.rs`: slot_decode Press/Media/None для unbind/page 13.
+  - `ajazz_ak820.rs`: slot encode/decode roundtrip (Press/Media/FnLayer/Macro), Modifier кодируется как page 2 + 0xE0+m и декодируется как Press(0xE1) (ОБРАТНОГО mapping НЕТ — зафиксировано тестом), `actions_from_keys` (пары press/release, wire-флаги 0xB0/0x30), `build_frame` (magic 0xAA, cmd, len, addr LE, last-флаг, payload с offset 8).
+  - ИТОГ: `cargo test --lib` → **17/17** (было 5/5; новые 12), `cargo check --all-targets` 0 ошибок, `cargo build --release` OK.
+
+### НЮАНСЫ / ВАЖНО
+- У F75 и F99 модификатор ДЕКОДИРУЕТСЯ обратно в `KeyAction::Modifier` (0xE0..0xE7 → Modifier(m)), у Ajazz — НЕТ: page 2 всегда читается как `Press`. Это особенность декодера wsclx (формат кастома), не баг; отражено комментарием и тестом.
+- `check_writable_slot` в F75: слот 126 (предпоследний) — валиден для записи, запрещён только 127 (трейлер `5A A5`). Защита F1–F12 и Fn#53 — по cloudglides/openaula.
+- Функциональный код протокола НЕ менялся (контракт 10.95 соблюдён) — только добавлены декодерные тесты и поле `version` в структуру пресета (обратно-совместимо).
+
+### ОСТАЛОСЬ (открыто, вне этой задачи)
+- Живой прогон F99/2.4G (10.93 чек-лист + 10.94 фикс); ремап-запись F99 W-канал (10.82); Ajazz на железе; BT-канал; откат временных правок `~/nixosniri` (10.2) + судьба модуля в системном флейке; публикация/релиз — по решению владельца.

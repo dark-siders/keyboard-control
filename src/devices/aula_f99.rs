@@ -445,3 +445,25 @@ impl KeyboardDevice for AulaF99 {
 pub fn set_indicator(_kbd: &AulaF99, _indicator: Indicator, _enabled: bool) -> Result<()> {
     Err(Error::Unsupported("индикаторы F99: протокол не ревёрснут"))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::types::KeyAction;
+    use super::*;
+
+    #[test]
+    fn slot_decode_press_media_and_service() {
+        assert_eq!(
+            AulaF99::slot_decode([0x00, 0x00, 0x00, 0x2C]),
+            Some(KeyAction::Press(0x2C)),
+            "Press: page 0, usage 0x2C"
+        );
+        assert_eq!(
+            AulaF99::slot_decode([0x02, 0x00, 0x00, 0xE2]),
+            Some(KeyAction::Media(0xE2)),
+            "Media: page 2, usage 0xE2"
+        );
+        assert_eq!(AulaF99::slot_decode([0x00, 0x00, 0x00, 0x00]), None, "unbind");
+        assert_eq!(AulaF99::slot_decode([0x0D, 0x00, 0x00, 0x00]), None, "page 13 = Fn");
+    }
+}

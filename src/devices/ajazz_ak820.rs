@@ -1180,3 +1180,83 @@ impl AjazzAk820 {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::KeyAction;
+
+    #[test]
+    fn slot_encode_decode_roundtrip() {
+        let cases = [
+            (KeyAction::Press(0x2C), [2, 0, 0x2C, 0]),
+            (KeyAction::Media(0xE2), [3, 0xE2, 0, 0]),
+            (KeyAction::FnLayer(1), [10, 1, 0, 0]),
+            (KeyAction::Macro(7), [6, 7, 0, 0]),
+        ];
+        for (action, want) in cases {
+            let encoded = AjazzAk820::slot_encode(&action);
+            assert_eq!(encoded, want, "кодирование {action:?}");
+            let decoded = AjazzAk820::slot_decode(encoded).unwrap();
+            assert_eq!(decoded, action, "декодирование {action:?}");
+        }
+    }
+
+    #[test]
+    fn slot_encode_modifier_masks_but_decode_keeps_press() {
+        // Модификатор кодируется как page 2 + 0xE0+m (как Press-слот), поэтому
+        // обратного mapping в decode нет: [2,0,0xE1,0] → Press(0xE1).
+        let encoded = AjazzAk820::slot_encode(&KeyAction::Modifier(1));
+        assert_eq!(encoded, [2, 0, 0xE1, 0]);
+        assert_eq!(AjazzAk820::slot_decode(encoded).unwrap(), KeyAction::Press(0xE1));
+        let out_of_range = AjazzAk820::slot_encode(&KeyAction::Modifier(9));
+        assert_eq!(out_of_range, [2, 0, 0xE1, 0], "9 & 0x07 = 1 → 0xE1");
+    }
+
+    #[test]
+    fn slot_decode_unknown_page_is_none() {
+        assert_eq!(AjazzAk820::slot_decode([0, 0, 0, 0]), None, "page 0 — default");
+        assert_eq!(AjazzAk820::slot_decode([0xFF, 0, 0, 0]), None, "незнакомая страница");
+    }
+
+    #[test]
+    fn actions_from_keys_maps_each_key_to_press_and_release() {
+        let out = AjazzAk820::actions_from_keys(&[
+            KeyAction::Press(0x2C),
+            KeyAction::Media(0xE2),
+            KeyAction::Modifier(1),
+        ]);
+        // Каждый ввод → пара press/release (push). Wire-флаги Keyboard: 0xB0/0x30.
+        assert_eq!(out.len(), 6);
+        assert_eq!(
+            out[0],
+            (0, 0x2C, MacroFamily::Keyboard, true),
+            "Press → press"
+        );
+        assert_eq!(
+            out[1],
+            (0, 0x2C, MacroFamily::Keyboard, false),
+            "Press → release"
+        );
+        assert_eq!(out[2], (0, 0xE2, MacroFamily::Keyboard, true), "Media код");
+        assert_eq!(out[4], (0, 0xE1, MacroFamily::Keyboard, true), "Modifier 1 = 0xE1");
+        assert_eq!(MacroFamily::Keyboard.wire_flags(true), 0xB0);
+        assert_eq!(MacroFamily::Keyboard.wire_flags(false), 0x30);
+    }
+
+    #[test]
+    fn build_frame_layout_and_last_flag() {
+        // Кадр: [0xAA, cmd, len, addr_lo, addr_hi, 0, last, 0, payload.., пад].
+        let payload = [0x11, 0x22, 0x33];
+        let pkt = AjazzAk820::build_frame(0x23, 3, 0x0102, &payload, true);
+        assert_eq!(pkt[0], MAGIC_OUTGOING);
+        assert_eq!(pkt[1], 0x23, "cmd");
+        assert_eq!(pkt[2], 3, "len_or_type");
+        assert_eq!(pkt[3], 0x02, "addr lo");
+        assert_eq!(pkt[4], 0x01, "addr hi");
+        assert_eq!(pkt[6], 1, "last-флаг");
+        assert_eq!(&pkt[8..8 + payload.len()], &payload, "payload с offset 8");
+        let non_last = AjazzAk820::build_frame(0x23, 3, 0x0102, &payload, false);
+        assert_eq!(non_last[6], 0, "last-флаг сброшен");
+    }
+}

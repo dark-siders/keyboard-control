@@ -5,7 +5,7 @@
 <h1 align="center">⌨️ Keyboard-Center ⌨️</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.2.0-blue?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Version-0.3.0-blue?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/OS-Linux-blue?logo=linux&logoColor=white&style=flat-square" alt="OS">
   <img src="https://img.shields.io/badge/GUI-GTK4_%2B_Libadwaita-orange?style=flat-square" alt="GUI">
   <img src="https://img.shields.io/badge/Lang-Rust-red?logo=rust&logoColor=white&style=flat-square" alt="Rust">
@@ -85,7 +85,7 @@ kbc remap 258A:010C --key 68 --to 2E --layer 1   # правим FN1-слой (в
 kbc remap 258A:010C --key 73 --modifier 1     # ВНИМАНИЕ: тест только на неиспользованных слотах! После теста — readback (--list)
 kbc monitor                                 # горячая замена (watch)
 # --- пресеты и даемон (плавные host-эффекты без GUI) ---
-kbc preset save wave2 --mode wave --brightness 200 --speed 60   # сохранить пресет (TOML в ~/.local/share/kbc-presets)
+kbc preset save wave2 --mode wave --brightness 200 --speed 60   # сохранить пресет (TOML в ~/.config/keyboard-center/presets)
 kbc preset list                            # список пресетов
 kbc daemon --preset wave2                  # крутит эффект до Ctrl-C (кадр 40 мс; 2.4G/Ajazz — запись в память и выход)
 kbc preset apply wave2                     # то же через делегирование
@@ -95,6 +95,46 @@ kbc probe 258A:010C                         # скан интерфейсов и
 kbc raw 258A:010C feature-get 6 520
 kbc raw 258A:010C feature-send "06 84 00 00 01 00 80 00"
 kbc raw 3554:FA09 output-send "13 05 00 ..."
+```
+
+#### Справочник команд
+
+Полный перечень сабкоманд CLI (контракт, стабилен для применения; флаги отмечены `*` — experimental/для 2.4G-ресивера):
+
+| Команда | Назначение | Ключевые флаги |
+|---|---|---|
+| `kbc list` | список подключённых устройств | — |
+| `kbc info <VID:PID>` | детали устройства (тип, модель) | — |
+| `kbc rgb <VID:PID>` | подсветка: host-эффект (USB) или запись в память ресивера (2.4G) | `--mode`, `--color RRGGBB`, `--brightness`, `--speed`, `--hold ms`, `--light-on`, `--light-off` (2.4G), `--hw-effect HEX`* |
+| `kbc screen <VID:PID> --image <path>` | загрузка кадра/GIF на TFT (Ajazz AK820 Pro) | `--image` |
+| `kbc time <VID:PID>` | синхронизация времени ПК с экраном (Ajazz) | — |
+| `kbc battery <VID:PID>` | заряд 0..100% (только 2.4G; USB/BT — инфо-сообщение) | — |
+| `kbc save <VID:PID>` | эффект/конфиг в память клавиатуры (держится без приложения) | `--effect HEX`, `--brightness`, `--speed` |
+| `kbc remap <VID:PID>` | переназначение клавиш (F75, USB; верифицировано) | `--list`, `--key slot`, `--to usage`, `--media usage`, `--modifier 0..7`, `--layer 0\|1` |
+| `kbc set-poll <VID:PID> <Hz>` | polling rate 125 \| 250 \| 500 \| 1000 | — |
+| `kbc set-debounce <VID:PID> <ms>` | анти-дребезг | — |
+| `kbc set-sleep <VID:PID> <sec>` | автоотключение (0 = выкл) | — |
+| `kbc profile save/load <path> [--device]` | профиль в файл / из файла | `--device`, `--name` |
+| `kbc profile eeprom-save <VID:PID> <slot>` | профиль во встроенную память (0..=7) | — |
+| `kbc preset save/list/apply/remove <name>` | TOML-пресеты подсветки | `--mode`, `--color`, `--brightness`, `--speed`, `--frame-ms` |
+| `kbc daemon --preset <name>` | host-движок по пресету до Ctrl-C (2.4G/Ajazz — запись в память и выход) | `--preset`, `--mode`, `--color`, `--brightness`, `--speed`, `--frame-ms` |
+| `kbc monitor` | отслеживание горячей замены | — |
+| `kbc probe <VID:PID>` | разведка HID: интерфейсы + скан feature-репортов | `--len` |
+| `kbc raw <VID:PID> <op>` | raw-доступ (диагностика протокола) | `feature-get ID LEN`, `feature-send HEX`, `output-send HEX`, `input-read LEN TIMEOUT_MS`, `wl-read-pages CMD NEED`* |
+
+Формат `VID:PID` — hex через двоеточие (например `258A:010C`); RGB-цвет — `RRGGBB` (hex); эффекты/слоты — hex (например `0B`, `0x14`).
+
+#### Формат TOML-пресета
+
+Один пресет = один файл `~/.config/keyboard-center/presets/<name>.toml`. Поле `version` задаёт схему файла (текущая 1); файлы без него читаются как v1; версия выше понятной — отклоняется с подсказкой.
+
+```toml
+version = 1          # схема формата (для миграций)
+type = "wave"        # snake_case из RgbMode
+color = "#FF5A00"    # базовый цвет
+brightness = 200     # 0..=255
+speed = 60           # 1..=255
+frame_ms = 40        # период кадра host-рендеринга, мс
 ```
 
 ---

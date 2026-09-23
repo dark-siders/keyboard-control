@@ -14,10 +14,14 @@ pub const DEFAULT_NAME: &str = "default";
 /// гонятся кадрами (keepalive ~40 мс ≈ 20-25 FPS, фикс 10.71).
 pub const DEFAULT_FRAME_MS: u64 = 40;
 
+/// Текущая версия схемы TOML-пресета.
+pub const PRESET_FORMAT_VERSION: u32 = 1;
+
 /// Параметры host-эффекта, пригодные для сохранения в пресет.
 ///
 /// Сериализуются в TOML как:
 /// ```toml
+/// version = 1            # формат файла (для миграций)
 /// type = "wave"          # snake_case из types::RgbMode
 /// color = "#FF5A00"
 /// brightness = 200
@@ -26,6 +30,10 @@ pub const DEFAULT_FRAME_MS: u64 = 40;
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeParams {
+    /// Версия формата пресета. Default 1: файлы без поля `version`
+    /// (формат 0.x) читаются как v1 (fallback).
+    #[serde(default = "default_format_version")]
+    pub version: u32,
     /// Режим движка (types::RgbMode, serde snake_case).
     #[serde(rename = "type")]
     pub r#type: RgbMode,
@@ -39,9 +47,30 @@ pub struct ModeParams {
     pub frame_ms: u64,
 }
 
+fn default_format_version() -> u32 {
+    PRESET_FORMAT_VERSION
+}
+
+impl ModeParams {
+    /// Проверить, что формат файла поддерживается текущей версией.
+    /// Более новая схема (version выше текущей) — ошибка с подсказкой.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.version > PRESET_FORMAT_VERSION {
+            return Err(anyhow::anyhow!(
+                "пресет создан в более новой схеме (v{}), приложение понимает только v{}. \
+                 Обновите keyboard-center",
+                self.version,
+                PRESET_FORMAT_VERSION
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for ModeParams {
     fn default() -> Self {
         Self {
+            version: default_format_version(),
             r#type: RgbMode::Wave,
             color: "#FF5A00".to_string(),
             brightness: 200,
@@ -138,6 +167,7 @@ impl PresetStore {
             .map_err(|e| anyhow::anyhow!("не удалось прочитать пресет {}: {e}", p.display()))?;
         let params: ModeParams = toml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("не удалось разобрать пресет {}: {e}", p.display()))?;
+        params.validate()?;
         Ok(Preset {
             name: sanitize(name),
             params,
@@ -228,6 +258,7 @@ mod tests {
         let p = Preset {
             name: "wave-turbo".to_string(),
             params: ModeParams {
+                version: PRESET_FORMAT_VERSION,
                 r#type: RgbMode::Wave,
                 color: "#00FF00".to_string(),
                 brightness: 255,
@@ -257,6 +288,53 @@ mod tests {
         assert!(store.has("default"));
         let err = store.ensure("missing-preset").unwrap_err();
         assert!(err.to_string().contains("не найден"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_old_preset_without_version_falls_back_to_v1() {
+        // Старый файл формата 0.x — без поля `version`: должен читаться как v1.
+        let dir = std::env::temp_dir().join(format!("kbc-presets-test3-{}", std::process::id()));
+        let store = PresetStore::new(dir.clone());
+        let p = store.path("legacy");
+        std::fs::write(
+            &p,
+            r##"type = "static"
+color = "#FF0000"
+brightness = 100
+speed = 30
+frame_ms = 40
+"##,
+        )
+        .unwrap();
+
+        let loaded = store.load("legacy").unwrap();
+        assert_eq!(loaded.params.version, 1);
+        assert_eq!(loaded.params.r#type, RgbMode::Static);
+        assert_eq!(loaded.params.color, "#FF0000");
+        loaded.params.validate().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newer_format_version_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("kbc-presets-test4-{}", std::process::id()));
+        let store = PresetStore::new(dir.clone());
+        let p = store.path("future");
+        std::fs::write(
+            &p,
+            r##"version = 9
+type = "wave"
+color = "#FF0000"
+brightness = 100
+speed = 30
+frame_ms = 40
+"##,
+        )
+        .unwrap();
+
+        let err = store.load("future").unwrap_err();
+        assert!(err.to_string().contains("новой схеме"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
