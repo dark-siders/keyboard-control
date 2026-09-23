@@ -880,6 +880,12 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
         params.brightness,
         params.speed,
     );
+    // Пауза перед первым кадром: после boot ПК клавиатура ещё инициализирует
+    // LED-матрицу — ранние direct-кадры ложатся «криво» (гонка, журнал 10.94).
+    println!(
+        "ожидание инициализации подсветки клавиатуры ~4 с (fix «кривая вёрстка» на старте)…"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(4));
     let mut t_ms = 0u32;
     let mut fails = 0u32;
     loop {
