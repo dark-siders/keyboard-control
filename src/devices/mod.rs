@@ -19,6 +19,17 @@ pub mod scanner;
 // потока переподключения и строит драйвер без HID-вызовов).
 pub use hid::HidBridge;
 
+/// LED-индексы активного ряда (верхний ряд Esc+F1..F12) для аудио-реактива —
+/// по размеру LED-матрицы устройства. Неизвестное устройство → пусто (кадр
+/// статичен).
+pub fn audio_active_row_leds(led_count: usize) -> &'static [usize] {
+    match led_count {
+        aula_f75::RGB_LED_COUNT => aula_f75::AUDIO_ACTIVE_ROW_LEDS,
+        aula_f99::RGB_LED_COUNT => aula_f99::AUDIO_ACTIVE_ROW_LEDS,
+        _ => &[],
+    }
+}
+
 /// Тип ошибки устройств.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -183,6 +194,18 @@ pub trait KeyboardDevice: Send {
     fn get_macros(&self) -> Result<Vec<Macro>> {
         Err(Error::Unsupported(
             "чтение макросов не поддерживается этим устройством",
+        ))
+    }
+
+    // --- Диагностика -----------------------------------------------------
+    /// Read-only дамп протокола для авто-диагностики (Ajazz AK820 Pro).
+    /// Возвращает многострочный текст `ключ=hex` со всеми GET-данными,
+    /// которые умеет читать драйвер (device-info, LED-эффект, game-mode,
+    /// custom-LED буфер, keymap Default/FN1 + заводские матрицы, макросы).
+    /// НИЧЕГО не пишет в устройство. Не умеющие устройства — Unsupported.
+    fn diagnostic_dump(&self) -> Result<String> {
+        Err(Error::Unsupported(
+            "диагностический дамп (diagnostic_dump) не поддерживается этим устройством",
         ))
     }
 

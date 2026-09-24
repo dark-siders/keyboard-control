@@ -52,6 +52,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"
 # Работа с файловой системой (glob для /dev/hidraw)
 glob = "0.3"
 
+# Audio-reactive (журнал 10.97): захват системного звука через PulseAudio/PipeWire
+# монитор (@DEFAULT_MONITOR@) и расчёт спектра для host-эффекта на USB.
+# libpulse-*-binding — тонкие обёртки Simple API (pa_simple); в nixpkgs требует
+# `pulseaudio` в buildInputs (см. flake.nix); Fedora — pulseaudio-libs-devel.
+pulse = { package = "libpulse-binding", version = "2" }
+psimple = { package = "libpulse-simple-binding", version = "2" }
+rustfft = "6"
+
 [profile.release]
 lto = true
 opt-level = 3

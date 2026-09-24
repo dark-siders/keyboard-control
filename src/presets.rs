@@ -17,6 +17,47 @@ pub const DEFAULT_FRAME_MS: u64 = 40;
 /// Текущая версия схемы TOML-пресета.
 pub const PRESET_FORMAT_VERSION: u32 = 1;
 
+/// Дополнительные параметры аудио-реактива (`RgbMode::Audio`). Хранятся
+/// отдельной секцией `[audio]` только у аудио-пресетов; у прочих режимов
+/// секция отсутствует. Все поля имеют дефолты, сохраняющие текущий вид
+/// визуализатора (журнал 10.97–10.98).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioParams {
+    /// Общая чувствительность полос (множитель после AGC), 0.1..=2.0.
+    #[serde(default = "default_audio_sensitivity")]
+    pub sensitivity: f32,
+    /// Цвет низких частот (спектр слева/низ), `#RRGGBB`. Дефолт — зелёный.
+    #[serde(default = "default_audio_color_low")]
+    pub color_low: String,
+    /// Цвет высоких частот (спектр справа/верх), `#RRGGBB`. Дефолт — синий.
+    #[serde(default = "default_audio_color_high")]
+    pub color_high: String,
+}
+
+fn default_audio_sensitivity() -> f32 {
+    crate::audio::DEFAULT_SENSITIVITY
+}
+
+fn default_audio_color_low() -> String {
+    // hsl(120, 1.0, 0.6) — прежний захардкоженный «зелёный» низ спектра.
+    "#33FF33".to_string()
+}
+
+fn default_audio_color_high() -> String {
+    // hsl(240, 1.0, 0.6) — прежний захардкоженный «синий» верх спектра.
+    "#3333FF".to_string()
+}
+
+impl Default for AudioParams {
+    fn default() -> Self {
+        Self {
+            sensitivity: default_audio_sensitivity(),
+            color_low: default_audio_color_low(),
+            color_high: default_audio_color_high(),
+        }
+    }
+}
+
 /// Параметры host-эффекта, пригодные для сохранения в пресет.
 ///
 /// Сериализуются в TOML как:
@@ -45,6 +86,10 @@ pub struct ModeParams {
     pub speed: u8,
     /// Период кадра host-рендеринга в мс (keepalive).
     pub frame_ms: u64,
+    /// Настройки аудио-реактива: только для `type = "audio"` (у прочих
+    /// режимов секции `[audio]` в файле нет).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioParams>,
 }
 
 fn default_format_version() -> u32 {
@@ -65,6 +110,12 @@ impl ModeParams {
         }
         Ok(())
     }
+
+    /// Параметры аудио-реактива пресета (или дефолты, если секции `[audio]`
+    /// нет — обратная совместимость со старыми пресетами).
+    pub fn audio_params(&self) -> AudioParams {
+        self.audio.clone().unwrap_or_default()
+    }
 }
 
 impl Default for ModeParams {
@@ -76,6 +127,7 @@ impl Default for ModeParams {
             brightness: 200,
             speed: 60,
             frame_ms: DEFAULT_FRAME_MS,
+            audio: None,
         }
     }
 }
@@ -94,6 +146,35 @@ impl Default for Preset {
             params: ModeParams::default(),
         }
     }
+}
+
+/// Встроенные («зашитые») пресеты: доступны у ЛЮБОГО пользователя без файлов
+/// в `~/.config` — видны в списке GUI/CLI и грузятся из бинарника. Файл с тем
+/// же именем перекрывает встроенный (пользователь может переопределить).
+pub fn builtin_presets() -> Vec<Preset> {
+    vec![Preset {
+        name: "audio-viz".to_string(),
+        params: ModeParams {
+            version: PRESET_FORMAT_VERSION,
+            r#type: RgbMode::Audio,
+            color: "#FF5A00".to_string(),
+            brightness: 255,
+            speed: 60,
+            frame_ms: DEFAULT_FRAME_MS,
+            audio: Some(AudioParams::default()),
+        },
+    }]
+}
+
+/// Найти встроенный пресет по имени.
+pub fn builtin(name: &str) -> Option<Preset> {
+    let key = sanitize(name);
+    builtin_presets().into_iter().find(|p| p.name == key)
+}
+
+/// Является ли имя встроенным пресетом.
+pub fn is_builtin(name: &str) -> bool {
+    builtin(name).is_some()
 }
 
 /// Хранилище пресетов: каталог с TOML-файлами (один пресет = один файл).
@@ -138,12 +219,13 @@ impl PresetStore {
         self.dir.join(format!("{}.toml", sanitize(name)))
     }
 
-    /// Существует ли пресет с таким именем.
+    /// Существует ли пресет с таким именем (файл или встроенный).
     pub fn has(&self, name: &str) -> bool {
-        self.path(name).is_file()
+        self.path(name).is_file() || is_builtin(name)
     }
 
-    /// Имена всех пресетов (из *.toml-файлов), отсортированы.
+    /// Имена всех пресетов: файлы из `*.toml` + встроенные, без дублей,
+    /// отсортированы. Файл с именем встроенного перекрывает встроенный.
     pub fn list(&self) -> Vec<String> {
         let mut names = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&self.dir) {
@@ -156,22 +238,39 @@ impl PresetStore {
                 }
             }
         }
+        for p in builtin_presets() {
+            if !names.iter().any(|n| n == &p.name) {
+                names.push(p.name);
+            }
+        }
         names.sort();
         names
     }
 
-    /// Загрузить пресет по имени.
+    /// Загрузить пресет по имени: файл имеет приоритет, иначе встроенный.
     pub fn load(&self, name: &str) -> anyhow::Result<Preset> {
         let p = self.path(name);
-        let raw = std::fs::read_to_string(&p)
-            .map_err(|e| anyhow::anyhow!("не удалось прочитать пресет {}: {e}", p.display()))?;
-        let params: ModeParams = toml::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("не удалось разобрать пресет {}: {e}", p.display()))?;
-        params.validate()?;
-        Ok(Preset {
-            name: sanitize(name),
-            params,
-        })
+        if p.is_file() {
+            let raw = std::fs::read_to_string(&p).map_err(|e| {
+                anyhow::anyhow!("не удалось прочитать пресет {}: {e}", p.display())
+            })?;
+            let params: ModeParams = toml::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("не удалось разобрать пресет {}: {e}", p.display()))?;
+            params.validate()?;
+            return Ok(Preset {
+                name: sanitize(name),
+                params,
+            });
+        }
+        if let Some(p) = builtin(name) {
+            return Ok(p);
+        }
+        Err(anyhow::anyhow!(
+            "пресет «{}» не найден ({}) — создайте его: kbc preset save {}",
+            name,
+            p.display(),
+            name
+        ))
     }
 
     /// Сохранить пресет в TOML-файл. Возвращает путь к файлу.
@@ -184,16 +283,29 @@ impl PresetStore {
         Ok(p)
     }
 
-    /// Удалить пресет.
+    /// Удалить пресет. Встроенный без файла-переопределения удалить нельзя;
+    /// файл-переопределение встроенного удаляется (возвращается встроенный).
     pub fn remove(&self, name: &str) -> anyhow::Result<()> {
         let p = self.path(name);
+        if !p.is_file() {
+            if is_builtin(name) {
+                return Err(anyhow::anyhow!(
+                    "пресет «{}» встроенный — удалить нельзя (можно переопределить, сохранив свой под тем же именем)",
+                    sanitize(name)
+                ));
+            }
+            return Err(anyhow::anyhow!(
+                "пресет «{}» не найден ({})",
+                name,
+                p.display()
+            ));
+        }
         std::fs::remove_file(&p)
             .map_err(|e| anyhow::anyhow!("не удалось удалить пресет {}: {e}", p.display()))?;
         Ok(())
     }
 
-    /// Гарантировать пресет: если его нет — создать (для «default») и вернуть.
-    /// Для любого другого имени без файла — ошибка с подсказкой.
+    /// Гарантировать пресет: файл/встроенный/создать «default».
     pub fn ensure(&self, name: &str) -> anyhow::Result<Preset> {
         if self.has(name) {
             return self.load(name);
@@ -236,6 +348,7 @@ pub fn mode_name(m: RgbMode) -> &'static str {
         RgbMode::Rain => "дождь",
         RgbMode::Reactive => "реактивная",
         RgbMode::Custom => "custom",
+        RgbMode::Audio => "аудио-реактив",
     }
 }
 
@@ -264,6 +377,7 @@ mod tests {
                 brightness: 255,
                 speed: 90,
                 frame_ms: 30,
+                audio: None,
             },
         };
         let path = store.save(&p).unwrap();
@@ -335,6 +449,95 @@ frame_ms = 40
 
         let err = store.load("future").unwrap_err();
         assert!(err.to_string().contains("новой схеме"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builtin_audio_viz_visible_and_loadable() {
+        let dir = std::env::temp_dir().join(format!("kbc-presets-test5-{}", std::process::id()));
+        let store = PresetStore::new(dir.clone());
+        // Встроенный виден в списке даже в пустом хранилище.
+        assert!(store.list().contains(&"audio-viz".to_string()));
+        let p = store.load("audio-viz").unwrap();
+        assert_eq!(p.params.r#type, RgbMode::Audio);
+        assert!(is_builtin("audio-viz"));
+        assert!(store.has("audio-viz"));
+        // Встроенный удалить нельзя.
+        let err = store.remove("audio-viz").unwrap_err();
+        assert!(err.to_string().contains("встроенный"));
+        // ensure на встроенном возвращает его, не создавая файл.
+        let e = store.ensure("audio-viz").unwrap();
+        assert_eq!(e.params.r#type, RgbMode::Audio);
+        assert!(!store.path("audio-viz").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_file_overrides_builtin() {
+        let dir = std::env::temp_dir().join(format!("kbc-presets-test6-{}", std::process::id()));
+        let store = PresetStore::new(dir.clone());
+        let over = Preset {
+            name: "audio-viz".to_string(),
+            params: ModeParams {
+                version: PRESET_FORMAT_VERSION,
+                r#type: RgbMode::Static,
+                color: "#0000FF".to_string(),
+                brightness: 10,
+                speed: 10,
+                frame_ms: 40,
+                audio: None,
+            },
+        };
+        store.save(&over).unwrap();
+        // Файл с тем же именем перекрывает встроенный.
+        let loaded = store.load("audio-viz").unwrap();
+        assert_eq!(loaded.params.r#type, RgbMode::Static);
+        // Файл-переопределение удаляется, встроенный возвращается.
+        store.remove("audio-viz").unwrap();
+        let back = store.load("audio-viz").unwrap();
+        assert_eq!(back.params.r#type, RgbMode::Audio);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_params_roundtrip() {
+        // Секция `[audio]` сохраняется и читается; у не-аудио режима её нет.
+        let dir = std::env::temp_dir().join(format!("kbc-presets-test7-{}", std::process::id()));
+        let store = PresetStore::new(dir.clone());
+        let p = Preset {
+            name: "viz".to_string(),
+            params: ModeParams {
+                version: PRESET_FORMAT_VERSION,
+                r#type: RgbMode::Audio,
+                color: "#FF5A00".to_string(),
+                brightness: 255,
+                speed: 60,
+                frame_ms: 40,
+                audio: Some(AudioParams {
+                    sensitivity: 1.25,
+                    color_low: "#00C800".to_string(),
+                    color_high: "#2864FF".to_string(),
+                }),
+            },
+        };
+        store.save(&p).unwrap();
+        let raw = std::fs::read_to_string(store.path("viz")).unwrap();
+        assert!(raw.contains("[audio]"), "в файле должна быть секция [audio]");
+        let loaded = store.load("viz").unwrap();
+        assert_eq!(loaded, p);
+        assert_eq!(loaded.params.audio_params().sensitivity, 1.25);
+
+        // Не-аудио пресет: секции нет, `audio_params()` даёт дефолты.
+        let mut q = p.clone();
+        q.name = "wave".to_string();
+        q.params.r#type = RgbMode::Wave;
+        q.params.audio = None;
+        store.save(&q).unwrap();
+        let raw = std::fs::read_to_string(store.path("wave")).unwrap();
+        assert!(!raw.contains("[audio]"), "у wave секции [audio] быть не должно");
+        let loaded = store.load("wave").unwrap();
+        assert!(loaded.params.audio.is_none());
+        assert_eq!(loaded.params.audio_params(), AudioParams::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -23,6 +23,7 @@
 //   kbc preset remove <name>
 //   kbc monitor                        — горячая замена (watch)
 //   kbc probe <vid:pid>                — разведка протокола (скан feature-репортов)
+//   kbc ajazz-diag <vid:pid>           — read-only дамп Ajazz AK820 Pro (GET-команды)
 //   kbc raw <vid:pid> feature-get <id> <len>
 //   kbc raw <vid:pid> feature-send <hex>
 //   kbc raw <vid:pid> output-send <hex>
@@ -82,6 +83,8 @@ enum Commands {
     Monitor,
     /// Разведка HID-протокола: интерфейсы + скан feature-репортов
     Probe(ProbeArgs),
+    /// Read-only диагностика Ajazz AK820 Pro (USB): device-info, LED, keymap, макросы
+    AjazzDiag(DeviceArg),
     /// Raw-доступ к HID (диагностика протокола)
     Raw(RawArgs),
 }
@@ -113,6 +116,15 @@ struct RgbArgs {
     /// Удерживать поток кадров N мс после отправки (direct-режим требует keepalive)
     #[arg(long, value_name = "ms")]
     hold: Option<u64>,
+    /// [Аудио] Цвет низких частот (hex) — по умолчанию зелёный #33FF33
+    #[arg(long, value_name = "RRGGBB")]
+    color_low: Option<String>,
+    /// [Аудио] Цвет высоких частот (hex) — по умолчанию синий #3333FF
+    #[arg(long, value_name = "RRGGBB")]
+    color_high: Option<String>,
+    /// [Аудио] Чувствительность полос (0.1..2.0)
+    #[arg(long)]
+    sensitivity: Option<f32>,
     /// [2.4G] Выключить свет в память ресивера (останется выключенным без приложения)
     #[arg(long)]
     light_off: bool,
@@ -223,6 +235,15 @@ struct DaemonArgs {
     /// Переопределить период кадра, мс (1..=1000)
     #[arg(long, value_name = "ms")]
     frame_ms: Option<u64>,
+    /// [Аудио] Цвет низких частот (hex) — по умолчанию зелёный #33FF33
+    #[arg(long, value_name = "RRGGBB")]
+    color_low: Option<String>,
+    /// [Аудио] Цвет высоких частот (hex) — по умолчанию синий #3333FF
+    #[arg(long, value_name = "RRGGBB")]
+    color_high: Option<String>,
+    /// [Аудио] Чувствительность полос (0.1..2.0)
+    #[arg(long)]
+    sensitivity: Option<f32>,
 }
 
 #[derive(Args)]
@@ -260,6 +281,15 @@ struct PresetSave {
     /// Период кадра host-рендеринга, мс (1..=1000)
     #[arg(long, value_name = "ms")]
     frame_ms: Option<u64>,
+    /// [Аудио] Цвет низких частот (hex) — по умолчанию зелёный #33FF33
+    #[arg(long, value_name = "RRGGBB")]
+    color_low: Option<String>,
+    /// [Аудио] Цвет высоких частот (hex) — по умолчанию синий #3333FF
+    #[arg(long, value_name = "RRGGBB")]
+    color_high: Option<String>,
+    /// [Аудио] Чувствительность полос (0.1..2.0)
+    #[arg(long)]
+    sensitivity: Option<f32>,
 }
 
 #[derive(Args)]
@@ -270,6 +300,15 @@ struct PresetApply {
     /// VID:PID устройства (иначе — автовыбор как в daemon)
     #[arg(long, value_name = "VID:PID")]
     device: Option<String>,
+    /// [Аудио] Цвет низких частот (hex) — по умолчанию зелёный #33FF33
+    #[arg(long, value_name = "RRGGBB")]
+    color_low: Option<String>,
+    /// [Аудио] Цвет высоких частот (hex) — по умолчанию синий #3333FF
+    #[arg(long, value_name = "RRGGBB")]
+    color_high: Option<String>,
+    /// [Аудио] Чувствительность полос (0.1..2.0)
+    #[arg(long)]
+    sensitivity: Option<f32>,
 }
 
 #[derive(Args)]
@@ -437,6 +476,12 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
         Commands::Preset(p) => cmd_preset(p),
         Commands::Monitor => cmd_monitor(),
         Commands::Probe(a) => cmd_probe(&a.device, a.len),
+        Commands::AjazzDiag(a) => {
+            let (vid, pid) = parse_id(&a.device)?;
+            let dev = open(vid, pid)?;
+            print!("{}", dev.diagnostic_dump()?);
+            Ok(0)
+        }
         Commands::Raw(a) => cmd_raw(a),
     }
 }
@@ -533,6 +578,12 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
     // скорость держатся без приложения. Контракт хука: Ok(true) = применено
     // аппаратно; Ok(false) = устройство не умеет (внизу — host-рендеринг).
     if dev.connection_type() == ConnectionType::Wireless2_4G {
+        let mode = parse_rgb_mode(args.mode.as_deref())?;
+        if mode == RgbMode::Audio {
+            return Err(anyhow::anyhow!(
+                "аудио-реактив доступен только на USB-подключении (host-рендеринг); на 2.4G используйте --hw-effect/--mode"
+            ));
+        }
         let color = match &args.color {
             Some(c) => Some(
                 keyboard_center::types::Color::from_hex_checked(c)
@@ -629,6 +680,43 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
         };
         println!("host-эффект: {mode:?} яркость={} скорость={} (матрица {n}×~{cols}) — keepalive до Ctrl-C",
                  params.brightness, params.speed);
+        // Аудио-реактив: кадры строятся из спектра @DEFAULT_MONITOR@ (журнал 10.97),
+        // host-keepalive тот же (40 мс тик — 20-25 FPS).
+        // Парсинг аудио-цвета с дефолтом.
+        let parse_audio_color = |opt: &Option<String>, def: &str| -> anyhow::Result<keyboard_center::types::Color> {
+            match opt {
+                Some(c) => keyboard_center::types::Color::from_hex_checked(c)
+                    .ok_or_else(|| anyhow::anyhow!("неверный аудио-цвет: {c} (ожидается RRGGBB)")),
+                None => keyboard_center::types::Color::from_hex_checked(def)
+                    .ok_or_else(|| anyhow::anyhow!("внутренний дефолт невалиден: {def}")),
+            }
+        };
+        if mode == RgbMode::Audio {
+            let low = parse_audio_color(&args.color_low, "#33FF33")?;
+            let high = parse_audio_color(&args.color_high, "#3333FF")?;
+            let sens = args.sensitivity.unwrap_or(keyboard_center::audio::DEFAULT_SENSITIVITY);
+            let speed = args.speed.unwrap_or(60);
+            let mut au = keyboard_center::audio::AudioReactive::open_with(sens, speed)?;
+            println!("аудио-монитор открыт: 16 спектр-полос → верхний ряд; ждите звука…");
+            loop {
+                // read_vu_bands() сам блокирует ~46 мс (ждёт полный FFT-блок),
+                // поэтому НЕ спим сверху: иначе читаем медленнее реального
+                // времени, capture-буфер копит отставание → лаг после паузы
+                // (журнал 10.97, жалоба 2026-09-24). Темп задаёт сам монитор.
+                let vu = au.read_vu_bands()?;
+                let active = keyboard_center::devices::audio_active_row_leds(n);
+                let frame = keyboard_center::audio::audio_frame(
+                    base,
+                    params.brightness,
+                    &vu,
+                    n,
+                    active,
+                    low,
+                    high,
+                );
+                dev.render_frame(&frame)?;
+            }
+        }
         let mut t_ms = 0u32;
         loop {
             let frame = host_frame_with(&params, t_ms, n, cols);
@@ -652,9 +740,10 @@ fn parse_rgb_mode(s: Option<&str>) -> anyhow::Result<RgbMode> {
         "rain" => RgbMode::Rain,
         "reactive" => RgbMode::Reactive,
         "custom" => RgbMode::Custom,
+        "audio" | "audio-reactive" => RgbMode::Audio,
         _ => {
             return Err(anyhow::anyhow!(
-                "неизвестный режим: {s} (static/breathing/wave/spectrum/ripple/rain/reactive/custom)"
+                "неизвестный режим: {s} (static/breathing/wave/spectrum/ripple/rain/reactive/custom/audio)"
             ))
         }
     };
@@ -806,6 +895,32 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
     if let Some(s) = args.speed {
         preset.params.speed = s;
     }
+    // Аудио-оверрайды (не сохраняются в файл пресета).
+    if let Some(c) = &args.color_low {
+        Color::from_hex_checked(c)
+            .ok_or_else(|| anyhow::anyhow!("неверный аудио-цвет: {c} (ожидается RRGGBB)"))?;
+        if preset.params.audio.is_none() {
+            preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+        }
+        preset.params.audio.as_mut().unwrap().color_low = c.clone();
+    }
+    if let Some(c) = &args.color_high {
+        Color::from_hex_checked(c)
+            .ok_or_else(|| anyhow::anyhow!("неверный аудио-цвет: {c} (ожидается RRGGBB)"))?;
+        if preset.params.audio.is_none() {
+            preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+        }
+        preset.params.audio.as_mut().unwrap().color_high = c.clone();
+    }
+    if let Some(s) = args.sensitivity {
+        if !(0.1..=2.0).contains(&s) {
+            return Err(anyhow::anyhow!("чувствительность должна быть в диапазоне 0.1..2.0"));
+        }
+        if preset.params.audio.is_none() {
+            preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+        }
+        preset.params.audio.as_mut().unwrap().sensitivity = s;
+    }
     let frame_ms = args.frame_ms.unwrap_or(preset.params.frame_ms).clamp(1, 1000) as u32;
 
     let base = Color::from_hex_checked(&preset.params.color).ok_or_else(|| {
@@ -814,6 +929,11 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
             preset.params.color
         )
     })?;
+    // Параметры аудио (из пресета + оверрайды).
+    let audio = preset.params.audio_params();
+    let audio_low = Color::from_hex_checked(&audio.color_low).unwrap_or(Color::new(51, 255, 51));
+    let audio_high = Color::from_hex_checked(&audio.color_high).unwrap_or(Color::new(51, 51, 255));
+    let audio_sens = audio.sensitivity;
     let params = HostEffectParams {
         mode: preset.params.r#type,
         base,
@@ -861,9 +981,24 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
 
     let (vid, pid) = dev.vid_pid();
 
+    // Аудио-реактив — только host-рендеринг по USB (direct-канал 0x06 есть у
+    // проводных F75/F99; ресивер 2.4G флеш-записью и флешом занимается, у BT
+    // прямого канала нет). Persistent-блок обходим: аудио нельзя записать в
+    // память, иначе пользователь получил бы статику вместо живой реакции.
+    let audio_mode = params.mode == RgbMode::Audio;
+    if audio_mode && dev.connection_type() != keyboard_center::types::ConnectionType::Usb {
+        return Err(anyhow::anyhow!(
+            "аудио-реактив доступен только на USB-подключении (host-рендеринг direct-каналом); \
+             на 2.4G/BT выберите аппаратный эффект из пресета"
+        ));
+    }
+
     // Сначала — аппаратная запись в память (Ok(true) = применено, приложение
     // не нужно). Ok(false) означает «устройство не умеет» → host-рендеринг.
-    if dev.apply_rgb_persistent(params.mode, Some(base), params.brightness, params.speed)? {
+    // Для аудио persistent-запись пропускаем (см. выше).
+    if !audio_mode
+        && dev.apply_rgb_persistent(params.mode, Some(base), params.brightness, params.speed)?
+    {
         println!(
             "{:?}: эффект записан в память устройства (держится без приложения); daemon завершается",
             dev.connection_type()
@@ -882,14 +1017,50 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
     );
     // Пауза перед первым кадром: после boot ПК клавиатура ещё инициализирует
     // LED-матрицу — ранние direct-кадры ложатся «криво» (гонка, журнал 10.94).
-    println!(
-        "ожидание инициализации подсветки клавиатуры ~4 с (fix «кривая вёрстка» на старте)…"
-    );
-    std::thread::sleep(std::time::Duration::from_secs(4));
+    // 4 с → 2 с по желанию владельца (и аудио-реактиву не мешает: музыка
+    // включается уже после загрузки сессии).
+    println!("ожидание инициализации подсветки клавиатуры ~2 с (fix «кривая вёрстка» на старте)…");
+    std::thread::sleep(std::time::Duration::from_secs(2));
     let mut t_ms = 0u32;
     let mut fails = 0u32;
+
+    // Аудио-реактив: источник кадра — спектр @DEFAULT_MONITOR@ вместо таймера.
+    // Поток открываем ЛЕНИВО и переоткрываем при ошибке: в фоне (systemd-user,
+    // без GUI) аудио-сервер/клавиатура могут появиться позже старта, а PipeWire
+    // может перезапуститься — демон не должен падать.
+    let mut vu_audio: Option<keyboard_center::audio::AudioReactive> = None;
+
     loop {
-        let frame = host_frame_with(&params, t_ms, n, cols);
+        let frame = if audio_mode {
+            if vu_audio.is_none() {
+                match keyboard_center::audio::AudioReactive::open_with(audio_sens, params.speed) {
+                    Ok(a) => {
+                        println!(
+                            "аудио-монитор открыт: спектр 16 полос → верхний ряд (Esc+F1..F12)"
+                        );
+                        vu_audio = Some(a);
+                    }
+                    Err(e) => {
+                        eprintln!("аудио-монитор недоступен: {e}; повтор через 3 с");
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        continue;
+                    }
+                }
+            }
+            let vu = match vu_audio.as_mut().expect("поток открыт выше").read_vu_bands() {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("аудио-монитор: {e}; переоткрытие через 2 с");
+                    vu_audio = None;
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    continue;
+                }
+            };
+            let active = keyboard_center::devices::audio_active_row_leds(n);
+            keyboard_center::audio::audio_frame(base, params.brightness, &vu, n, active, audio_low, audio_high)
+        } else {
+            host_frame_with(&params, t_ms, n, cols)
+        };
         match dev.render_frame(&frame) {
             Ok(()) => fails = 0,
             Err(e) => {
@@ -902,7 +1073,11 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(u64::from(frame_ms)));
+        // В аудио-режиме темп задаёт блокирующий read монитора (~46 мс):
+        // лишний sleep копил бы отставание capture-буфера → лаг после паузы.
+        if !audio_mode {
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(frame_ms)));
+        }
         t_ms = t_ms.wrapping_add(frame_ms);
     }
 }
@@ -920,11 +1095,14 @@ fn cmd_preset(p: PresetArgs) -> anyhow::Result<u8> {
             } else {
                 println!("пресеты ({}):", store.dir().display());
                 for name in names {
+                    let builtin = keyboard_center::presets::is_builtin(&name)
+                        && !store.path(&name).is_file();
                     match store.load(&name) {
                         Ok(p) => println!(
-                            "  {:<24} {} цвет={} яркость={} скорость={} кадр={} мс",
+                            "  {:<24} {}{} цвет={} яркость={} скорость={} кадр={} мс",
                             p.name,
                             mode_name(p.params.r#type),
+                            if builtin { " [встроенный]" } else { "" },
                             p.params.color,
                             p.params.brightness,
                             p.params.speed,
@@ -965,6 +1143,32 @@ fn cmd_preset(p: PresetArgs) -> anyhow::Result<u8> {
                 }
                 preset.params.frame_ms = f;
             }
+            // Аудио-оверрайды для сохранения пресета.
+            if let Some(c) = &a.color_low {
+                keyboard_center::types::Color::from_hex_checked(c)
+                    .ok_or_else(|| anyhow::anyhow!("неверный аудио-цвет: {c} (ожидается RRGGBB)"))?;
+                if preset.params.audio.is_none() {
+                    preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+                }
+                preset.params.audio.as_mut().unwrap().color_low = c.clone();
+            }
+            if let Some(c) = &a.color_high {
+                keyboard_center::types::Color::from_hex_checked(c)
+                    .ok_or_else(|| anyhow::anyhow!("неверный аудио-цвет: {c} (ожидается RRGGBB)"))?;
+                if preset.params.audio.is_none() {
+                    preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+                }
+                preset.params.audio.as_mut().unwrap().color_high = c.clone();
+            }
+            if let Some(s) = a.sensitivity {
+                if !(0.1..=2.0).contains(&s) {
+                    return Err(anyhow::anyhow!("чувствительность должна быть в диапазоне 0.1..2.0"));
+                }
+                if preset.params.audio.is_none() {
+                    preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+                }
+                preset.params.audio.as_mut().unwrap().sensitivity = s;
+            }
             let path = store.save(&preset)?;
             println!("пресет «{}» сохранён: {}", preset.name, path.display());
             Ok(0)
@@ -978,6 +1182,9 @@ fn cmd_preset(p: PresetArgs) -> anyhow::Result<u8> {
                 brightness: None,
                 speed: None,
                 frame_ms: None,
+                color_low: a.color_low,
+                color_high: a.color_high,
+                sensitivity: a.sensitivity,
             };
             cmd_daemon(daemon_args)
         }

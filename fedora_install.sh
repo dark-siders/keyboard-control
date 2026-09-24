@@ -96,6 +96,7 @@ if [[ "$INSTALL_DEPS" -eq 1 ]]; then
         glib2-devel gdk-pixbuf2-devel
         cairo-devel pango-devel
         hidapi-devel libudev-devel
+        pulseaudio-libs-devel
     )
     run dnf install -y "${DEP_PACKAGES[@]}"
     echo "Зависимости установлены."

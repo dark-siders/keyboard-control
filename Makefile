@@ -42,7 +42,7 @@ install-user: release
 install-udev:
 	$(INSTALLER) --udev-only
 
-## Установить системные зависимости через dnf (rust, GTK4-devel, hidapi; нужен sudo).
+## Установить системные зависимости через dnf (rust, GTK4-devel, hidapi, pulseaudio-libs; нужен sudo).
 install-deps:
 	$(INSTALLER) --install-deps
 

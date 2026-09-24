@@ -58,6 +58,12 @@ pub const KEY_COUNT: u16 = 84;
 /// Количество светодиодов в матрице подсветки (см. OpenRGB, модель 0xCD).
 pub const RGB_LED_COUNT: usize = 90;
 
+/// LED-индексы верхнего ряда (Esc + F1..F12) — аудио-реактив играет только по
+/// ним. Индексы = слоты клавиш (OpenRGB `aula_f75_layout`, модель 0xCD):
+/// Esc=0, F1=12, далее шаг 6 до F12=78.
+pub const AUDIO_ACTIVE_ROW_LEDS: &[usize] =
+    &[0, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78];
+
 /// Аппаратные эффекты прошивки — селектор `data[10]` в конфиг-регионе.
 /// Коды собраны эмпирически на железе: переключение Fn+`\` на клавиатуре
 /// меняет `data[10]` и сохраняет его в память (сессия 2026-09-12).
@@ -319,6 +325,9 @@ impl AulaF75 {
             RgbMode::SpectrumCycle => 0x08,  // Радуга
             RgbMode::Wave => 0x0B,           // Перелив-волна
             RgbMode::Static | RgbMode::Custom => 0x03, // Смена цветов (статично)
+            // Аудио-реактив host-фича; аппаратно записать звуковой спектр нельзя —
+            // ближайший статичный (0x03). До daemon-ветки аудио не доходит.
+            RgbMode::Audio => 0x03,
         }
     }
 
@@ -494,6 +503,8 @@ impl AulaF75 {
             RgbMode::Rain => 0x05,         // Дождь
             RgbMode::Reactive => 0x07,     // Мерцание разных букв (отклик)
             RgbMode::Custom => 0x03,       // Ближайший статичный
+            // Аудио-реактив флеш-записью не реализуем (host-фича), ближайший.
+            RgbMode::Audio => 0x03,        // Смена цветов (статично)
         }
     }
 
@@ -1265,6 +1276,9 @@ pub fn host_frame_with(p: &HostEffectParams, t: u32, led_count: usize, cols: usi
                 scale_c(p.base, k * bright_k)
             }
             RgbMode::Custom => scale_c(p.base, bright_k),
+            // Аудио-реактив host-фича: кадры строит cmd_daemon из спектра
+            // (src/audio.rs), сюда не доходит; статичный баз — заглушка.
+            RgbMode::Audio => scale_c(p.base, bright_k),
         };
         out.push(c);
     }

@@ -74,6 +74,8 @@ pub enum RgbMode {
     Rain,
     Reactive,
     Custom,
+    /// Аудио-реактив (спектр звука через host-рендеринг; журнал 10.97).
+    Audio,
 }
 
 /// Одно событие макроса (wsclx macros::action, формат флеша).

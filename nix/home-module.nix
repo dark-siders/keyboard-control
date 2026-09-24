@@ -33,7 +33,11 @@ in
           preset = lib.mkOption {
             type = lib.types.str;
             default = "default";
-            description = "Имя пресета для kbc daemon (см. `kbc preset save`)";
+            description = ''
+              Имя пресета для kbc daemon (см. `kbc preset save`).
+              Для аудио-реактива в фоне без GUI укажите встроенный
+              `"audio-viz"` (работает только по USB).
+            '';
           };
         };
       };

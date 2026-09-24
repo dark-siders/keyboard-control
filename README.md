@@ -57,9 +57,9 @@
 | Страница | Что делает |
 |---|---|
 | **Устройство** | Выбор/открытие подключённой клавиатуры, статус |
-| **RGB & Light Studio** | Пресеты, режимы/яркость/скорость, «живой цвет», аппаратные эффекты, «Записать в память», «Выключить свет» |
+| **RGB & Light Studio** | Пресеты, режимы/яркость/скорость, «живой цвет», аудио-реактив (VU-спектр системного звука: верхний ряд, зелёный→синий, USB), аппаратные эффекты, «Записать в память», «Выключить свет» |
 | **Screen Manager** | Ajazz AK820 Pro: загрузка GIF/картинки на TFT-экран, превью |
-| **Keymap & Fn Layer** | Показ раскладки Default/FN1 (F75); переназначение — через CLI `kbc remap` (GUI-клик-редактор — TODO) |
+| **Keymap & Fn Layer** | Показ раскладки Default/FN1 (F75) и клик-редактор переназначения (Press/Media/Modifier, сброс); то же из CLI — `kbc remap` |
 | **System & Power** | Polling rate, debounce, sleep timer, батарея, статус подключения |
 
 ### CLI (`kbc`)
@@ -86,12 +86,20 @@ kbc remap 258A:010C --key 73 --modifier 1     # ВНИМАНИЕ: тест то�
 kbc monitor                                 # горячая замена (watch)
 # --- пресеты и даемон (плавные host-эффекты без GUI) ---
 kbc preset save wave2 --mode wave --brightness 200 --speed 60   # сохранить пресет (TOML в ~/.config/keyboard-center/presets)
-kbc preset list                            # список пресетов
+kbc preset list                            # список пресетов (в т.ч. встроенный audio-viz)
 kbc daemon --preset wave2                  # крутит эффект до Ctrl-C (кадр 40 мс; 2.4G/Ajazz — запись в память и выход)
 kbc preset apply wave2                     # то же через делегирование
-kbc preset remove wave2                    # удалить пресет («default» удалять нельзя)
+kbc preset remove wave2                    # удалить пресет («default» и встроенные удалять нельзя)
+# --- аудио-реактив (USB; спектр системного звука @DEFAULT_MONITOR@) ---
+# Реагирует ТОЛЬКО верхний ряд (Esc + F1..F12): цвет полос — градиент зелёный
+# (низы) → синий (верхи), яркость — от уровня (AGC: нормировка по пику кадра).
+# «Буквы» светятся статичным базовым цветом. Пока музыка не играет — весь кадр
+# статичен (порог тишины, «эффекта до музыки» нет). Работает только по USB.
+kbc rgb 258A:010C --mode audio --brightness 200                  # «живой» визуализатор до Ctrl-C (нужен звук в системе)
+kbc daemon --preset audio-viz              # встроенный аудио-пресет; крутится без GUI, сам переоткрывает аудио-поток
 # --- диагностика протокола ---
 kbc probe 258A:010C                         # скан интерфейсов и feature-репортов
+kbc ajazz-diag 0C45:8009                    # read-only дамп Ajazz AK820 Pro (все GET-команды)
 kbc raw 258A:010C feature-get 6 520
 kbc raw 258A:010C feature-send "06 84 00 00 01 00 80 00"
 kbc raw 3554:FA09 output-send "13 05 00 ..."
@@ -105,7 +113,7 @@ kbc raw 3554:FA09 output-send "13 05 00 ..."
 |---|---|---|
 | `kbc list` | список подключённых устройств | — |
 | `kbc info <VID:PID>` | детали устройства (тип, модель) | — |
-| `kbc rgb <VID:PID>` | подсветка: host-эффект (USB) или запись в память ресивера (2.4G) | `--mode`, `--color RRGGBB`, `--brightness`, `--speed`, `--hold ms`, `--light-on`, `--light-off` (2.4G), `--hw-effect HEX`* |
+| `kbc rgb <VID:PID>` | подсветка: host-эффект (USB) или запись в память ресивера (2.4G) | `--mode` (вкл. `audio` — спектр системного звука, USB-only), `--color RRGGBB`, `--brightness`, `--speed`, `--hold ms`, `--light-on`, `--light-off` (2.4G), `--hw-effect HEX`*, `--color-low RRGGBB`, `--color-high RRGGBB`, `--sensitivity 0.1..2.0` (аудио)* |
 | `kbc screen <VID:PID> --image <path>` | загрузка кадра/GIF на TFT (Ajazz AK820 Pro) | `--image` |
 | `kbc time <VID:PID>` | синхронизация времени ПК с экраном (Ajazz) | — |
 | `kbc battery <VID:PID>` | заряд 0..100% (только 2.4G; USB/BT — инфо-сообщение) | — |
@@ -116,10 +124,11 @@ kbc raw 3554:FA09 output-send "13 05 00 ..."
 | `kbc set-sleep <VID:PID> <sec>` | автоотключение (0 = выкл) | — |
 | `kbc profile save/load <path> [--device]` | профиль в файл / из файла | `--device`, `--name` |
 | `kbc profile eeprom-save <VID:PID> <slot>` | профиль во встроенную память (0..=7) | — |
-| `kbc preset save/list/apply/remove <name>` | TOML-пресеты подсветки | `--mode`, `--color`, `--brightness`, `--speed`, `--frame-ms` |
-| `kbc daemon --preset <name>` | host-движок по пресету до Ctrl-C (2.4G/Ajazz — запись в память и выход) | `--preset`, `--mode`, `--color`, `--brightness`, `--speed`, `--frame-ms` |
+| `kbc preset save/list/apply/remove <name>` | TOML-пресеты подсветки | `--mode`, `--color`, `--brightness`, `--speed`, `--frame-ms`, `--color-low`, `--color-high`, `--sensitivity` (аудио) |
+| `kbc daemon --preset <name>` | host-движок по пресету до Ctrl-C (2.4G/Ajazz — запись в память и выход) | `--preset`, `--mode`, `--color`, `--brightness`, `--speed`, `--frame-ms`, `--color-low`, `--color-high`, `--sensitivity` (аудио) |
 | `kbc monitor` | отслеживание горячей замены | — |
 | `kbc probe <VID:PID>` | разведка HID: интерфейсы + скан feature-репортов | `--len` |
+| `kbc ajazz-diag <VID:PID>` | read-only дамп Ajazz AK820 Pro: device-info/LED/game-mode/custom-LED/keymap/макросы (только GET) | — |
 | `kbc raw <VID:PID> <op>` | raw-доступ (диагностика протокола) | `feature-get ID LEN`, `feature-send HEX`, `output-send HEX`, `input-read LEN TIMEOUT_MS`, `wl-read-pages CMD NEED`* |
 
 Формат `VID:PID` — hex через двоеточие (например `258A:010C`); RGB-цвет — `RRGGBB` (hex); эффекты/слоты — hex (например `0B`, `0x14`).
@@ -128,13 +137,21 @@ kbc raw 3554:FA09 output-send "13 05 00 ..."
 
 Один пресет = один файл `~/.config/keyboard-center/presets/<name>.toml`. Поле `version` задаёт схему файла (текущая 1); файлы без него читаются как v1; версия выше понятной — отклоняется с подсказкой.
 
+Помимо файлов есть **встроенный пресет `audio-viz`** (`type = "audio"`, яркость 255): он зашит в бинарник, виден в `kbc preset list` и в GUI у любого пользователя без настройки, удалить его нельзя. Свой файл с именем `audio-viz` перекрывает встроенный (так его можно переопределить).
+
 ```toml
 version = 1          # схема формата (для миграций)
-type = "wave"        # snake_case из RgbMode
+type = "wave"        # snake_case из RgbMode: static/breathing/wave/spectrum/ripple/rain/reactive/custom/audio
 color = "#FF5A00"    # базовый цвет
 brightness = 200     # 0..=255
 speed = 60           # 1..=255
 frame_ms = 40        # период кадра host-рендеринга, мс
+
+# Секция [audio] — только для type = "audio" (у других режимов секции нет):
+# [audio]
+# sensitivity = 0.75   # 0.1..2.0, множитель громкости после AGC (дефолт 0.75)
+# color_low = "#33FF33"  # цвет низких частот (hex), дефолт зелёный
+# color_high = "#3333FF" # цвет высоких частот (hex), дефолт синий
 ```
 
 ---
@@ -164,13 +181,13 @@ frame_ms = 40        # период кадра host-рендеринга, мс
 
 | Устройство | USB | 2.4G | BT | Статус |
 |---|---|---|---|---|
-| AULA F75 | ✅ | ✅ | 🚫 закрыто | **есть железо, работает** |
-| AULA F99 | 🟡 драйвер готов | частично (общий ресивер) | 🚫 закрыто | железа нет, протокол общий с F75 |
+| AULA F75 | ✅ Полная | ✅ Полная | 🚫 закрыто | **есть железо, работает** |
+| AULA F99 | ✅ Полная | ✅ Полная | 🚫 закрыто | **драйвер готов, работает на USB+2.4G (проверено на железе пользователя orflem)** |
 | Ajazz AK820 Pro | 🟡 драйвер готов | ⬜ | 🚫 закрыто | железа нет, по ресёрчу (Sonix SN32F299) |
 
 > **BT (Bluetooth) закрыто** по решению владельца: подключение по Bluetooth не поддерживается, батарея по BT не читается. Единственный живой канал батареи — 2.4G-ресивер. VID/PID для BT в таблице выше оставлены как идентификаторы устройств.
 
-> **Есть физически у владельца:** только **AULA F75** (USB, ревизия «BY Tech Gaming Keyboard» PID `0x010C`) + 2.4G-ресивер `3554:FA09`. Ajazz AK820 Pro и F99 физически отсутствуют — их драйверы заполняются по ресёрчу и протокольным аналогам без выдуманных команд.
+> **Есть физически у владельца:** только **AULA F75** (USB, ревизия «BY Tech Gaming Keyboard» PID `0x010C`) + 2.4G-ресивер `3554:FA09`. **AULA F99** проверена на железе пользователя (orflem) — USB + 2.4G работают полностью. Ajazz AK820 Pro физически отсутствует — драйвер заполнен по ресёрчу (wsclx), read-only диагностика `kbc ajazz-diag` готова.
 
 ---
 
@@ -239,6 +256,8 @@ sudo nixos-rebuild switch --flake .#имя_хоста
 Ставит бинарники и `.desktop`-файл на уровне пользователя. **Udev-правила при этом должен дать NixOS-модуль** (права на hidraw — системное дело).
 
 Даемон перезапускается без ребилда: `systemctl --user restart keyboard-center-daemon`. До пересоздания пресета останавливайте юнит (`systemctl --user stop keyboard-center-daemon`), иначе `kbc preset save` перезапишет эффект на лету.
+
+**Аудио-реактив в фоне, без GUI:** поставьте `programs.keyboard-center.daemon.preset = "audio-viz"` (встроенный аудио-пресет). Юнит стартует с графической сессией, сам открывает монитор `@DEFAULT_MONITOR@` и **переоткрывает поток** при перезапуске PipeWire/PulseAudio; если клавиатура или звук появятся позже старта — демон дождётся (ленивое открытие + ретраи). Нужен USB: на 2.4G/BT демон честно завершится с ошибкой «только USB».
 
 ### Вариант 3 — без флейка (NixOS / чистая сборка)
 
@@ -402,10 +421,12 @@ keyboard-control/
 ├── 99-keyboard-center.rules  # udev-правила (доступ к hidraw)
 ├── docs/
 │   ├── collect-data.md       # инструкция владельцам F99/Ajazz (сбор данных: по умолчанию read-only)
-│   └── f99-guide.md          # руководство владельцам AULA F99 (протокол/тесты/ремап)
+│   ├── f99-guide.md          # руководство владельцам AULA F99 (протокол/тесты/ремап)
+│   └── ajazz-guide.md        # руководство владельцам Ajazz AK820 Pro (протокол + read-only диагностика)
 ├── scripts/
 │   ├── collect-data.sh       # автособирает диагностику в tar.gz (по умолч. только чтение; для F99 --write-tests → f99-usb-rev.sh)
-│   └── f99-usb-rev.sh        # реверс-диагностика USB-канала F99 (дампы + по желанию write-тесты)
+│   ├── f99-usb-rev.sh        # реверс-диагностика USB-канала F99 (дампы + по желанию write-тесты)
+│   └── ajazz-usb-diag.sh     # read-only диагностика Ajazz AK820 Pro (kbc ajazz-diag) → tar.gz
 ├── data/
 │   ├── keyboard-center.desktop
 │   ├── keyboard-center.svg   # иконка приложения
@@ -446,6 +467,8 @@ keyboard-control/
 | Файл | Что внутри |
 |---|---|
 | [docs/collect-data.md](docs/collect-data.md) | Инструкция владельцам F99/Ajazz: что и как снять с реального железа (по умолчанию только чтение; для F99 есть `--write-tests`) |
+| [docs/f99-guide.md](docs/f99-guide.md) | Руководство владельцам AULA F99: протокол, тесты, ремап |
+| [docs/ajazz-guide.md](docs/ajazz-guide.md) | Руководство владельцам Ajazz AK820 Pro: протокол и read-only диагностика (`kbc ajazz-diag`) |
 | [data/firmware/FIRMWARE.md](data/firmware/FIRMWARE.md) | Паспорт дампа прошивки F75 (инструмент, MD5, команда) |
 | AGENTS.md | Подробный журнал реверс-инжиниринга протокола (рус.) |
 
@@ -467,6 +490,7 @@ keyboard-control/
 - [x] AULA F75 2.4G: батарея, эффекты/яркость/скорость в память ресивера
 - [x] AULA F75: ремап (протокол + карта слотов подтверждены дампом; CLI `kbc remap`)
 - [x] GUI RGB-студия: пресеты, слайдеры, автосохранение при закрытии
+- [x] Аудио-реактив (VU-спектр системного звука): USB, верхний ряд, градиент зелёный→синий; `kbc rgb --mode audio`, встроенный пресет `audio-viz` и фоновый `kbc daemon` (без GUI)
 - [ ] AULA F99 (подтверждение драйвера на железе; гайд для владельцев — `docs/f99-guide.md`)
 - [ ] Ajazz AK820 Pro: RGB, Screen Manager (TFT), энкодер, статика в память
 - [x] Финальная документация для сборки на Fedora (без флейка): Makefile + fedora_install.sh
@@ -492,6 +516,8 @@ git clone https://gitlab.com/dark_siders/keyboard-control && cd keyboard-control
 Скрипт по умолчанию собирает только **read-only** диагностику (не меняет настроек клавиатуры): `kbc list/info/probe/battery`, дампы конфиг-региона (F99), `lsusb` и uevent. Единственное исключение — флаг `--write-tests` **только для владельцев AULA F99**: включает аккуратные write-тесты T1–T3 (каждый тест восстанавливает исход; `collect-data.sh` делегирует их в `scripts/f99-usb-rev.sh`). Подробности — в **[docs/collect-data.md](docs/collect-data.md)**. Пришлите архив — это займёт 5 минут.
 
 **Для владельцев AULA F99** есть отдельное руководство по полной поддержке клавиатуры — **[docs/f99-guide.md](docs/f99-guide.md)**: что уже работает, какие команды ещё прогнать для индикаторов и записи ремапа, и подробный разбор формата передачи подсветки (для интерпретатора GIF/анимаций).
+
+**Для владельцев Ajazz AK820 Pro** — **[docs/ajazz-guide.md](docs/ajazz-guide.md)** и отдельный read-only скрипт `./scripts/ajazz-usb-diag.sh` (только GET-команды + `kbc ajazz-diag`, архив `~/kbc-diag-ajazz-*.tar.gz`). Драйвер Ajazz на живом железе ещё не проверялся.
 
 ---
 

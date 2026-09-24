@@ -8,6 +8,8 @@ use gtk::prelude::*;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::devices::KeyboardDevice;
 use crate::presets::{ModeParams, Preset, PresetStore};
@@ -104,6 +106,7 @@ pub fn populate_modes(dropdown: &gtk::DropDown) {
         "Риппл",
         "Дождь",
         "Реактивная",
+        "Аудио-реактив",
         "Пользовательская",
     ]);
     dropdown.set_model(Some(&model));
@@ -120,6 +123,7 @@ pub fn mode_from_index(idx: u32) -> RgbMode {
         4 => RgbMode::Ripple,
         5 => RgbMode::Rain,
         6 => RgbMode::Reactive,
+        7 => RgbMode::Audio,
         _ => RgbMode::Custom,
     }
 }
@@ -134,7 +138,8 @@ pub fn mode_to_index(mode: RgbMode) -> u32 {
         RgbMode::Ripple => 4,
         RgbMode::Rain => 5,
         RgbMode::Reactive => 6,
-        RgbMode::Custom => 7,
+        RgbMode::Audio => 7,
+        RgbMode::Custom => 8,
     }
 }
 
@@ -272,6 +277,66 @@ pub fn build_rgb_studio(
     speed_row.append(&speed_scale);
     speed_row.append(&speed_pct);
 
+    // --- Аудио-реактив (USB): настройки визуализатора --------------------
+    let audio_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    audio_box.set_visible(false);
+    let audio_label = gtk::Label::new(Some("Аудио-реактив (USB)"));
+    audio_label.add_css_class("heading");
+    audio_label.set_halign(gtk::Align::Start);
+    let audio_colors_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    audio_colors_row.set_halign(gtk::Align::Start);
+    let audio_low_entry = gtk::Entry::builder()
+        .text("#33FF33")
+        .placeholder_text("низы #RRGGBB")
+        .halign(gtk::Align::Start)
+        .width_chars(9)
+        .build();
+    let audio_high_entry = gtk::Entry::builder()
+        .text("#3333FF")
+        .placeholder_text("верхи #RRGGBB")
+        .halign(gtk::Align::Start)
+        .width_chars(9)
+        .build();
+    audio_colors_row.append(&gtk::Label::new(Some("Низы:")));
+    audio_colors_row.append(&audio_low_entry);
+    audio_colors_row.append(&gtk::Label::new(Some("Верхи:")));
+    audio_colors_row.append(&audio_high_entry);
+    let audio_sens_label = gtk::Label::new(Some("Чувствительность"));
+    audio_sens_label.set_halign(gtk::Align::Start);
+    let audio_sens_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.1, 2.0, 0.05);
+    audio_sens_scale.set_value(0.75);
+    audio_sens_scale.set_hexpand(true);
+    let audio_sens_val = gtk::Label::new(Some("0.75"));
+    audio_sens_val.set_width_chars(5);
+    audio_sens_val.set_xalign(1.0);
+    audio_sens_scale.connect_value_changed(clone!(
+        #[strong]
+        audio_sens_val,
+        move |s| {
+            audio_sens_val.set_text(&format!("{:.2}", s.value()));
+        }
+    ));
+    let audio_sens_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    audio_sens_row.append(&audio_sens_scale);
+    audio_sens_row.append(&audio_sens_val);
+    let audio_note = gtk::Label::new(Some("Спектр системного звука по USB: реагирует верхний ряд (Esc+F1..F12), буквы — базовым цветом. В память клавиатуры не пишется."));
+    audio_note.add_css_class("dim-label");
+    audio_note.set_wrap(true);
+    audio_note.set_halign(gtk::Align::Start);
+    audio_box.append(&audio_label);
+    audio_box.append(&audio_colors_row);
+    audio_box.append(&audio_sens_label);
+    audio_box.append(&audio_sens_row);
+    audio_box.append(&audio_note);
+
+    // Показывать/скрывать аудио-секцию в зависимости от выбранного режима.
+    {
+        let audio_box_c = audio_box.clone();
+        mode_dd.connect_selected_notify(move |dd| {
+            audio_box_c.set_visible(mode_from_index(dd.selected()) == RgbMode::Audio);
+        });
+    }
+
     // --- Пресеты --------------------------------------------------------
     let preset_label = gtk::Label::new(Some("Пресеты"));
     preset_label.set_halign(gtk::Align::Start);
@@ -387,6 +452,11 @@ pub fn build_rgb_studio(
     // выбранного аппаратного эффекта — в этом случае пишем свет ВЫКЛЮЧЕННЫМ
     // (a=00 во всех слотах эффектов data[58..96]), а не «свет вкл».
     let light_off: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // Stop-флаг фонового аудио-потока (аудио-реактив): GUI не может читать
+    // монитор звука в главном потоке (блокирующий read подвиснет на тишине),
+    // поэтому кадры гонит отдельный поток, а кнопки/гашение его останавливают
+    // этим флагом.
+    let audio_stop: Rc<RefCell<Option<Arc<AtomicBool>>>> = Rc::new(RefCell::new(None));
 
     // --- Файловые пресеты (kbc preset / TOML) ------------------------------
     // Те же TOML-пресеты, что использует `kbc preset`/`kbc daemon`
@@ -462,6 +532,7 @@ pub fn build_rgb_studio(
     panel.append(&bright_row);
     panel.append(&speed_label);
     panel.append(&speed_row);
+    panel.append(&audio_box);
     panel.append(&preset_label);
     panel.append(&preset_dd);
     panel.append(&pf_label);
@@ -515,7 +586,15 @@ pub fn build_rgb_studio(
         #[strong]
         live_entry,
         #[strong]
+        audio_low_entry,
+        #[strong]
+        audio_high_entry,
+        #[strong]
+        audio_sens_scale,
+        #[strong]
         frame_gen,
+        #[strong]
+        audio_stop,
         #[strong]
         light_off,
         #[strong]
@@ -524,6 +603,11 @@ pub fn build_rgb_studio(
             if let Some(dev) = fetcher2() {
                 // Свет включён host-эффектом/цветом — снимаем флаг «погашено» (10.31).
                 light_off.set(false);
+                // Любое новое «Применить» останавливает прежний аудио-поток
+                // (иначе он продолжил бы гнать кадры поверх нового режима).
+                if let Some(s) = audio_stop.borrow_mut().take() {
+                    s.store(true, Ordering::Relaxed);
+                }
                 let mode = mode_from_index(mode_dd.selected());
                 let base = Color::from_hex_checked(live_entry.text().trim())
                     .unwrap_or(Color::new(255, 90, 0));
@@ -602,6 +686,66 @@ pub fn build_rgb_studio(
                 };
                 let n_leds = dev.led_count();
                 let n_cols = dev.led_cols();
+                // Аудио-реактив (USB): фоновый поток читает монитор звука и
+                // гонит кадры. В главном потоке блокирующий read монитора
+                // подвесил бы GUI (в тишине данных нет) — поэтому отдельный
+                // поток, остановка — stop-флаг (audio_stop).
+if mode == RgbMode::Audio {
+                    let Some((vid, pid)) = vidpid_a() else {
+                        status_a0.set_text(
+                            "Устройство не подключено: откройте его на вкладке «Устройства»",
+                        );
+                        return;
+                    };
+                    // Парсим аудио-цвета и чувствительность из GUI.
+                    let low = Color::from_hex_checked(audio_low_entry.text().trim())
+                        .unwrap_or(Color::new(51, 255, 51));
+                    let high = Color::from_hex_checked(audio_high_entry.text().trim())
+                        .unwrap_or(Color::new(51, 51, 255));
+                    let sens = audio_sens_scale.value() as f32;
+                    // Проверяем доступность монитора звука синхронно с параметрами.
+                    if let Err(e) = crate::audio::AudioReactive::open_with(sens, speed) {
+                        status_a0.set_text(&format!("Аудио-реактив недоступен: {e}"));
+                        return;
+                    }
+                    // Останавливаем прежний host-таймер (иначе он продолжит
+                    // гнать старый эффект поверх аудио — «эффект без музыки»).
+                    frame_gen.set(frame_gen.get().wrapping_add(1));
+                    let stop = Arc::new(AtomicBool::new(false));
+                    *audio_stop.borrow_mut() = Some(stop.clone());
+                    let active_leds = crate::devices::audio_active_row_leds(n_leds);
+                    std::thread::spawn(move || {
+                        let mut dev = match crate::devices::open_vidpid(vid, pid) {
+                            Ok(d) => d,
+                            Err(_) => return,
+                        };
+                        let mut au = match crate::audio::AudioReactive::open_with(sens, speed) {
+                            Ok(a) => a,
+                            Err(_) => return,
+                        };
+                        while !stop.load(Ordering::Relaxed) {
+                            match au.read_vu_bands() {
+                                Ok(vu) => {
+                                    let frame = crate::audio::audio_frame(
+                                        base, brightness, &vu, n_leds, active_leds, low, high,
+                                    );
+                                    if dev.render_frame(&frame).is_err() {
+                                        // Возможен кик канала — переоткрываем.
+                                        if let Ok(d) = crate::devices::open_vidpid(vid, pid) {
+                                            dev = d;
+                                        }
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+                    status_a0.set_text(
+                        "Аудио-реактив запущен (USB): верхний ряд (Esc+F1..F12) = спектр \
+                          системного звука, буквы статичны. «Применить»/гашение останавливает поток.",
+                    );
+                    return;
+                }
                 // ВАЖНО (фикс 10.21): при повторном «Применить» НАДО
                 // останавливать прежний keepalive-поток и запускать новый,
                 // иначе новые режим/яркость/скорость не применятся (старый
@@ -656,6 +800,12 @@ pub fn build_rgb_studio(
         #[strong]
         live_entry,
         #[strong]
+        audio_low_entry,
+        #[strong]
+        audio_high_entry,
+        #[strong]
+        audio_sens_scale,
+        #[strong]
         apply,
         #[strong]
         live_status,
@@ -677,6 +827,11 @@ pub fn build_rgb_studio(
                     bright_scale.set_value(preset.params.brightness as f64);
                     speed_scale.set_value(preset.params.speed as f64);
                     live_entry.set_text(&preset.params.color);
+                    if let Some(a) = &preset.params.audio {
+                        audio_sens_scale.set_value(a.sensitivity as f64);
+                        audio_low_entry.set_text(&a.color_low);
+                        audio_high_entry.set_text(&a.color_high);
+                    }
                     apply.emit_clicked();
                     live_status.set_text(&format!(
                         "Применён пресет «{}» ({}): цвет {}, яркость {}, скорость {}",
@@ -708,6 +863,12 @@ pub fn build_rgb_studio(
         #[strong]
         live_entry,
         #[strong]
+        audio_low_entry,
+        #[strong]
+        audio_high_entry,
+        #[strong]
+        audio_sens_scale,
+        #[strong]
         live_status,
         move |_| {
             let raw = pf_entry.text().trim().to_string();
@@ -719,13 +880,22 @@ pub fn build_rgb_studio(
                 return;
             }
             let color = live_entry.text().trim().to_string();
+            let m = mode_from_index(mode_dd.selected());
+            let audio = if m == RgbMode::Audio {
+                Some(crate::presets::AudioParams {
+                    sensitivity: audio_sens_scale.value() as f32,
+                    color_low: audio_low_entry.text().trim().to_string(),
+                    color_high: audio_high_entry.text().trim().to_string(),
+                })
+            } else { None };
             let params = ModeParams {
                 version: crate::presets::PRESET_FORMAT_VERSION,
-                r#type: mode_from_index(mode_dd.selected()),
+                r#type: m,
                 color: if color.is_empty() { "#FF5A00".to_string() } else { color },
                 brightness: bright_scale.value().round() as u8,
                 speed: speed_scale.value().round() as u8,
                 frame_ms: crate::presets::DEFAULT_FRAME_MS,
+                audio,
             };
             let preset = Preset { name, params };
             match PresetStore::open().save(&preset) {
@@ -771,6 +941,12 @@ pub fn build_rgb_studio(
             }
             if name == crate::presets::DEFAULT_NAME {
                 live_status.set_text("Пресет «default» удалить нельзя");
+                return;
+            }
+            if crate::presets::is_builtin(&name) && !PresetStore::open().path(&name).is_file() {
+                live_status.set_text(&format!(
+                    "Пресет «{name}» встроенный — удалить нельзя (можно переопределить, сохранив свой)"
+                ));
                 return;
             }
             match PresetStore::open().remove(&name) {
@@ -1211,11 +1387,16 @@ pub fn build_rgb_studio(
     let off_c = light_off.clone();
     let hw_dd_off = hw_dd_for_off.clone();
     let vidpid_off = vidpid.clone();
+    let audio_stop_off = audio_stop.clone();
     live_off.connect_clicked(move |_| {
         // Свет погашен host-кадром — запоминаем (10.31): «Записать в память»
         // без выбранного эффекта сохранит свет ВЫКЛЮЧЕННЫМ (a=00 во всех слотах
         // эффектов data[58..96]).
         off_c.set(true);
+        // Останавливаем и аудио-поток, если он бежал (иначе он перезажжёт свет).
+        if let Some(s) = audio_stop_off.borrow_mut().take() {
+            s.store(true, Ordering::Relaxed);
+        }
         // Гашение = чистое «выключено». Сбрасываем выбор аппаратного эффекта,
         // иначе «Записать в память» сохранит эффект со светом вкл (все a=09)
         // и свет вернётся после перезагрузки клавиатуры (фикс 10.35).

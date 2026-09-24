@@ -55,6 +55,7 @@
           libgcc
           udev # для hidapi (libudev)
           systemdLibs
+          pulseaudio # для audio-reactive (libpulse-simple: монитор системного звука)
         ];
 
         # Общие аргументы для cargo.

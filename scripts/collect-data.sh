@@ -709,6 +709,15 @@ EOF
         echo "устройство не найдено в kbc list" > "$dir/12-keymap-list.txt"
     fi
 
+    # 12b. Ajazz: read-only дамп протокола (kbc ajazz-diag) — device-info, LED,
+    #      game-mode, custom-LED, keymap Default/FN1 + заводские матрицы, макросы.
+    #      Только GET-команды, ничего не пишет. Для AULA — не применимо.
+    if [[ "$DEVICE" == "ajazz" && -n "$pid_auto" ]]; then
+        echo "[12b] kbc ajazz-diag (read-only дамп Ajazz)"
+        kbc ajazz-diag "$pid_auto" > "$dir/28-ajazz-diag.txt" 2>&1 \
+            || echo "# kbc ajazz-diag: не удалось (см. вывод)" > "$dir/28-ajazz-diag.txt"
+    fi
+
     # 13. Системная информация: lsusb + uevent hidraw
     echo "[13] система (lsusb, uevent)"
     lsusb > "$dir/13-lsusb.txt" 2>&1 || true
@@ -737,6 +746,7 @@ EOF
         echo "  * 08-keymap-fn1       — keymap FN1 (0x83)"
         echo "  * 09/10/11-конфиг     — снимки до/после + дифф (индикаторы Caps/Num/Scroll)"
         echo "  * 12-keymap-list.txt  — читаемая карта keymap Default+FN1 (kbc remap --list)"
+        echo "  * 28-ajazz-diag.txt   — Ajazz: read-only дамп протокола (kbc ajazz-diag; только GET)"
         echo "  * 13/14-lsusb-uevent  — дерево USB и usage pages hidraw"
         echo "  * 16/17/18 — F99: config remap до/после/дифф (B2.5, запись ремапа в софте)"
         echo "  * 19/20/21 — F99: config индикаторы до/после/дифф (B2.6, чистый дифф Caps/Num/Scroll)"

@@ -36,6 +36,10 @@ pub const RGB_LED_COUNT: usize = 113;
 /// Количество колонок в 96% раскладке (для host-эффектов волны).
 pub const RGB_COLS: usize = 24;
 
+/// LED-индексы активного ряда (верхний ряд Esc=0, F1=6, далее шаг 6 до F12=72)
+/// для аудио-реактива.
+pub const AUDIO_ACTIVE_ROW_LEDS: &[usize] = &[0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72];
+
 /// Vendor usage page командного канала F99 (как F75).
 const REPORT_FEATURE: u8 = 0x06;
 

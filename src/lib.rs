@@ -6,6 +6,7 @@ pub mod gui;
 pub mod presets;
 pub mod profiles;
 pub mod screen;
+pub mod audio;
 
 // Переиспользуемые типы-композиты (цвет, клавиша и т.д.)
 pub mod types;

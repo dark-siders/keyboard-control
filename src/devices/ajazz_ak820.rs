@@ -10,6 +10,7 @@
 // по 56 байт полезной нагрузки с инкрементом адреса (get_many/set_many).
 
 use super::hid::HidBridge;
+use super::hidshell;
 use super::{Error, KeyboardDevice, Result};
 use crate::types::*;
 use std::time::{Duration, Instant};
@@ -139,6 +140,9 @@ impl AjazzMode {
             RgbMode::Rain => Self::Falling,
             RgbMode::Reactive => Self::Explode,
             RgbMode::Custom => Self::Custom,
+            // Аудио-реактив — host-фича (спектр звука стримится с ПК), у Ajazz
+            // аппаратного «послушать звук» нет; ближайший статичный режим.
+            RgbMode::Audio => Self::Custom,
         }
     }
 }
@@ -1017,6 +1021,101 @@ impl KeyboardDevice for AjazzAk820 {
             });
         }
         Ok(macros)
+    }
+
+    // --- Диагностика (read-only) -----------------------------------------
+
+    /// Read-only дамп всех GET-команд протокола. Формат: `ключ=hex` по строке
+    /// на секцию; ошибки отдельных команд — `ключ_error=…` (дамп продолжается).
+    /// Ничего в устройство не пишется.
+    fn diagnostic_dump(&self) -> Result<String> {
+        let mut out = String::new();
+        out.push_str("# Ajazz AK820 Pro — read-only dump (все команды GET)\n");
+        out.push_str(&format!("name={}\n", self.name()));
+        out.push_str(&format!(
+            "vid_pid={:04X}:{:04X}\n",
+            self.bridge.vid, self.bridge.pid
+        ));
+        out.push_str(&format!("connection={}\n", self.bridge.connection.label()));
+
+        // device-info (48 байт; [17] — заряд).
+        match self.get(cmd::GET_DEVICE_INFO, 48) {
+            Ok(b) => {
+                out.push_str(&format!("device_info={}\n", hidshell::hex_dump(&b)));
+                out.push_str(&format!(
+                    "battery={}\n",
+                    b.get(17).copied().unwrap_or(0)
+                ));
+            }
+            Err(e) => out.push_str(&format!("device_info_error={e}\n")),
+        }
+
+        // Текущий глобальный LED-эффект (16 байт, [0] — режим).
+        match self.get(cmd::GET_LED_EFFECT, 16) {
+            Ok(b) => {
+                out.push_str(&format!("led_effect={}\n", hidshell::hex_dump(&b)));
+                out.push_str(&format!(
+                    "led_effect_mode=0x{:02X}\n",
+                    b.first().copied().unwrap_or(0)
+                ));
+            }
+            Err(e) => out.push_str(&format!("led_effect_error={e}\n")),
+        }
+
+        // game-mode-блок (56 байт, задел wsclx).
+        match self.get(cmd::GET_GAME_MODE, 56) {
+            Ok(b) => out.push_str(&format!("game_mode={}\n", hidshell::hex_dump(&b))),
+            Err(e) => out.push_str(&format!("game_mode_error={e}\n")),
+        }
+
+        // custom-LED буфер (512 байт = 128 × RGBA).
+        match self.get_many(cmd::GET_CUSTOM_LED_DATA, LED_COUNT * 4) {
+            Ok(b) => out.push_str(&format!("custom_led={}\n", hidshell::hex_dump(&b))),
+            Err(e) => out.push_str(&format!("custom_led_error={e}\n")),
+        }
+
+        // keymap: текущий Default/FN1 + заводские матрицы (все read-only).
+        for (label, cmd_byte) in [
+            ("keymap_base", cmd::GET_KEY),
+            ("keymap_fn", cmd::GET_FN_KEY),
+            ("keymap_default_base", cmd::GET_DEFAULT_KEY_MATRIX),
+            ("keymap_default_fn", cmd::GET_DEFAULT_FN_KEY_MATRIX),
+        ] {
+            match self.get_many(cmd_byte, KEYMAP_BYTES) {
+                Ok(b) => out.push_str(&format!("{label}={}\n", hidshell::hex_dump(&b))),
+                Err(e) => out.push_str(&format!("{label}_error={e}\n")),
+            }
+        }
+
+        // Макросы: index (400 б) + декодированные события.
+        match self.get_many(cmd::GET_MACRO, 400) {
+            Ok(b) => out.push_str(&format!("macros_index={}\n", hidshell::hex_dump(&b))),
+            Err(e) => out.push_str(&format!("macros_index_error={e}\n")),
+        }
+        match self.get_macros() {
+            Ok(ms) => {
+                out.push_str(&format!("macros_count={}\n", ms.len()));
+                for m in &ms {
+                    let ev: Vec<String> = m
+                        .events
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{}:{}:{}:{}",
+                                e.delay_ms,
+                                e.key_code,
+                                e.family,
+                                if e.is_press { 1 } else { 0 }
+                            )
+                        })
+                        .collect();
+                    out.push_str(&format!("macro_{}={}\n", m.id, ev.join(",")));
+                }
+            }
+            Err(e) => out.push_str(&format!("macros_error={e}\n")),
+        }
+
+        Ok(out)
     }
 
     // --- System ----------------------------------------------------------

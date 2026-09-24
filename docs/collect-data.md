@@ -5,6 +5,8 @@
 > **Зачем:** у разработчика эти две модели физически отсутствуют — драйверы под них написаны по протокольным аналогам и ресёрчу и ещё не проверялись на реальных клавиатурах. Ваши снимки данных позволят подтвердить или поправить драйверы и сканер.
 >
 > **ВАЖНО: по умолчанию в этом документе только ЧТЕНИЕ.** Основной сбор не пишет в память клавиатуры и не меняет её настройки. Запись в чужую клавиатуру исключена. **Единственное исключение** — для владельцев **AULA F99**: скрипт `collect-data.sh` с флагом `--write-tests` делегирует write-тесты T1–T3 в `scripts/f99-usb-rev.sh` (каждый тест запрашивает подтверждение и **восстанавливает исход**). Запускайте его только если готовы к кратковременной записи в память клавиатуры (подробно см. `docs/f99-guide.md`, секция B2.10).
+>
+> **Ajazz AK820 Pro:** для него есть отдельный read-only гайд и скрипт — `docs/ajazz-guide.md` и `scripts/ajazz-usb-diag.sh` (только GET-команды, в т.ч. `kbc ajazz-diag`). Для Ajazz write-тестов пока НЕТ.
 
 ---
 
@@ -21,6 +23,8 @@
 # явно указать модель, если автодетект не сработал:
 ./scripts/collect-data.sh --device f99
 ./scripts/collect-data.sh --device ajazz
+# для Ajazz AK820 Pro есть отдельный read-only сбор (только GET + kbc ajazz-diag):
+./scripts/ajazz-usb-diag.sh --sg
 # ТОЛЬКО для AULA F99: включить write-тесты T1–T3 (скрипт сам вызовет scripts/f99-usb-rev.sh;
 # каждая запись подтверждается по Y/N и после теста восстанавливается):
 ./scripts/collect-data.sh --device f99 --sg --write-tests
@@ -237,7 +241,11 @@ Ajazz AK820 Pro — Sonix SN32F299 (wsclx-протокол). От вас нуж�
 1. сканер видит клавиатуру (ревизия 0x8009 / 0x800A / 0x8099);
 2. разведка интерфейсов/usage pages совпадает (control 0xFF13, data 0xFF68);
 3. батарея читается;
-4. идентификатор устройства.
+4. идентификатор устройства;
+5. **отвечает ли транспорт `0xAA`/`0x55`** на GET-команды (главный открытый вопрос — см. `kbc ajazz-diag`).
+
+> [!TIP]
+> Быстрее и полнее — отдельный скрипт **`./scripts/ajazz-usb-diag.sh`** (read-only): он выполняет шаги 3.1–3.6 ниже плюс `kbc ajazz-diag` и `kbc remap --list`, и упаковывает всё в `~/kbc-diag-ajazz-*.tar.gz`. Подробности — `docs/ajazz-guide.md`.
 
 ### Шаг 3.1. Сканер
 
@@ -281,6 +289,19 @@ kbc rgb 0C45:8009 --mode spectrum --hold 100
 > [!IMPORTANT]
 > НЕ выполняйте `kbc save` / `kbc rgb --light-on` / `kbc rgb --light-off` — это запись в память. В рамках этого сбора — только чтение.
 
+### Шаг 3.5b. Read-only дамп протокола `kbc ajazz-diag` (главный шаг)
+
+```bash
+kbc ajazz-diag 0C45:8009 > ajazz_diag.txt
+# читаемая карта keymap (Default+FN1):
+kbc remap 0C45:8009 --list > ajazz_keymap_list.txt
+```
+
+Команда выполняет **только GET-команды** (device-info, LED-эффект, game-mode, custom-LED буфер, keymap Default/FN1 + заводские матрицы, макросы) и печатает `ключ=hex` по строке на секцию; при ошибке команды — `ключ_error=…` и дамп продолжается. Ничего в клавиатуру не пишет. Формат и разбор — в `docs/ajazz-guide.md` (раздел C).
+
+> [!IMPORTANT]
+> Строки `*_error=Protocol` — это тоже ценный результат (канал отличается от ожидаемого). Приложите вывод как есть.
+
 ### Шаг 3.6. Системная информация
 
 ```bash
@@ -305,8 +326,9 @@ udevadm info --attribute-walk /dev/hidraw<номер> | grep -E "idVendor|idProd
 | 5 | дамп keymap Default+FN1 (F99, `0x83`) | `f99_keymap_default.txt`, `f99_keymap_fn1.txt` |
 | 6 | дифф конфига до/после Caps/Num/Scroll (F99) | `f99_cfg_before.txt`, `f99_cfg_after.txt` |
 | 7 | читаемая карта keymap (`kbc remap <pid> --list`, Default+FN1) — F99 и Ajazz | `12-keymap-list.txt` |
-| 8 | `lsusb` | `lsusb.txt` |
-| 9 | uevent командного hidraw | `uevent.txt` |
+| 8 | read-only дамп Ajazz (`kbc ajazz-diag <pid>`) | `28-ajazz-diag.txt` / `ajazz_diag.txt` |
+| 9 | `lsusb` | `lsusb.txt` |
+| 10 | uevent командного hidraw | `uevent.txt` |
 
 Если какой-то шаг дал неожиданный результат (ошибка, другой PID, другой usage page) — обязательно приложите вывод: это не «провал», а ценная информация для поправки драйвера.
 
