@@ -408,6 +408,17 @@ impl KeyboardDevice for AulaF99 {
         })
     }
 
+    // --- Keymap labels (GUI click-editor) -------------------------------
+    // Карта слотов F99 пока не снята (нужен живой дамп слотов, как у F75).
+    // Возвращаем None с пояснением — GUI покажет понятное сообщение.
+    fn slot_label_name(&self, _slot: u8) -> Option<&'static str> {
+        Some("F99: карта слотов не снята (нужен живой дамп)")
+    }
+
+    fn slot_for_keycode(&self, _keycode: u16) -> Option<u8> {
+        Some(0) // заглушка; GUI покажет сообщение через label
+    }
+
     // --- Screen (не поддерживается) ------------------------------------
     fn set_screen_image(&self, _frame: ScreenFrame) -> Result<()> {
         Err(Error::Unsupported("TFT-экран не поддерживается AULA F99"))

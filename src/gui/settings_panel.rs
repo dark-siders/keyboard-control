@@ -4,6 +4,7 @@
 use gtk::glib::clone;
 use gtk::prelude::*;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::devices::KeyboardDevice;
@@ -74,6 +75,9 @@ pub fn build_settings_panel(
     sleep_row.append(&sleep_unit);
     panel.append(&sleep_row);
 
+    // Флаг: показывать ли Polling/Debounce/Sleep (F99 не поддерживает)
+    let show_sys_controls: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+
     // --- Применение ------------------------------------------------------
     let apply_btn = gtk::Button::with_label("Применить все настройки");
     apply_btn.add_css_class("suggested-action");
@@ -85,12 +89,33 @@ pub fn build_settings_panel(
     panel.append(&status);
 
     // --- Обработчики --------------------------------------------------------
-    let fetcher2 = fetcher.clone();
+let fetcher2 = fetcher.clone();
+    let show_sys_controls_r = show_sys_controls.clone();
+    let poll_header_c = poll_header.clone();
+    let poll_dd_c = poll_dd.clone();
+    let debounce_header_c = debounce_header.clone();
+    let debounce_row_c = debounce_row.clone();
+    let sleep_header_c = sleep_header.clone();
+    let sleep_row_c = sleep_row.clone();
     refresh_btn.connect_clicked(clone!(
         #[strong]
         battery_label,
         #[strong]
         status,
+        #[strong]
+        show_sys_controls_r,
+        #[strong]
+        poll_header_c,
+        #[strong]
+        poll_dd_c,
+        #[strong]
+        debounce_header_c,
+        #[strong]
+        debounce_row_c,
+        #[strong]
+        sleep_header_c,
+        #[strong]
+        sleep_row_c,
         move |_| {
         if let Some(dev) = fetcher2() {
             let mut levels = "нет".to_string();
@@ -111,8 +136,6 @@ pub fn build_settings_panel(
                 }
                 _ => {
                     battery_label.set_text("Батарея: не поддерживается");
-                    // Подсказка для USB (журнал 10.51): проводной канал 0x06
-                    // заряда не отдаёт — читается только 2.4G.
                     if dev.connection_type() == crate::types::ConnectionType::Usb {
                         status.set_text(
                             "По USB заряд не читается (проводной канал без данных о заряде). \
@@ -122,7 +145,20 @@ pub fn build_settings_panel(
                     }
                 }
             }
-            status.set_text(&format!("Обновлено. Заряд: {}", levels));
+            // Скрываем Polling/Debounce/Sleep для F99 (не поддерживает)
+            let is_f99 = dev.name().contains("F99");
+            show_sys_controls_r.set(!is_f99);
+            poll_header_c.set_visible(!is_f99);
+            poll_dd_c.set_visible(!is_f99);
+            debounce_header_c.set_visible(!is_f99);
+            debounce_row_c.set_visible(!is_f99);
+            sleep_header_c.set_visible(!is_f99);
+            sleep_row_c.set_visible(!is_f99);
+            if is_f99 {
+                status.set_text("F99: Polling/Debounce/Sleep не поддерживаются прошивкой");
+            } else {
+                status.set_text(&format!("Обновлено. Заряд: {}", levels));
+            }
         } else {
             status.set_text("Устройство не подключено");
         }
@@ -149,17 +185,24 @@ pub fn build_settings_panel(
         let sleep = sleep_spin.value() as u16;
         if let Some(dev) = fetcher3() {
             let mut errors = Vec::new();
-            if let Err(e) = dev.set_polling_rate(rate) {
-                errors.push(format!("polling: {e}"));
-            }
-            if let Err(e) = dev.set_debounce(debounce) {
-                errors.push(format!("debounce: {e}"));
-            }
-            if let Err(e) = dev.set_sleep_timer(sleep) {
-                errors.push(format!("sleep: {e}"));
+            let is_f99 = dev.name().contains("F99");
+            if !is_f99 {
+                if let Err(e) = dev.set_polling_rate(rate) {
+                    errors.push(format!("polling: {e}"));
+                }
+                if let Err(e) = dev.set_debounce(debounce) {
+                    errors.push(format!("debounce: {e}"));
+                }
+                if let Err(e) = dev.set_sleep_timer(sleep) {
+                    errors.push(format!("sleep: {e}"));
+                }
             }
             if errors.is_empty() {
-                status.set_text("Настройки применены");
+                if is_f99 {
+                    status.set_text("F99: Polling/Debounce/Sleep не поддерживаются, пропущено");
+                } else {
+                    status.set_text("Настройки применены");
+                }
             } else {
                 status.set_text(&format!("Ошибки: {}", errors.join(", ")));
             }

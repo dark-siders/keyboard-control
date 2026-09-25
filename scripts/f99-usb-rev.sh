@@ -8,9 +8,12 @@
 #   2. управляются ли индикаторы Caps/Num/Scroll через boot output-reports;
 #   3. какой селектор data[10] включает per-key self-define цвета
 #      (записанные в color table через 06 0A) — чтобы оживить set_rgb_color.
+#   4. работает ли запись keymap (remaп) — и через какой CMD (0x03 не работает);
+#   5. работает ли per-key color table write (06 0A) + self-define селектор;
+#   6. где в конфиге живут биты индикаторов Caps/Num/Scroll (diff конфига).
 #
 # ВАЖНО: по умолчанию скрипт НИЧЕГО НЕ ПИШЕТ в клавиатуру — только читает.
-# Write-тесты (T1–T3) запускаются ИСКЛЮЧИТЕЛЬНО с флагом --write-tests
+# Write-тесты (T1–T6) запускаются ИСКЛЮЧИТЕЛЬНО с флагом --write-tests
 # и после каждого теста ВСЕГДА восстанавливают исходные данные.
 # Маркер 5A A5 на data[126..127] никогда не трогается:
 # затирание маркера = откат клавиатуры к заводским настройкам (журнал 10.36).
@@ -19,7 +22,7 @@
 #   --device f99    — только AULA F99 (по умолчанию; autodetect по PID+PSD)
 #   --sg            — оборачивать команды через `sg plugdev -c "…"`
 #                     (нужно, если текущая сессия не видит группу plugdev)
-#   --write-tests   — разрешить секции T1–T3 (запись в клавиатуру)
+#   --write-tests   — разрешить секции T1–T6 (запись в клавиатуру)
 #   --auto          — без интерактивных вопросов (write-тесты пропускаются)
 #   -h|--help       — показать справку
 # =============================================================================
@@ -367,7 +370,194 @@ t3_selfdefine_hunt() {
         warn "color table после restore отличается от снимка — сверьте вручную"
     fi
 }
-
+ 
+# T4: Keymap Write — поиск рабочего канала записи ремапа (0x03 не работает на F99)
+t4_keymap_write() {
+    hdr "T4: Keymap Write — поиск рабочего канала записи ремапа"
+    printf '\nT4: Keymap Write — поиск рабочего канала записи ремапа\n\n' > "$OUT_DIR/T4-keymap-write.txt"
+ 
+    # 1. Снимок текущего keymap Default (layer 0)
+    local old_km new_km readback
+    old_km="$(run_kbc raw "$PID_USB" feature-send "$(packet_read_keymap 0)" >/dev/null 2>&1; \
+             run_kbc raw "$PID_USB" feature-get 06 520 | feature_get_line | tr -d '\r' )"
+    [ -n "$old_km" ] || { warn "keymap не прочитался — тест невозможен"; return 0; }
+    printf '%s\n' "$old_km" > "$OUT_DIR/T4-keymap-before.txt"
+    ok "keymap Default сохранён → $OUT_DIR/T4-keymap-before.txt"
+ 
+    # 2. Модифицируем один слот для теста (слот 73 = "=" -> remap на "A" usage 0x04)
+    # Формат слота: 4 байта [page, 0, 0, usage]. Press = page 0x00, usage = 0x04 (A)
+    # Слот 73 = байты 292..295 в 512-байтной таблице (73 * 4 = 292)
+    new_km="$(printf '%s' "$old_km" | awk '{ for(i=1;i<=NF;i++) if(i>=293 && i<=296) $i="00 00 00 04"; print }')"
+ 
+    if ! ask_yn "Записать изменённый keymap (слот 73 '=' -> 'A') и восстановить? (тест записи ремапа)"; then
+        echo "T4 пропущен" >> "$OUT_DIR/T4-keymap-write.txt"
+        return 0
+    fi
+ 
+    # Пробуем записать через 0x03 (известный нерабочий на F99, но пробуем для подтверждения)
+    # Формат: 06 03 <layer> 00 01 00 00 FF + 512 байт слотов + 5A A5 на конце
+    local write_pkt
+    write_pkt="$(printf '06 03 00 00 01 00 00 FF %s 5A A5' \
+        "$(printf '%s' "$new_km" | awk '{ s=$1; for(i=2;i<=NF;i++) s=s " " $i; print s }')"; \
+        yes 00 | head -0 | tr '\n' ' ')"
+ 
+    echo "— записываю keymap через 0x03 (layer 0)..." >> "$OUT_DIR/T4-keymap-write.txt"
+    run_kbc raw "$PID_USB" feature-send "$write_pkt" >> "$OUT_DIR/T4-keymap-write.txt" 2>&1 || true
+    sleep 2
+ 
+    # Readback
+    readback="$(run_kbc raw "$PID_USB" feature-send "$(packet_read_keymap 0)" >/dev/null 2>&1; \
+               run_kbc raw "$PID_USB" feature-get 06 520 | feature_get_line | tr -d '\r' )"
+    local slot73_before slot73_after
+    slot73_before="$(printf '%s' "$old_km" | awk '{print $293,$294,$295,$296}')"
+    slot73_after="$(printf '%s' "$readback" | awk '{print $293,$294,$295,$296}')"
+    echo "— readback слот 73: $slot73_after (было $slot73_before, ожидалось 00 00 00 04)" >> "$OUT_DIR/T4-keymap-write.txt"
+    if [ "x$slot73_after" = "x00 00 00 04" ]; then
+        ok "РЕМАП ЗАПИСАЛСЯ через 0x03!"
+    else
+        warn "0x03 не сработал (readback: $slot73_after) — ищем альтернативу"
+    fi
+ 
+    # ВОССТАНОВЛЕНИЕ оригинала
+    echo "— восстанавливаю оригинальный keymap..." >> "$OUT_DIR/T4-keymap-write.txt"
+    restore_pkt="$(printf '06 03 00 00 01 00 00 FF %s 5A A5' \
+        "$(printf '%s' "$old_km" | awk '{ s=$1; for(i=2;i<=NF;i++) s=s " " $i; print s }')")"
+    run_kbc raw "$PID_USB" feature-send "$restore_pkt" >> "$OUT_DIR/T4-keymap-write.txt" 2>&1 || true
+    sleep 2
+    readback="$(run_kbc raw "$PID_USB" feature-send "$(packet_read_keymap 0)" >/dev/null 2>&1; \
+               run_kbc raw "$PID_USB" feature-get 06 520 | feature_get_line | tr -d '\r' )"
+    slot73_after="$(printf '%s' "$readback" | awk '{print $293,$294,$295,$296}')"
+    if [ "x$slot73_after" = "x$slot73_before" ]; then
+        ok "восстановлено: слот 73 = $slot73_after"
+    else
+        warn "ВОССТАНОВЛЕНИЕ НЕ СОВПАЛО: $slot73_after (ожидалось $slot73_before)"
+    fi
+}
+ 
+# T5: Color Table Write — per-key RGB + self-define hunt
+t5_color_table_write() {
+    hdr "T5: Color Table Write — per-key RGB + self-define hunt"
+    printf '\nT5: Color Table Write — per-key RGB + self-define hunt\n\n' > "$OUT_DIR/T5-color-write.txt"
+ 
+    # Снимок текущей color table
+    local ct_before ct_after
+    ct_before="$(run_kbc raw "$PID_USB" feature-send "$(packet_read 0x8A 0x0200)" >/dev/null 2>&1; \
+                 run_kbc raw "$PID_USB" feature-get 06 520 | feature_get_line | tr -d '\r' )"
+    [ -n "$ct_before" ] || { warn "color table не прочиталась — тест невозможен"; return 0; }
+ 
+    # Пишем 6 разных цветов на клавиши 0..5 (R,G,B,C,M,Y)
+    # Формат: 128 записей x 4 байта (RR GG BB XX). Поля 9..20 = ключи 0..2, меняем 0..5
+    local pat
+    pat="$(printf '%s' "$ct_before" | awk '{
+        # key 0 = Red
+        $9="FF";  $10="00"; $11="00"; $12="00"
+        # key 1 = Green
+        $13="00"; $14="FF"; $15="00"; $20="00"
+        # key 2 = Blue
+        $17="00"; $18="00"; $19="FF"; $20="00"
+        # key 3 = Cyan
+        $21="00"; $22="FF"; $23="FF"; $24="00"
+        # key 4 = Magenta
+        $25="FF"; $26="00"; $27="FF"; $28="00"
+        # key 5 = Yellow
+        $29="FF"; $30="FF"; $31="00"; $32="00"
+        print }')"
+ 
+    if ! ask_yn "Записать 6 цветов на клавиши 0..5 (R,G,B,C,M,Y) и найти self-define?"; then
+        echo "T5 пропущен" >> "$OUT_DIR/T5-color-write.txt"
+        return 0
+    fi
+ 
+    pat_data="$(printf '%s' "$pat" | awk '{ s=$9; for (i=10; i<=NF; i++) s=s " " $i; print s }')"
+    ct_write="$(printf '06 0A 00 00 01 00 00 02 %s' "$pat_data")"
+ 
+    echo "— записываю 6 цветов на клавиши 0..5 (06 0A, 512 б)..." >> "$OUT_DIR/T5-color-write.txt"
+    run_kbc raw "$PID_USB" feature-send "$ct_write" >> "$OUT_DIR/T5-color-write.txt" 2>&1 || true
+    sleep 2
+ 
+    # readback-verify
+    ct_after="$(run_kbc raw "$PID_USB" feature-send "$(packet_read 0x8A 0x0200)" >/dev/null 2>&1; \
+               run_kbc raw "$PID_USB" feature-get 06 520 | feature_get_line | tr -d '\r' )"
+    local rb1
+    rb1="$(printf '%s' "$ct_after" | awk '{for(i=9;i<=32;i++) printf $i" "; print ""}')"
+    echo "— readback ключи 0..5: $rb1" >> "$OUT_DIR/T5-color-write.txt"
+    if [ "x$rb1" = "xFF 00 00 00 00 FF 00 00 00 FF 00 00 FF 00 00 FF FF 00 00 FF FF 00 00" ]; then
+        ok "color table запись работает (readback подтверждает 6 цветов)"
+    else
+        warn "readback цветов не совпал: $rb1"
+    fi
+ 
+    echo "— теперь ищите эффект Self-define: жмите Fn+\\ до НЕПОДВИЖНОГО одноцветного эффекта" >> "$OUT_DIR/T5-color-write.txt"
+    if ask_yn "Нашли static/self-define? Переключайте Fn+\\ до однотонного эффекта, затем Enter"; then
+        local snap snap_sel
+        snap="$(run_kbc raw "$PID_USB" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1; \
+               run_kbc raw "$PID_USB" feature-get 06 520 | feature_get_line | tr -d '\r' )"
+        snap_sel="$(printf '%s' "$snap" | awk '{print $19}')"
+        echo "  — актуальный селектор data[10] = 0x$snap_sel" >> "$OUT_DIR/T5-color-write.txt"
+        printf '%s\n' "$snap" > "$OUT_DIR/T5-config-after.txt"
+        ok "конфиг при найденном эффекте сохранён (data[10]=0x$snap_sel)"
+ 
+        if ask_yn "Клавиши 0..5 светятся своими цветами (R,G,B,C,M,Y)?"; then
+            ok "SELF-DEFINE НАЙДЕН: data[10]=0x$snap_sel включает per-key цвета!"
+            echo "  — ПОЛОЖИТЕЛЬНЫЙ результат: селектор self-define = 0x$snap_sel" >> "$OUT_DIR/T5-color-write.txt"
+        else
+            warn "цветов нет — селектор другой или требуется другая запись"
+            echo "  — self-define не подтверждён (data[10]=0x$snap_sel)" >> "$OUT_DIR/T5-color-write.txt"
+        fi
+    else
+        echo "  — снимок после эффекта не делался" >> "$OUT_DIR/T5-color-write.txt"
+    fi
+ 
+    # ВОССТАНОВЛЕНИЕ
+    echo "— восстанавливаю исходную color table..." >> "$OUT_DIR/T5-color-write.txt"
+    ct_restore="$(printf '06 0A 00 00 01 00 00 02 %s' "$(printf '%s' "$ct_before" | \
+        awk '{ s=$9; for (i=10; i<=NF; i++) s=s " " $i; print s }')")"
+    run_kbc raw "$PID_USB" feature-send "$ct_restore" >> "$OUT_DIR/T5-color-write.txt" 2>&1 || true
+    sleep 2
+ 
+    ct_check="$(run_kbc raw "$PID_USB" feature-send "$(packet_read 0x8A 0x0200)" >/dev/null 2>&1; \
+               run_kbc raw "$PID_USB" feature-get 06 520 | feature_get_line | tr -d '\r' )"
+    if [ "x$ct_check" = "x$ct_before" ]; then
+        ok "color table восстановлена (байт-в-байт)"
+    else
+        warn "color table после restore отличается — сверьте вручную"
+    fi
+}
+ 
+# T6: Indicators Config Diff — поиск байтов Caps/Num/Scroll в конфиге
+t6_indicators_diff() {
+    hdr "T6: Indicators Config Diff — поиск байтов Caps/Num/Scroll в конфиге"
+    printf '\nT6: Indicators Config Diff — поиск байтов Caps/Num/Scroll\n\n' > "$OUT_DIR/T6-indicators-diff.txt"
+ 
+    # Снимок конфига ДО
+    echo "# feature-send: чтение конфига ДО" > "$OUT_DIR/T6-config-before.txt"
+    run_kbc raw "$PID_USB" feature-send "$(packet_read 0x84 0x0080)" >> "$OUT_DIR/T6-config-before.txt" 2>&1 || true
+    run_kbc raw "$PID_USB" feature-get 06 520 >> "$OUT_DIR/T6-config-before.txt"
+    ok "снимок ДО сохранён → $OUT_DIR/T6-config-before.txt"
+ 
+    echo "  Нажмите-отпустите Caps Lock, Num Lock, Scroll Lock (по одному разу)."
+    if ! ask_yn "Готово? Снимок ПОСЛЕ?"; then
+        echo "T6 пропущен" >> "$OUT_DIR/T6-indicators-diff.txt"
+        return 0
+    fi
+ 
+    # Снимок ПОСЛЕ
+    run_kbc raw "$PID_USB" feature-send "$(packet_read 0x84 0x0080)" >> "$OUT_DIR/T6-config-after.txt" 2>&1 || true
+    run_kbc raw "$PID_USB" feature-get 06 520 >> "$OUT_DIR/T6-config-after.txt"
+    ok "снимок ПОСЛЕ сохранён → $OUT_DIR/T6-config-after.txt"
+ 
+    # Diff
+    if command -v diff >/dev/null 2>&1; then
+        diff -u "$OUT_DIR/T6-config-before.txt" "$OUT_DIR/T6-config-after.txt" > "$OUT_DIR/T6-config-ind-diff.txt" 2>&1 || true
+        ok "дифф сохранён → $OUT_DIR/T6-config-ind-diff.txt"
+        cat "$OUT_DIR/T6-config-ind-diff.txt"
+    else
+        warn "diff не найден — сравните вручную T6-config-before.txt и T6-config-after.txt"
+    fi
+ 
+    echo "  Ищите изменённые байты ВНЕ эффект-таблицы [58..125] — это и есть слоты индикаторов."
+}
+ 
 # ---------- summary ----------
 make_summary() {
     hdr "Шаг 9: сводка"
@@ -419,12 +609,15 @@ collect_readonly
 
 if [ "$WRITE_TESTS" = "1" ] && [ "$AUTO" != "1" ]; then
     warn "Включены write-тесты — они ПИШУТ в клавиатуру, но каждый восстанавливает исходные данные"
-    if ! ask_yn "Продолжить с write-тестами (T1–T3)?"; then
+    if ! ask_yn "Продолжить с write-тестами (T1–T6)?"; then
         warn "write-тесты отменены"
     else
         t1_config_roundtrip
         t2_indicators
         t3_selfdefine_hunt
+        t4_keymap_write
+        t5_color_table_write
+        t6_indicators_diff
     fi
 else
     warn "write-тесты не запущены (нужен флаг --write-tests и не --auto)"
