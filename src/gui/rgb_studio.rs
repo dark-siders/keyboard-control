@@ -291,6 +291,15 @@ pub fn build_rgb_studio(
     speed_row.append(&speed_scale);
     speed_row.append(&speed_pct);
 
+    // --- Базовый цвет (общий для всех режимов, в т.ч. аудио) ---------------
+    // Определяем рано, чтобы аудио-секция могла синхронизироваться с ним.
+    let live_entry = gtk::Entry::builder()
+        .text("#FF5A00")
+        .placeholder_text("#RRGGBB")
+        .halign(gtk::Align::Start)
+        .width_chars(9)
+        .build();
+
     // --- Аудио-реактив (USB): настройки визуализатора --------------------
     let audio_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
     audio_box.set_visible(false);
@@ -299,6 +308,13 @@ pub fn build_rgb_studio(
     audio_label.set_halign(gtk::Align::Start);
     let audio_colors_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     audio_colors_row.set_halign(gtk::Align::Start);
+    // Базовый цвет (фон) — синхронизирован с полем «Живой цвет» ниже.
+    let audio_base_entry = gtk::Entry::builder()
+        .text("#FF5A00")
+        .placeholder_text("#RRGGBB")
+        .halign(gtk::Align::Start)
+        .width_chars(9)
+        .build();
     let audio_low_entry = gtk::Entry::builder()
         .text("#33FF33")
         .placeholder_text("низы #RRGGBB")
@@ -311,10 +327,38 @@ pub fn build_rgb_studio(
         .halign(gtk::Align::Start)
         .width_chars(9)
         .build();
+    audio_colors_row.append(&gtk::Label::new(Some("Базовый:")));
+    audio_colors_row.append(&audio_base_entry);
     audio_colors_row.append(&gtk::Label::new(Some("Низы:")));
     audio_colors_row.append(&audio_low_entry);
     audio_colors_row.append(&gtk::Label::new(Some("Верхи:")));
     audio_colors_row.append(&audio_high_entry);
+
+    // Синхронизация базового цвета: audio_base_entry <-> live_entry
+    // Защита от рекурсии: Rc<Cell<bool>> флаг, чтобы не зациклиться на set_text -> changed.
+    let sync_guard = Rc::new(Cell::new(false));
+    let sync_guard1 = sync_guard.clone();
+    let live_entry_clone = live_entry.clone();
+    audio_base_entry.connect_changed(move |entry| {
+        if sync_guard1.get() { return; }
+        let text = entry.text().trim().to_string();
+        if crate::types::Color::from_hex_checked(&text).is_some() {
+            sync_guard1.set(true);
+            live_entry_clone.set_text(&text);
+            sync_guard1.set(false);
+        }
+    });
+    let audio_base_entry_clone = audio_base_entry.clone();
+    let sync_guard2 = sync_guard.clone();
+    live_entry.connect_changed(move |entry| {
+        if sync_guard2.get() { return; }
+        let text = entry.text().trim().to_string();
+        if crate::types::Color::from_hex_checked(&text).is_some() {
+            sync_guard2.set(true);
+            audio_base_entry_clone.set_text(&text);
+            sync_guard2.set(false);
+        }
+    });
     let audio_sens_label = gtk::Label::new(Some("Чувствительность"));
     audio_sens_label.set_halign(gtk::Align::Start);
     let audio_sens_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.1, 2.0, 0.05);
@@ -438,13 +482,6 @@ pub fn build_rgb_studio(
     let live_label = gtk::Label::new(Some("Живой цвет (host-rendering)"));
     live_label.add_css_class("heading");
     live_label.set_halign(gtk::Align::Start);
-
-    let live_entry = gtk::Entry::builder()
-        .text("#FF0000")
-        .placeholder_text("#RRGGBB")
-        .halign(gtk::Align::Start)
-        .width_chars(9)
-        .build();
 
     // Палитра быстрого выбора (без системного цветопикера/portal).
     let palette_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
