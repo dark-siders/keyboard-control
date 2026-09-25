@@ -20,7 +20,7 @@ pub const PRESET_FORMAT_VERSION: u32 = 1;
 /// Дополнительные параметры аудио-реактива (`RgbMode::Audio`). Хранятся
 /// отдельной секцией `[audio]` только у аудио-пресетов; у прочих режимов
 /// секция отсутствует. Все поля имеют дефолты, сохраняющие текущий вид
-/// визуализатора (журнал 10.97–10.98).
+/// визуализатора (журнал 10.97–10.99).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioParams {
     /// Общая чувствительность полос (множитель после AGC), 0.1..=2.0.
@@ -32,6 +32,20 @@ pub struct AudioParams {
     /// Цвет высоких частот (спектр справа/верх), `#RRGGBB`. Дефолт — синий.
     #[serde(default = "default_audio_color_high")]
     pub color_high: String,
+    /// Стиль визуализации: "row" (верхний ряд, как сейчас) или "bars" (cava-столбики по колонкам).
+    #[serde(default = "default_audio_style")]
+    pub style: AudioStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioStyle {
+    Row,
+    Bars,
+}
+
+fn default_audio_style() -> AudioStyle {
+    AudioStyle::Row
 }
 
 fn default_audio_sensitivity() -> f32 {
@@ -54,6 +68,7 @@ impl Default for AudioParams {
             sensitivity: default_audio_sensitivity(),
             color_low: default_audio_color_low(),
             color_high: default_audio_color_high(),
+            style: default_audio_style(),
         }
     }
 }
@@ -152,18 +167,35 @@ impl Default for Preset {
 /// в `~/.config` — видны в списке GUI/CLI и грузятся из бинарника. Файл с тем
 /// же именем перекрывает встроенный (пользователь может переопределить).
 pub fn builtin_presets() -> Vec<Preset> {
-    vec![Preset {
-        name: "audio-viz".to_string(),
-        params: ModeParams {
-            version: PRESET_FORMAT_VERSION,
-            r#type: RgbMode::Audio,
-            color: "#FF5A00".to_string(),
-            brightness: 255,
-            speed: 60,
-            frame_ms: DEFAULT_FRAME_MS,
-            audio: Some(AudioParams::default()),
+    vec![
+        Preset {
+            name: "audio-viz".to_string(),
+            params: ModeParams {
+                version: PRESET_FORMAT_VERSION,
+                r#type: RgbMode::Audio,
+                color: "#FF5A00".to_string(),
+                brightness: 255,
+                speed: 60,
+                frame_ms: DEFAULT_FRAME_MS,
+                audio: Some(AudioParams::default()),
+            },
         },
-    }]
+        Preset {
+            name: "cava".to_string(),
+            params: ModeParams {
+                version: PRESET_FORMAT_VERSION,
+                r#type: RgbMode::Audio,
+                color: "#FF5A00".to_string(),
+                brightness: 255,
+                speed: 60,
+                frame_ms: DEFAULT_FRAME_MS,
+                audio: Some(AudioParams {
+                    style: AudioStyle::Bars,
+                    ..AudioParams::default()
+                }),
+            },
+        },
+    ]
 }
 
 /// Найти встроенный пресет по имени.
@@ -473,6 +505,21 @@ frame_ms = 40
     }
 
     #[test]
+    fn builtin_cava_visible_and_loadable() {
+        let dir = std::env::temp_dir().join(format!("kbc-presets-cava-{}", std::process::id()));
+        let store = PresetStore::new(dir.clone());
+        assert!(store.list().contains(&"cava".to_string()));
+        let p = store.load("cava").unwrap();
+        assert_eq!(p.params.r#type, RgbMode::Audio);
+        assert_eq!(p.params.audio.as_ref().unwrap().style, AudioStyle::Bars);
+        assert!(is_builtin("cava"));
+        assert!(store.has("cava"));
+        let err = store.remove("cava").unwrap_err();
+        assert!(err.to_string().contains("встроенный"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn user_file_overrides_builtin() {
         let dir = std::env::temp_dir().join(format!("kbc-presets-test6-{}", std::process::id()));
         let store = PresetStore::new(dir.clone());
@@ -517,6 +564,7 @@ frame_ms = 40
                     sensitivity: 1.25,
                     color_low: "#00C800".to_string(),
                     color_high: "#2864FF".to_string(),
+                    style: AudioStyle::Row,
                 }),
             },
         };
@@ -538,6 +586,36 @@ frame_ms = 40
         let loaded = store.load("wave").unwrap();
         assert!(loaded.params.audio.is_none());
         assert_eq!(loaded.params.audio_params(), AudioParams::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_params_style_serialization() {
+        // Проверка сериализации/десериализации поля style
+        let dir = std::env::temp_dir().join(format!("kbc-presets-style-{}", std::process::id()));
+        let store = PresetStore::new(dir.clone());
+        let p = Preset {
+            name: "style-test".to_string(),
+            params: ModeParams {
+                version: PRESET_FORMAT_VERSION,
+                r#type: RgbMode::Audio,
+                color: "#FF5A00".to_string(),
+                brightness: 255,
+                speed: 60,
+                frame_ms: 40,
+                audio: Some(AudioParams {
+                    sensitivity: 0.75,
+                    color_low: "#33FF33".to_string(),
+                    color_high: "#3333FF".to_string(),
+                    style: AudioStyle::Bars,
+                }),
+            },
+        };
+        store.save(&p).unwrap();
+        let raw = std::fs::read_to_string(store.path("style-test")).unwrap();
+        assert!(raw.contains("style = \"bars\""), "в файле должно быть style = \"bars\": {}", raw);
+        let loaded = store.load("style-test").unwrap();
+        assert_eq!(loaded.params.audio.as_ref().unwrap().style, AudioStyle::Bars);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

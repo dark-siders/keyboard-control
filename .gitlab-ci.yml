@@ -70,7 +70,7 @@ fedora-build:
   stage: build
   image: fedora:latest
   before_script:
-    - dnf install -y rust cargo gcc pkgconf make gtk4-devel libadwaita-devel glib2-devel gdk-pixbuf2-devel cairo-devel pango-devel hidapi-devel libudev-devel
+    - dnf install -y rust cargo gcc pkgconf make gtk4-devel libadwaita-devel glib2-devel gdk-pixbuf2-devel cairo-devel pango-devel hidapi-devel libudev-devel pulseaudio-libs-devel
   script:
     - cargo build --release --all-targets
     - cargo test --lib

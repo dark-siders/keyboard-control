@@ -133,8 +133,7 @@ fi
 # ============================================================
 if [[ "$MODE" != "udev-only" ]]; then
     if command -v cargo >/dev/null 2>&1; then
-        echo "Сборка release-версии..."
-        (cd "$ROOT" && cargo build --release)
+        run bash -c "cd \"$ROOT\" && cargo build --release"
     else
         echo "ВНИМАНИЕ: cargo не найден — берём готовые бинарники из target/release (если есть)." >&2
     fi

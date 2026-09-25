@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::devices::KeyboardDevice;
-use crate::presets::{ModeParams, Preset, PresetStore};
+use crate::presets::{AudioStyle, ModeParams, Preset, PresetStore};
 use crate::types::{Color, ConnectionType, KeyId, RgbMode};
 
 // --- Фоновое переподключение HID-канала после кика -------------------
@@ -140,6 +140,20 @@ pub fn mode_to_index(mode: RgbMode) -> u32 {
         RgbMode::Reactive => 6,
         RgbMode::Audio => 7,
         RgbMode::Custom => 8,
+    }
+}
+
+pub fn audio_style_from_index(idx: u32) -> AudioStyle {
+    match idx {
+        1 => AudioStyle::Bars,
+        _ => AudioStyle::Row,
+    }
+}
+
+pub fn audio_style_to_index(style: AudioStyle) -> u32 {
+    match style {
+        AudioStyle::Row => 0,
+        AudioStyle::Bars => 1,
     }
 }
 
@@ -319,7 +333,13 @@ pub fn build_rgb_studio(
     let audio_sens_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     audio_sens_row.append(&audio_sens_scale);
     audio_sens_row.append(&audio_sens_val);
-    let audio_note = gtk::Label::new(Some("Спектр системного звука по USB: реагирует верхний ряд (Esc+F1..F12), буквы — базовым цветом. В память клавиатуры не пишется."));
+    let audio_style_label = gtk::Label::new(Some("Стиль визуализации"));
+    audio_style_label.set_halign(gtk::Align::Start);
+    let audio_style_dd = gtk::DropDown::builder().build();
+    let audio_style_model = gtk::StringList::new(&["Верхний ряд", "Столбики (как cava)"]);
+    audio_style_dd.set_model(Some(&audio_style_model));
+    audio_style_dd.set_selected(0);
+    let audio_note = gtk::Label::new(Some("Спектр системного звука по USB: верхний ряд или столбики по колонкам; буквы получают базовый цвет. В память клавиатуры не пишется."));
     audio_note.add_css_class("dim-label");
     audio_note.set_wrap(true);
     audio_note.set_halign(gtk::Align::Start);
@@ -327,6 +347,8 @@ pub fn build_rgb_studio(
     audio_box.append(&audio_colors_row);
     audio_box.append(&audio_sens_label);
     audio_box.append(&audio_sens_row);
+    audio_box.append(&audio_style_label);
+    audio_box.append(&audio_style_dd);
     audio_box.append(&audio_note);
 
     // Показывать/скрывать аудио-секцию в зависимости от выбранного режима.
@@ -592,6 +614,8 @@ pub fn build_rgb_studio(
         #[strong]
         audio_sens_scale,
         #[strong]
+        audio_style_dd,
+        #[strong]
         frame_gen,
         #[strong]
         audio_stop,
@@ -703,6 +727,7 @@ if mode == RgbMode::Audio {
                     let high = Color::from_hex_checked(audio_high_entry.text().trim())
                         .unwrap_or(Color::new(51, 51, 255));
                     let sens = audio_sens_scale.value() as f32;
+                    let style = audio_style_from_index(audio_style_dd.selected());
                     // Проверяем доступность монитора звука синхронно с параметрами.
                     if let Err(e) = crate::audio::AudioReactive::open_with(sens, speed) {
                         status_a0.set_text(&format!("Аудио-реактив недоступен: {e}"));
@@ -719,6 +744,7 @@ if mode == RgbMode::Audio {
                             Ok(d) => d,
                             Err(_) => return,
                         };
+                        let geometry = crate::devices::audio_led_geometry(n_leds);
                         let mut au = match crate::audio::AudioReactive::open_with(sens, speed) {
                             Ok(a) => a,
                             Err(_) => return,
@@ -727,7 +753,7 @@ if mode == RgbMode::Audio {
                             match au.read_vu_bands() {
                                 Ok(vu) => {
                                     let frame = crate::audio::audio_frame(
-                                        base, brightness, &vu, n_leds, active_leds, low, high,
+                                        base, brightness, &vu, n_leds, active_leds, low, high, style, geometry,
                                     );
                                     if dev.render_frame(&frame).is_err() {
                                         // Возможен кик канала — переоткрываем.
@@ -740,10 +766,14 @@ if mode == RgbMode::Audio {
                             }
                         }
                     });
-                    status_a0.set_text(
-                        "Аудио-реактив запущен (USB): верхний ряд (Esc+F1..F12) = спектр \
-                          системного звука, буквы статичны. «Применить»/гашение останавливает поток.",
-                    );
+                    let style_name = match style {
+                        AudioStyle::Row => "верхний ряд (Esc+F1..F12)",
+                        AudioStyle::Bars => "столбики по колонкам",
+                    };
+                    status_a0.set_text(&format!(
+                        "Аудио-реактив запущен (USB): {style_name} = спектр системного звука; \
+                         остальные LED — базовый цвет. «Применить»/гашение останавливает поток."
+                    ));
                     return;
                 }
                 // ВАЖНО (фикс 10.21): при повторном «Применить» НАДО
@@ -806,6 +836,8 @@ if mode == RgbMode::Audio {
         #[strong]
         audio_sens_scale,
         #[strong]
+        audio_style_dd,
+        #[strong]
         apply,
         #[strong]
         live_status,
@@ -827,10 +859,12 @@ if mode == RgbMode::Audio {
                     bright_scale.set_value(preset.params.brightness as f64);
                     speed_scale.set_value(preset.params.speed as f64);
                     live_entry.set_text(&preset.params.color);
-                    if let Some(a) = &preset.params.audio {
-                        audio_sens_scale.set_value(a.sensitivity as f64);
-                        audio_low_entry.set_text(&a.color_low);
-                        audio_high_entry.set_text(&a.color_high);
+                    let audio = preset.params.audio_params();
+                    if preset.params.r#type == RgbMode::Audio {
+                        audio_sens_scale.set_value(audio.sensitivity as f64);
+                        audio_low_entry.set_text(&audio.color_low);
+                        audio_high_entry.set_text(&audio.color_high);
+                        audio_style_dd.set_selected(audio_style_to_index(audio.style));
                     }
                     apply.emit_clicked();
                     live_status.set_text(&format!(
@@ -869,6 +903,8 @@ if mode == RgbMode::Audio {
         #[strong]
         audio_sens_scale,
         #[strong]
+        audio_style_dd,
+        #[strong]
         live_status,
         move |_| {
             let raw = pf_entry.text().trim().to_string();
@@ -886,6 +922,7 @@ if mode == RgbMode::Audio {
                     sensitivity: audio_sens_scale.value() as f32,
                     color_low: audio_low_entry.text().trim().to_string(),
                     color_high: audio_high_entry.text().trim().to_string(),
+                    style: audio_style_from_index(audio_style_dd.selected()),
                 })
             } else { None };
             let params = ModeParams {

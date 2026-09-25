@@ -30,6 +30,16 @@ pub fn audio_active_row_leds(led_count: usize) -> &'static [usize] {
     }
 }
 
+/// Геометрия LED-матрицы для cava-стиля (bars): `LED index -> (row, col)`.
+/// По размеру LED-матрицы устройства. Неизвестное устройство → пустой срез.
+pub fn audio_led_geometry(led_count: usize) -> &'static [(u8, u8)] {
+    match led_count {
+        aula_f75::RGB_LED_COUNT => aula_f75::LED_GEOMETRY,
+        aula_f99::RGB_LED_COUNT => aula_f99::LED_GEOMETRY,
+        _ => &[],
+    }
+}
+
 /// Тип ошибки устройств.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -475,4 +485,77 @@ pub fn build_device(bridge: HidBridge) -> Result<Box<dyn KeyboardDevice>> {
 /// в главном потоке GTK.
 pub fn open_vidpid(vid: u16, pid: u16) -> Result<Box<dyn KeyboardDevice>> {
     build_device(open_bridge(vid, pid)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_geometry(
+        geometry: &[(u8, u8)],
+        expected_len: usize,
+        expected_known: usize,
+        max_row: u8,
+        max_col: u8,
+    ) {
+        assert_eq!(geometry.len(), expected_len);
+        let mut occupied = [[false; 19]; 6];
+        let mut known = 0;
+
+        for (index, &(row, col)) in geometry.iter().enumerate() {
+            if row == 0xFF {
+                assert_eq!(col, 0xFF, "неполный sentinel в LED {index}");
+                continue;
+            }
+
+            assert!(row <= max_row, "строка {row} вне матрицы в LED {index}");
+            assert!(col <= max_col, "колонка {col} вне матрицы в LED {index}");
+            assert!(
+                !occupied[row as usize][col as usize],
+                "повтор позиции ({row}, {col}) в LED {index}"
+            );
+            occupied[row as usize][col as usize] = true;
+            known += 1;
+        }
+
+        assert_eq!(known, expected_known);
+    }
+
+    #[test]
+    fn audio_geometry_matches_openrgb_led_counts() {
+        assert_geometry(
+            aula_f75::LED_GEOMETRY,
+            aula_f75::RGB_LED_COUNT,
+            80,
+            5,
+            14,
+        );
+        assert_geometry(
+            aula_f99::LED_GEOMETRY,
+            aula_f99::RGB_LED_COUNT,
+            99,
+            5,
+            18,
+        );
+        assert_eq!(
+            audio_led_geometry(aula_f75::RGB_LED_COUNT),
+            aula_f75::LED_GEOMETRY
+        );
+        assert_eq!(
+            audio_led_geometry(aula_f99::RGB_LED_COUNT),
+            aula_f99::LED_GEOMETRY
+        );
+    }
+
+    #[test]
+    fn audio_geometry_active_leds_are_on_top_row() {
+        for &led in aula_f75::AUDIO_ACTIVE_ROW_LEDS {
+            assert_eq!(aula_f75::LED_GEOMETRY[led].0, 0, "F75 LED {led}");
+            assert_ne!(aula_f75::LED_GEOMETRY[led].1, 0xFF, "F75 LED {led}");
+        }
+        for &led in aula_f99::AUDIO_ACTIVE_ROW_LEDS {
+            assert_eq!(aula_f99::LED_GEOMETRY[led].0, 0, "F99 LED {led}");
+            assert_ne!(aula_f99::LED_GEOMETRY[led].1, 0xFF, "F99 LED {led}");
+        }
+    }
 }

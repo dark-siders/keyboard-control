@@ -16,6 +16,7 @@ use pulse::stream::Direction;
 use rustfft::num_complex::Complex;
 use rustfft::{FftPlanner, num_traits::Zero};
 
+use crate::presets::AudioStyle;
 use crate::types::Color;
 
 /// Длина FFT-окна (степень двойки). При 44.1 кГц это ~23 мс — вдвое быстрее
@@ -219,16 +220,18 @@ fn f_band_edge(band: usize, total: usize, nyquist: f32) -> f32 {
     F_MIN * (nyquist / F_MIN).powf(t)
 }
 
-/// Построить кадр host-рендеринга из VU-полос: реагирует ТОЛЬКО верхний ряд
-/// (Esc + F1..F12, LED-индексы в `active_leds`). Каждый активный LED
-/// сопоставлен полосе спектра слева→направо; цвет — hue от низкой (зелёный)
-/// к высокой (синий) частоте. Все остальные LED («буквы») светятся статичным
-/// базовым цветом `base` на заданной яркости. Когда музыка не играет (полосы
-/// ~0) весь ряд тоже становится статичным — «эффекта до музыки» нет.
+/// Построить кадр host-рендеринга из VU-полос.
 ///
-/// `active_leds` — отсортированные LED-индексы верхнего ряда (F75: 90 LED,
-/// Esc+F1..F12 = 0,12,18,…,78; F99: 113 LED = 0,6,…,72). Пустой срез →
-/// вся клавиатура статична (устройство без известной раскладки).
+/// Два стиля:
+/// - `Row`: реагирует ТОЛЬКО верхний ряд (Esc + F1..F12). Цвет — интерполяция
+///   color_low → color_high по частоте. Остальные LED — статичный базовый цвет.
+/// - `Bars`: cava-стиль. Каждая колонка матрицы = одна полоса спектра.
+///   LED в колонке зажигаются снизу вверх (row 5 → row 0) пропорционально уровню.
+///   Цвет — интерполяция color_low → color_high по колонке.
+///
+/// `geometry` — срез `LED index -> (row, col)` для устройства (из `LED_GEOMETRY`).
+/// LED с `(0xFF, 0xFF)` пропускаются (индикаторы/лого).
+/// Если geometry пуст или стиль Row — работает как раньше (верхний ряд).
 pub fn audio_frame(
     base: Color,
     brightness: u8,
@@ -237,11 +240,11 @@ pub fn audio_frame(
     active_leds: &[usize],
     color_low: Color,
     color_high: Color,
+    style: AudioStyle,
+    geometry: &[(u8, u8)],
 ) -> Vec<Color> {
     let bright_k = brightness.max(1) as f32 / 255.0;
-    let bands = vu.len().max(1);
-    let n_active = active_leds.len().max(1);
-    // Статичный базовый цвет (буквы и «тихие» LED активного ряда).
+    // Статичный базовый цвет (буквы и «тихие» LED).
     let static_col = |k: f32| {
         Color::new(
             ((base.r as f32) * k).clamp(0.0, 255.0) as u8,
@@ -249,28 +252,53 @@ pub fn audio_frame(
             ((base.b as f32) * k).clamp(0.0, 255.0) as u8,
         )
     };
-    // Интерполяция цвета низ/верх по позиции полосы (linear в RGB).
+    // Интерполяция цвета низ/верх по позиции (linear в RGB).
     let interp = |t: f32| {
         let t = t.clamp(0.0, 1.0);
-        Color::new(
-            ((color_low.r as f32) * (1.0 - t) + (color_high.r as f32) * t).round().clamp(0.0, 255.0) as u8,
-            ((color_low.g as f32) * (1.0 - t) + (color_high.g as f32) * t).round().clamp(0.0, 255.0) as u8,
-            ((color_low.b as f32) * (1.0 - t) + (color_high.b as f32) * t).round().clamp(0.0, 255.0) as u8,
-        )
+        let r = ((color_low.r as f32) * (1.0 - t) + (color_high.r as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        let g = ((color_low.g as f32) * (1.0 - t) + (color_high.g as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        let b = ((color_low.b as f32) * (1.0 - t) + (color_high.b as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        Color::new(r, g, b)
     };
+
+    let has_geometry = geometry
+        .iter()
+        .any(|(row, col)| *row != 0xFF && *col != 0xFF);
+    match style {
+        AudioStyle::Bars if has_geometry => {
+            audio_frame_bars(vu, led_count, geometry, bright_k, &interp, &static_col)
+        }
+        _ => audio_frame_row(vu, led_count, active_leds, bright_k, &interp, &static_col),
+    }
+}
+
+/// Старый стиль: только верхний ряд реагирует.
+fn audio_frame_row(
+    vu: &[f32],
+    led_count: usize,
+    active_leds: &[usize],
+    bright_k: f32,
+    interp: &dyn Fn(f32) -> Color,
+    static_col: &dyn Fn(f32) -> Color,
+) -> Vec<Color> {
+    let bands = vu.len().max(1);
+    let n_active = active_leds.len().max(1);
     let mut out = Vec::with_capacity(led_count);
     for i in 0..led_count {
-        // LED активного ряда? Позиция среди активных (слева→направо) задаёт полосу.
         let pos = active_leds.iter().position(|&x| x == i);
         if let Some(pos) = pos {
             let bi = (pos * bands / n_active).min(bands - 1);
             let level = vu[bi];
             if level >= ACTIVATION {
-                // Активная полоса — цвет по частоте: интерполируем color_low → color_high.
                 let t = if bands > 1 { bi as f32 / (bands - 1) as f32 } else { 0.0 };
-                let (r, g, b) = (interp(t).r, interp(t).g, interp(t).b);
-                // sqrt(level) поднимает тихие полосы — ряд заметно
-                // реагирует, а не «моргает» (жалоба владельца 2026-09-24).
+                let color = interp(t);
+                let (r, g, b) = (color.r, color.g, color.b);
                 let eff = level.sqrt();
                 let k = (bright_k * (0.45 + 0.55 * eff)).clamp(0.0, 1.0);
                 out.push(Color::new(
@@ -281,8 +309,73 @@ pub fn audio_frame(
                 continue;
             }
         }
-        // Буквы и тихие LED активного ряда — статичный базовый цвет.
         out.push(static_col(bright_k));
+    }
+    out
+}
+
+/// Новый стиль: cava-столбики по колонкам.
+fn audio_frame_bars(
+    vu: &[f32],
+    led_count: usize,
+    geometry: &[(u8, u8)],
+    bright_k: f32,
+    interp: &dyn Fn(f32) -> Color,
+    static_col: &dyn Fn(f32) -> Color,
+) -> Vec<Color> {
+    let bands = vu.len().max(1);
+    let mut out = vec![static_col(bright_k); led_count];
+
+    // Группируем LED по колонкам: col -> Vec<(row, led_index)>
+    let max_col = geometry
+        .iter()
+        .filter(|(r, c)| *r != 0xFF && *c != 0xFF)
+        .map(|(_, c)| *c)
+        .max()
+        .unwrap_or(0) as usize;
+    let mut cols: Vec<Vec<(u8, usize)>> = vec![Vec::new(); max_col + 1];
+
+    for (led_idx, &(row, col)) in geometry.iter().enumerate() {
+        if row == 0xFF || col == 0xFF || led_idx >= led_count {
+            continue; // неизвестная позиция или за пределами
+        }
+        if col as usize <= max_col {
+            cols[col as usize].push((row, led_idx));
+        }
+    }
+
+    // В каждой колонке сортируем LED снизу вверх (row 5 → 0 = низ → верх)
+    for col_leds in &mut cols {
+        col_leds.sort_by_key(|&(row, _)| std::cmp::Reverse(row as usize));
+    }
+
+    // Для каждой колонки берём соответствующую полосу спектра
+    for (col_idx, col_leds) in cols.iter().enumerate() {
+        if col_leds.is_empty() {
+            continue;
+        }
+        let bi = (col_idx * bands / (max_col + 1)).min(bands - 1);
+        let level = vu[bi].clamp(0.0, 1.0);
+        if level < ACTIVATION {
+            continue; // колонка остаётся базовой
+        }
+        // Цвет колонки = интерполяция по позиции колонки
+        let t = if max_col > 0 { col_idx as f32 / max_col as f32 } else { 0.0 };
+        let col_color = interp(t);
+        // Зажигаем LED снизу вверх пропорционально level
+        let n_leds = col_leds.len();
+        let lit = ((level * n_leds as f32).ceil() as usize).min(n_leds);
+        for (idx, &(_, led_idx)) in col_leds.iter().enumerate() {
+            if idx < lit {
+                let eff = (idx as f32 + 1.0) / n_leds as f32 * level;
+                let k = (bright_k * (0.45 + 0.55 * eff.sqrt())).clamp(0.0, 1.0);
+                out[led_idx] = Color::new(
+                    ((col_color.r as f32) * k).clamp(0.0, 255.0) as u8,
+                    ((col_color.g as f32) * k).clamp(0.0, 255.0) as u8,
+                    ((col_color.b as f32) * k).clamp(0.0, 255.0) as u8,
+                );
+            }
+        }
     }
     out
 }
@@ -385,10 +478,12 @@ mod tests {
         let vu = vec![0.0f32; VU_BANDS];
         let low = Color::new(51, 255, 51);
         let high = Color::new(51, 51, 255);
-        let frame = audio_frame(Color::new(255, 0, 0), 200, &vu, 90, active, low, high);
+        let style = AudioStyle::Row;
+        let geometry = &[];
+        let frame = audio_frame(Color::new(255, 0, 0), 200, &vu, 90, active, low, high, style, geometry);
         assert_eq!(frame.len(), 90);
         let hi = vec![1.0f32; VU_BANDS];
-        let frame_hi = audio_frame(Color::new(255, 0, 0), 200, &hi, 90, active, low, high);
+        let frame_hi = audio_frame(Color::new(255, 0, 0), 200, &hi, 90, active, low, high, style, geometry);
         assert_eq!(frame_hi.len(), 90);
     }
 
@@ -400,16 +495,71 @@ mod tests {
         let base = Color::new(255, 255, 255);
         let low = Color::new(51, 255, 51);
         let high = Color::new(51, 51, 255);
+        let style = AudioStyle::Row;
+        let geometry = &[];
         let hi = vec![1.0f32; VU_BANDS];
-        let frame = audio_frame(base, 255, &hi, 90, active, low, high);
+        let frame = audio_frame(base, 255, &hi, 90, active, low, high, style, geometry);
         // Активный LED (слот 12 = F1) с полосой 1.0 — цветной (не белый базовый).
         assert_ne!(frame[12], base, "F1 должна реагировать цветом");
         // Неактивный LED (например слот 7 = «1») — статичный базовый цвет.
         assert_eq!(frame[7], base, "клавиша «1» должна быть статичной");
         // Тишина → ряд тоже базовый.
         let zero = vec![0.0f32; VU_BANDS];
-        let frame0 = audio_frame(base, 255, &zero, 90, active, low, high);
+        let frame0 = audio_frame(base, 255, &zero, 90, active, low, high, style, geometry);
         assert_eq!(frame0[12], base, "в тишине F1 статична");
         assert_eq!(frame0[0], base, "в тишине Esc статичен");
+    }
+
+    #[test]
+    fn audio_frame_bars_reacts_by_column() {
+        let geometry = [(5, 0), (4, 0), (0, 0), (5, 1)];
+        let vu = vec![1.0f32; VU_BANDS];
+        let base = Color::new(255, 255, 255);
+        let low = Color::new(51, 255, 51);
+        let high = Color::new(51, 51, 255);
+        let frame = audio_frame(
+            base,
+            255,
+            &vu,
+            geometry.len(),
+            &[],
+            low,
+            high,
+            AudioStyle::Bars,
+            &geometry,
+        );
+        assert!(frame.iter().all(|color| *color != base));
+    }
+
+    #[test]
+    fn audio_frame_bars_without_geometry_falls_back_to_row() {
+        let active = &[0usize, 1];
+        let vu = vec![0.5f32; VU_BANDS];
+        let base = Color::new(255, 255, 255);
+        let low = Color::new(51, 255, 51);
+        let high = Color::new(51, 51, 255);
+        let row = audio_frame(
+            base,
+            255,
+            &vu,
+            2,
+            active,
+            low,
+            high,
+            AudioStyle::Row,
+            &[],
+        );
+        let bars = audio_frame(
+            base,
+            255,
+            &vu,
+            2,
+            active,
+            low,
+            high,
+            AudioStyle::Bars,
+            &[],
+        );
+        assert_eq!(bars, row);
     }
 }

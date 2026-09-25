@@ -221,7 +221,7 @@ pub trait KeyboardDevice {
 | **Ajazz AK820 Pro** | `0C45:8009` / `0C45:800A` / `0C45:8099` (ревизии); ISP `0C45:7140` | — | `0C45:FEFE` (не тестировался) |
 
 - **F75 и F99 — один PID `258A:010C`**, различаются ТОЛЬКО моделью в PSD: `0xA4` = F99, `0xCD/0xE1/0x91` = F75 (по ревизиям). В `kbc list` имя берётся из реестра по PID (может показывать «AULA F75» при физической F99) — ориентироваться на `kbc info` (модель из PSD).
-- F99: конфиг и эффект-таблица как у F75, НО **34 пары слотов эффектов `[58..125]`** (не 20 как у проводного F75) и **113 LED / 24 колонки** для host-рендеринга.
+- F99: конфиг и эффект-таблица как у F75, НО **34 пары слотов эффектов `[58..125]`** (не 20 как у проводного F75), **113 LED / 24 колонки** для обычного host-рендеринга; аудио Bars использует отдельную геометрию 99 известных позиций / 19 колонок, включая NumPad.
 - Физически у владельца (2026-09-11+): **AULA F75** (USB + ресивер 2.4G). **AULA F99** — проверена на железе пользователя (orflem) **USB + 2.4G работают полностью** (диагностика 2026-09-24). Ajazz физически отсутствует — поддержка по ресёрчу, read-only диагностика готова.
 
 ### Каналы USB (feature-report 0x06, ровно 520 байт)
@@ -270,9 +270,9 @@ pub trait KeyboardDevice {
 ### Инфраструктура проекта
 
 - Rust edition 2021; GUI GTK4 + Libadwaita (`adw 0.7`/`gtk4 0.9`); `hidapi 2.5`, `image 0.25`, `serde/toml`, `chrono 0.4` (синк часов Ajazz), `clap`, `anyhow/thiserror`; аудио-реактив — `rustfft 6` + `psimple`/`pulse` (libpulse-*-binding 2). Сборка: flake crane, `nix develop . --command cargo …` (`cargo` напрямую без обёртки не запускается).
-- CLI `kbc`: `list / info / probe / ajazz-diag / raw feature-send/feature-get/output-send/input-read / wl-read-pages / rgb [--mode (вкл. audio — USB-only)|--color|--brightness|--speed|--hold|--hw-effect|--light-on/--light-off] / screen --image / time / battery / save [--effect NN|--brightness|--speed] / remap --list|--key|--to|--media|--modifier|--layer / set-poll <Hz> / set-debounce <ms> / set-sleep <sec> / profile save|load|eeprom-save / monitor / preset save|list|apply|remove / daemon [--preset|--frame-ms|…]` (аудио-пресет `audio-viz`, в фоне без GUI).
-- GUI `keyboard-center`: Вкладки — Устройства, RGB Studio (host-движок + persistent хуки 2.4G, аудио-реактив фоновым потоком (USB), файловые пресеты TOML, сохранить в память, гашение), Screen Manager (TFT Ajazz), Keymap & Fn Layer (клик-редактор F75: Press/Media/Modifier, показ раскладки, сброс), Settings (Status/battery). Потоки — через каналы + `frame_gen` (поколение кадров вместо `SourceId::remove()` — больше никаких паник glib, 10.39); аудио — отдельный `Arc<AtomicBool>` stop-флаг (10.97c). Автосейв при закрытии окна (10.38).
-- Пресеты TOML: `$XDG_CONFIG_HOME/keyboard-center/presets` (по умолч. `~/.config/keyboard-center/presets`), структура `{version, type, color, brightness, speed, frame_ms}`, пресет `default` неудаляем.
+- CLI `kbc`: `list / info / probe / ajazz-diag / raw feature-send/feature-get/output-send/input-read / wl-read-pages / rgb [--mode (вкл. audio — USB-only)|--style row|bars|--color|--brightness|--speed|--hold|--hw-effect|--light-on/--light-off] / screen --image / time / battery / save [--effect NN|--brightness|--speed] / remap --list|--key|--to|--media|--modifier|--layer / set-poll <Hz> / set-debounce <ms> / set-sleep <sec> / profile save|load|eeprom-save / monitor / preset save|list|apply|remove / daemon [--preset|--style row|bars|--frame-ms|…]` (встроенные аудио-пресеты `audio-viz` и `cava`, в фоне без GUI).
+- GUI `keyboard-center`: Вкладки — Устройства, RGB Studio (host-движок + persistent хуки 2.4G, аудио-реактив фоновым потоком (USB, стили `row`/`bars`), файловые пресеты TOML, сохранить в память, гашение), Screen Manager (TFT Ajazz), Keymap & Fn Layer (клик-редактор F75: Press/Media/Modifier, показ раскладки, сброс), Settings (Status/battery). Потоки — через каналы + `frame_gen` (поколение кадров вместо `SourceId::remove()` — больше никаких паник glib, 10.39); аудио — отдельный `Arc<AtomicBool>` stop-флаг (10.97c). Автосейв при закрытии окна (10.38).
+- Пресеты TOML: `$XDG_CONFIG_HOME/keyboard-center/presets` (по умолч. `~/.config/keyboard-center/presets`), структура `{version, type, color, brightness, speed, frame_ms, audio}`, где `[audio]` содержит `sensitivity`, `color_low`, `color_high`, `style`; пресет `default` неудаляем; встроенные `audio-viz` (`row`) и `cava` (`bars`) также неудаляемы и доступны любой установленной сборке без внешних файлов.
 - Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `258a:004e/004f/0050`, `0328:8207/8208/8209`.
 - Fedora: `Makefile` (`make release`, `install/install-user/install-udev/uninstall/clean/help/install-deps`), `fedora_install.sh` (`--user/--system/--udev-only/--install-deps/--dry-run/--uninstall`), CI-джоб `fedora-build` (dnf-пакеты одной строкой в `.gitlab-ci.yml`, без `\`-переносов — иначе YAML-folding склеивает, 10.58).
 - Диагностика: `scripts/collect-data.sh` (read-only, `--device f99|ajazz`, `--sg`, `--auto`, результат `~/kbc-diag-ГГГГММДД-ЧЧММСС/{01..37}*.txt` + tar.gz; для F99 `--write-tests` делегирует в `scripts/f99-usb-rev.sh`; для Ajazz добавляет `28-ajazz-diag.txt`), `scripts/ajazz-usb-diag.sh` (Ajazz, read-only, `--device`/`--sg`, архив `~/kbc-diag-ajazz-*.tar.gz`), `docs/collect-data.md`, `docs/f99-guide.md` (для владельцев F99), `docs/ajazz-guide.md` (для владельцев Ajazz). Дамп прошивки F75: `data/firmware/f75_firmware.hex` (61440 б, Intel HEX; read-only, MD5 прошивки `564524ecd3aed509c3bba432f0398aca`).
@@ -497,12 +497,29 @@ pub trait KeyboardDevice {
 
 10.99 — 2026-09-24 — Phase 1 аудио-реактив параметризация: TOML секция `[audio]` (sensitivity/color_low/color_high), CLI флаги `--color-low/--color-high/--sensitivity` для `rgb`/`daemon`/`preset save`, GUI секция «Аудио-реактив (USB)» с цветовыми полями и слайдером, пресет save/load. `AudioReactive::open_with(sens, speed)`, `audio_frame` с интерполяцией RGB. Тесты 25/25. Подробности — блок «10.99 АУДИО-РЕАКТИВ ПАРАМЕТРИЗАЦИЯ (ФАЗА 1)» ниже.
 
+10.100 — 2026-09-25 — Phase 2 аудио-реактива: Cava-стиль `style = "bars"` с точной геометрией OpenRGB для F75/F99, CLI/GUI-выбор стиля и встроенный пресет `cava`; `audio-viz` сохранён как совместимый row-режим. Тесты 31/31. Подробности — блок «10.100 АУДИО-РЕАКТИВ PHASE 2: CAVA-СТИЛЬ (BARS)» ниже.
+
+10.101 — 2026-09-25 — синхронизация документации после 10.100: удалены временные пользовательские тестовые пресеты `test-apply`/`test-audio`/`test-audio2` (в репозитории не лежали), уточнено, что `cava` — встроенный пресет бинарника (доступен любой установленной сборке без внешних файлов), исправлено описание геометрии F99 (известные позиции NumPad участвуют в Bars), README и `docs/f99-guide.md` приведены в соответствие. Код не менялся; `cargo test --lib` — 31/31, `cargo check --all-targets` — 0 ошибок, `cargo build --release` — OK.
+
+10.102 — 2026-09-25 — подготовка версии 0.4.0: версия синхронизирована в `Cargo.toml`, `Cargo.lock`, `flake.nix` и README; в README добавлен раздел с составом релиза. `cargo check --all-targets` — 0 ошибок, `cargo test --lib` — 31/31, `cargo build --release` — успешно, `nix build .#keyboard-center` — успешно; `target/release/kbc --version` и `result/bin/kbc --version` — `0.4.0`. Сохранились два предсуществующих предупреждения `unused_mut` в `src/gui/keymap_editor.rs:308,323`.
+
+## 10.102 ПОДГОТОВКА ВЕРСИИ 0.4.0 (сессия 2026-09-25)
+
+- Версия пакета повышена с `0.3.0` до `0.4.0` из-за новой пользовательской функциональности: аудио-стили `row`/`bars`, встроенный пресет `cava`, выбор стиля в CLI/GUI/TOML и геометрия F75/F99.
+- Версия синхронизирована в `Cargo.toml`, `Cargo.lock`, `flake.nix` и бейдже README.
+- В README добавлен раздел «Что нового в 0.4.0» с описанием аудио-реактива, встроенных пресетов и обновлённой документации.
+- Сборка и проверки выполнены через `nix develop .`: `cargo check --all-targets` — 0 ошибок, `cargo test --lib` — 31/31, `cargo build --release` — успешно; пакет `nix build .#keyboard-center` — успешно.
+- `target/release/kbc --version` и `result/bin/kbc --version` подтверждают: `kbc 0.4.0`. В GUI версия берётся из `crate::VERSION`.
+- Коммит не создавался.
+
+---
+
 ## 10.97e АВТОНОМНЫЙ АУДИО-РЕАКТИВ (ДЕМОН БЕЗ GUI) (сессия 2026-09-24)
 
 > Запрос владельца: «на USB сделай, чтобы работало с закрытым приложением, насколько это возможно». Аудио уже шло через `kbc daemon` (10.97) + встроенный пресет `audio-viz` + systemd-user unit в `nix/home-module.nix`. Доведена автономность/живучесть.
 
 - **Ленивое открытие + авто-переоткрытие аудио-потока** (`cmd_daemon`, `src/cli.rs`): `AudioReactive::open()` больше НЕ вызывается до цикла (раньше ошибка = выход демона). Теперь поток открывается в цикле при необходимости; при недоступности монитора — сообщение + повтор через 3 с; при ошибке чтения (`read_vu_bands`) — сброс потока и переоткрытие через 2 с. Итог: перезапуск PipeWire/PulseAudio, поздний старт звука или клавиатуры не роняют демон. Сон между кадрами теперь по `if !audio_mode` (было `vu_audio.is_none()`).
-- **Systemd/автозапуск**: ничего нового в коде не нужно — в `home-module.nix` уточнено описание `daemon.preset` (для аудио — встроенный `"audio-viz"`). README дополнен блоком «Аудио-реактив в фоне, без GUI».
+- **Systemd/автозапуск**: ничего нового в коде не нужно — в `home-module.nix` уточнено описание `daemon.preset` (для аудио доступны встроенные `"audio-viz"` и `"cava"`). README дополнен блоком «Аудио-реактив в фоне, без GUI».
 - Тесты 24/24, `cargo build --release` и debug — OK.
 - **Честно:** работает ТОЛЬКО по USB (2.4G/BT — `cmd_daemon` завершается ошибкой «только USB»). На 2.4G live-канал не найден (см. 10.97/раздел «Закрыто навсегда»), «записать аудио в память» невозможно.
 - Как включить у себя (nixosniri, вне репо): `programs.keyboard-center.daemon.enable = true; programs.keyboard-center.daemon.preset = "audio-viz";`
@@ -601,6 +618,8 @@ pub trait KeyboardDevice {
 
 ## 10.97 АУДИО-РЕАКТИВ (VU-СПЕКТРОГРАММ) (сессия 2026-09-24)
 
+> Историческая запись состояния на 2026-09-24. Описанный ниже первоначальный аудиорежим и ограничения GUI относятся к этой версии; актуальные стили `row`/`bars`, геометрия и текущий GUI описаны в 10.100–10.101.
+
 > Идея из п.7 «идей на будущее» (audio-reactive). Владелец: «давай реализовывать, только так, чтобы и без открытого приложения работало» → решение: работает через `kbc rgb --mode audio` И `kbc daemon`/systemd-user unit (GUИ не требуется). Владелец выбрал: источник = PulseAudio/PipeWire монитор `@DEFAULT_MONITOR@` (libpulse-simple), стиль = спектр-полосы (VU).
 
 ### ЧТО СДЕЛАНО
@@ -612,7 +631,7 @@ pub trait KeyboardDevice {
 - **Интеграция host-канал** (ТОЛЬКО USB; на 2.4G/BT — честный отказ):
   - `cmd_daemon` (`src/cli.rs`): если `mode == Audio` и устройство НЕ `ConnectionType::Usb` → ошибка «аудио-реактив доступен только на USB». Persistent-блок при Audio пропускается (в память аудио не пишется). Host-цикл: `AudioReactive::open()` → на каждом тике (frame_ms) `read_vu_bands()` → `audio_frame` → `render_frame`. Пауза перед первым кадром **сокращена 4 с → 2 с** (решение владельца 2026-09-24: музыка включается уже после загрузки сессии, ждать 4 с не нужно; защита 10.94 для не-аудио host-эффектов сохранена).
   - `cmd_rgb` (host-ветка): аналогичный путь для `--mode audio`; на 2.4G-ветке `Audio` → явная ошибка.
-- **Исчерпывающие match'и закрыты** (всё — заглушки, в т.ч. честные для недостижимых путей): `AjazzMode::from_our_mode` → Custom; `usb_effect_for_mode`/`wl_effect_for_mode` → 0x03; `host_frame_with` → static base; GUI `mode_to_index` → Custom (в dropdown GUI Audio НЕ добавлялся — эффект работает через daemon/systemd).
+- **Исчерпывающие match'и закрыты** (всё — заглушки, в т.ч. честные для недостижимых путей): `AjazzMode::from_our_mode` → Custom; `usb_effect_for_mode`/`wl_effect_for_mode` → 0x03; `host_frame_with` → static base; на этом этапе GUI `mode_to_index` → Custom (в dropdown GUI Audio ещё не добавлялся; в 10.100 добавлены аудио и стили `row`/`bars`).
 - **Зависимости:** Cargo.toml — `psimple = libpulse-simple-binding 2` + `pulse = libpulse-binding 2` (алиасы как принято в экосистеме) + `rustfft 6`. flake.nix buildInputs += `pulseaudio`. Fedora: fedora_install.sh + Makefile — `pulseaudio-libs-devel`.
 - **Тесты (в src/audio.rs):** лог-границы полос монотонны и ≤ nyquist; тишина → полосы ~0; синус 100 Гц → бас доминирует над ВЧ (втрое+); форма кадра (90 LED). ИТОГ `cargo test --lib` **21/21** (было 17, +4), `cargo check --all-targets` 0 ошибок (только предсуществующие 2 `unused_mut` в keymap_editor.rs — вне скоупа), `cargo build --release` OK.
 - **README:** примеры `kbc rgb … --mode audio` и `kbc preset save viz --mode audio… && kbc daemon --preset viz`; `type = "audio"` в списке snake_case; в справочной таблице `rgb` помечен `--mode (вкл. audio — USB-only)`.
@@ -620,7 +639,7 @@ pub trait KeyboardDevice {
 ### ДОРАБОТКИ 2026-09-24 (2) — лаг, скорость, встроенный пресет
 - **ФИКС ЛАГА ~6 с** при повторном воспроизведении (владелец: «музыка идёт, визуализация через ~6 с»): причина — аудио-цикл делал блокирующий `read_vu_bands()` (~46 мс данных) И сверху `sleep(frame_ms)` 40 мс → читали медленнее реального времени, capture-буфер PipeWire копил отставание. Убран `sleep` в аудио-ветках `cmd_rgb`/`cmd_daemon` (темп задаёт блокирующий read монитора); в `BufferAttr` `maxlength=4096`/`minreq=1024` (старьё не копится). Владелец: «по остановке и воспроизведению просто идеально».
 - **СКОРОСТЬ/ВЫРАЗИТЕЛЬНОСТЬ** (владелец: «загорается статика, еле что-то делает»): `FFT_WINDOW 2048→1024` (кадр ~23 мс, ~43 FPS, реакция ×2); спад `smoothing 0.45→0.6` (динамика, а не статика); усиление нормировки `rms*14→rms*9`; подъём ВЧ `gain = 1 + (band/VU_BANDS)*1.5`; порог активации `0.03→0.015`; `sat 0.9→1.0`, `l 0.55→0.6`; `F_MIN 20→40 Гц` (при окне 1024 бины ~43 Гц, иначе полоса упиралась в DC). `compute_bands_from_samples` (тесты) синхронизирован.
-- **ВСТРОЕННЫЙ ПРЕСЕТ `audio-viz`** (`src/presets.rs`): `builtin_presets()` (один: `type="audio"`, цвет `#FF5A00`, яркость 255, скорость 60, кадр 40), `builtin(name)`, `is_builtin(name)`. `PresetStore::list()` добавляет встроенные к файлам (дедуп, сортировка); `has`/`load`/`ensure` учитывают встроенный (файл с тем же именем перекрывает); `remove` встроенного без файла — ошибка. CLI `kbc preset list` помечает `[встроенный]`. GUI: пресет виден в «Файловые пресеты» у любого; при выборе аудио-пресета GUI НЕ запускает host-рендер (в GUI аудио нет) и подсказывает `kbc daemon --preset audio-viz`; удаление встроенного запрещено. Тесты: `builtin_audio_viz_visible_and_loadable`, `user_file_overrides_builtin` → `cargo test --lib` **23/23**, check --all-targets 0 ошибок, release OK.
+- **ВСТРОЕННЫЙ ПРЕСЕТ `audio-viz`** (`src/presets.rs`): на этом этапе `builtin_presets()` содержал один `type="audio"`-пресет (цвет `#FF5A00`, яркость 255, скорость 60, кадр 40), `builtin(name)`, `is_builtin(name)`. `PresetStore::list()` добавляет встроенные к файлам (дедуп, сортировка); `has`/`load`/`ensure` учитывают встроенный (файл с тем же именем перекрывает); `remove` встроенного без файла — ошибка. CLI `kbc preset list` помечает `[встроенный]`. На текущем этапе GUI также запускает аудио-реактив и поддерживает стили `row`/`bars`; удаление встроенных пресетов запрещено. Тесты этого этапа: `builtin_audio_viz_visible_and_loadable`, `user_file_overrides_builtin` → `cargo test --lib` **23/23**, check --all-targets 0 ошибок, release OK.
 
 ### КАК ПОЛЬЗОВАТЬСЯ
 ```bash
@@ -673,11 +692,11 @@ kbc daemon --preset viz                                # до Ctrl-C; systemd: u
 
 ## 10.99 АУДИО-РЕАКТИВ ПАРАМЕТРИЗАЦИЯ (ФАЗА 1) (сессия 2026-09-24)
 
-> Реализованные по требованию владельца настройки аудио-визуализатора (RgbMode::Audio): сохранение в пресеты TOML, настройка через GUI, CLI-флаги. **Phase 1 only** — только параметры + GUI + пресеты; cava-стиль (style=bars) отложен до Phase 2.
+> Историческая запись Phase 1: реализованные по требованию владельца настройки аудио-визуализатора (`RgbMode::Audio`) — сохранение в пресеты TOML, настройка через GUI, CLI-флаги. На этом этапе `cava`-стиль (`style = "bars"`) был отложен до Phase 2; Phase 2 реализован в 10.100.
 
 ### РЕШЕНИЯ ВЛАДЕЛЬЦА (опрос перед работой)
 1. **Дефолт чувствительности:** оставить текущий `SENSITIVITY=0.75` (вид не меняется).
-2. **Объём:** Phase 1 — параметры + GUI + пресеты; cava — позже.
+2. **Объём Phase 1:** параметры + GUI + пресеты; `cava` тогда был отложен до Phase 2, которая реализована в 10.100.
 3. **Формат TOML:** секция `[audio]` в пресете (обратно-совместимо: старые файлы без `[audio]` читаются, дефолты подставляются).
 
 ### ЧТО СДЕЛАНО
@@ -693,11 +712,51 @@ kbc daemon --preset viz                                # до Ctrl-C; systemd: u
 
 ### ОГРАНИЧЕНИЯ / ЧЕСТНОСТЬ
 - **Только USB**: у 2.4G/Ajazz нет аудио-монитора — там `open` вернёт ошибку / честный отказ (как раньше).
-- **Phase 2 (cava)**: потребует геометрии LED→(row,col) из OpenRGB (`SinowealthKeyboard10cDevices.cpp`) для F75 (90 LED) и F99 (113 LED); текущий маппинг `led index = slot` не подходит для равномерных столбиков.
+- **Phase 2 (cava) — РЕАЛИЗОВАН** (см. 10.100 ниже): добавлены `AudioStyle::Bars`, точная геометрия F75/F99, выбор `--style row|bars` в CLI, переключатель в GUI и встроенный пресет `cava`.
 - **Скорость ↔ сглаживание**: `smoothing_for_speed(60) = 0.6` — текущий дефолт сохранён. Выше скорость → быстрее реакция (attack 1.0, decay = smoothing).
-- **Обратная совместимость**: старые TOML-пресеты без `[audio]` работают; дефолты подставляются через `audio_params()`.
+- **Обратная совместимость**: старые TOML-пресеты без `[audio]` или без `style` работают; `audio-viz` остаётся в режиме `row`, дефолт — `row`.
 
-### ОСТАЛОСЬ (Phase 2 / будущее)
-- `style = "bars"` (cava-стиль): нужна полная геометрия LED матрицы из OpenRGB.
+### ОСТАЛОСЬ (будущее)
 - Калибровка порогов `ACTIVATION` / `RMS_FLOOR` / `DEFAULT_SENSITIVITY` на живом железе под разные жанры музыки.
-- Добавить `--mode` в `kbc preset apply` (сейчас нет; переопределение только через `kbc daemon` флаги).
+- Визуальная проверка `cava` на живых F75/F99.
+
+---
+
+## 10.100 АУДИО-РЕАКТИВ PHASE 2: CAVA-СТИЛЬ (BARS) (сессия 2026-09-25)
+
+> Реализация `style = "bars"` (cava-стиль) для аудио-реактива. Запрос владельца: «сделай столбики как в cava». Геометрия LED сверена с `SinowealthKeyboard10cDevices.cpp` и Keyboard Layout Manager из OpenRGB.
+
+### РЕШЕНИЯ ВЛАДЕЛЬЦА
+1. **Геометрия:** использовать реальные раскладки OpenRGB для F75 и F99, а не сопоставление LED-индекса с номером слота.
+2. **Стиль:** добавить `AudioStyle::Bars` в `AudioParams.style`; дефолт `Row` сохраняет обратную совместимость.
+3. **CLI/GUI:** `--style row|bars` в CLI и переключатель стиля в GUI; TOML хранит `style = "row" | "bars"`.
+4. **Встроенный пресет:** сохранить `audio-viz` как `row`, добавить отдельный встроенный `cava` со стилем `bars`.
+
+### ГЕОМЕТРИЯ
+- **F75:** 90 LED, 80 известных позиций, 15 колонок; `LED_GEOMETRY` содержит 90 элементов, неизвестные позиции — `(0xFF, 0xFF)`.
+- **F99:** 113 LED, 99 известных позиций, 19 колонок; `LED_GEOMETRY` содержит 113 элементов. Известные позиции NumPad также участвуют в столбиках. LED индикаторов, лого и боковой подсветки без позиции остаются базовым цветом.
+- В OpenRGB `0` — реальный LED ESC, а не маркер неизвестной позиции.
+
+### ЧТО СДЕЛАНО
+- **`src/devices/aula_f75.rs` / `aula_f99.rs`**: добавлены точные `LED_GEOMETRY` из OpenRGB.
+- **`src/devices/mod.rs`**: добавлена `audio_led_geometry(led_count)` и тесты размеров/уникальности геометрии.
+- **`src/presets.rs`**: добавлены `AudioStyle::{Row, Bars}`, сериализация стиля и встроенный `cava`; `audio-viz` остаётся совместимым `row`-пресетом.
+- **`src/audio.rs`**: `audio_frame` принимает стиль и геометрию; `audio_frame_row` сохраняет верхний ряд; `audio_frame_bars` группирует все известные позиции по колонкам, зажигает их снизу вверх и интерполирует цвет от `color_low` к `color_high`. При пустой или состоящей только из sentinel-координат геометрии Bars безопасно возвращается в Row.
+- **`src/cli.rs`**: добавлены `--style row|bars` для `rgb`, `daemon` и сохранения/применения аудио-пресетов; неверный стиль отклоняется с понятной ошибкой.
+- **`src/gui/rgb_studio.rs`**: добавлен выбор «Верхний ряд»/«Столбики (как cava)», синхронизация с пресетами и передача геометрии в аудио-поток.
+- **Тесты:** добавлены проверки Bars, fallback без геометрии, сериализации стиля и встроенного `cava`; `cargo test --lib` — **31/31 passed**.
+
+### CLI ПРИМЕРЫ
+```bash
+kbc rgb 258A:010C --mode audio --style bars --brightness 200
+kbc daemon --preset audio-viz
+kbc daemon --preset cava
+kbc preset save my-bars --mode audio --style bars --brightness 200
+```
+
+### ОГРАНИЧЕНИЯ / ЧЕСТНОСТЬ
+- Аудио-реактив работает только по USB; на 2.4G/BT — честный отказ.
+- `audio-viz` и `cava` зашиты в бинарник, поэтому доступны любой установленной сборке без внешних TOML-файлов; одноимённый пользовательский TOML перекрывает встроенный.
+- В Bars участвуют все известные позиции F75/F99, включая NumPad у F99; LED без известной позиции сохраняют базовый цвет.
+- F99 keymap write остаётся `Unsupported`; визуализация Bars от этого не зависит.
+- Визуальная проверка на живом F75/F99 и калибровка порогов остаются отдельными задачами.

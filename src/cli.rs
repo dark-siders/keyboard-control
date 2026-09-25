@@ -37,6 +37,7 @@ use keyboard_center::devices::aula_f75::wl_effect_name;
 use keyboard_center::devices::hidshell;
 use keyboard_center::devices::scanner::Scanner;
 use keyboard_center::devices::{ConnectionType, KeyboardDevice, RgbMode};
+use keyboard_center::presets::AudioStyle;
 
 const LOGO: &str = "Keyboard-Center kbc";
 
@@ -125,6 +126,9 @@ struct RgbArgs {
     /// [Аудио] Чувствительность полос (0.1..2.0)
     #[arg(long)]
     sensitivity: Option<f32>,
+    /// [Аудио] Стиль: row — верхний ряд, bars — столбики как в cava
+    #[arg(long, value_name = "row|bars")]
+    style: Option<String>,
     /// [2.4G] Выключить свет в память ресивера (останется выключенным без приложения)
     #[arg(long)]
     light_off: bool,
@@ -244,6 +248,9 @@ struct DaemonArgs {
     /// [Аудио] Чувствительность полос (0.1..2.0)
     #[arg(long)]
     sensitivity: Option<f32>,
+    /// [Аудио] Переопределить стиль: row — верхний ряд, bars — столбики
+    #[arg(long, value_name = "row|bars")]
+    style: Option<String>,
 }
 
 #[derive(Args)]
@@ -290,6 +297,9 @@ struct PresetSave {
     /// [Аудио] Чувствительность полос (0.1..2.0)
     #[arg(long)]
     sensitivity: Option<f32>,
+    /// [Аудио] Стиль: row — верхний ряд, bars — столбики как в cava
+    #[arg(long, value_name = "row|bars")]
+    style: Option<String>,
 }
 
 #[derive(Args)]
@@ -309,6 +319,9 @@ struct PresetApply {
     /// [Аудио] Чувствительность полос (0.1..2.0)
     #[arg(long)]
     sensitivity: Option<f32>,
+    /// [Аудио] Переопределить стиль: row — верхний ряд, bars — столбики
+    #[arg(long, value_name = "row|bars")]
+    style: Option<String>,
 }
 
 #[derive(Args)]
@@ -561,6 +574,12 @@ fn cmd_info((vid, pid): (u16, u16)) -> anyhow::Result<u8> {
 }
 
 fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
+    if args.style.is_some() {
+        if parse_rgb_mode(args.mode.as_deref())? != RgbMode::Audio {
+            return Err(anyhow::anyhow!("--style допустим только с --mode audio"));
+        }
+        parse_audio_style(args.style.as_deref().expect("style проверен выше"))?;
+    }
     let (vid, pid) = parse_id(&args.device)?;
     let dev = open(vid, pid)?;
 
@@ -696,8 +715,15 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
             let high = parse_audio_color(&args.color_high, "#3333FF")?;
             let sens = args.sensitivity.unwrap_or(keyboard_center::audio::DEFAULT_SENSITIVITY);
             let speed = args.speed.unwrap_or(60);
+            let style = match args.style.as_deref() {
+                Some(s) => parse_audio_style(s)?,
+                None => AudioStyle::Row,
+            };
             let mut au = keyboard_center::audio::AudioReactive::open_with(sens, speed)?;
-            println!("аудио-монитор открыт: 16 спектр-полос → верхний ряд; ждите звука…");
+            println!(
+                "аудио-монитор открыт: 16 спектр-полос → {}; ждите звука…",
+                audio_style_name(style)
+            );
             loop {
                 // read_vu_bands() сам блокирует ~46 мс (ждёт полный FFT-блок),
                 // поэтому НЕ спим сверху: иначе читаем медленнее реального
@@ -705,6 +731,7 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
                 // (журнал 10.97, жалоба 2026-09-24). Темп задаёт сам монитор.
                 let vu = au.read_vu_bands()?;
                 let active = keyboard_center::devices::audio_active_row_leds(n);
+                let geometry = keyboard_center::devices::audio_led_geometry(n);
                 let frame = keyboard_center::audio::audio_frame(
                     base,
                     params.brightness,
@@ -713,6 +740,8 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
                     active,
                     low,
                     high,
+                    style,
+                    geometry,
                 );
                 dev.render_frame(&frame)?;
             }
@@ -748,6 +777,23 @@ fn parse_rgb_mode(s: Option<&str>) -> anyhow::Result<RgbMode> {
         }
     };
     Ok(m)
+}
+
+fn parse_audio_style(s: &str) -> anyhow::Result<AudioStyle> {
+    match s.to_lowercase().as_str() {
+        "row" => Ok(AudioStyle::Row),
+        "bars" => Ok(AudioStyle::Bars),
+        _ => Err(anyhow::anyhow!(
+            "неизвестный стиль аудио: {s} (ожидается row или bars)"
+        )),
+    }
+}
+
+fn audio_style_name(style: AudioStyle) -> &'static str {
+    match style {
+        AudioStyle::Row => "верхний ряд",
+        AudioStyle::Bars => "столбики по колонкам",
+    }
 }
 
 /// [2.4G] Включить/выключить свет в память ресивера через apply_light_persistent.
@@ -921,6 +967,15 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
         }
         preset.params.audio.as_mut().unwrap().sensitivity = s;
     }
+    if let Some(s) = &args.style {
+        if preset.params.r#type != RgbMode::Audio {
+            return Err(anyhow::anyhow!("--style допустим только для аудио-режима"));
+        }
+        if preset.params.audio.is_none() {
+            preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+        }
+        preset.params.audio.as_mut().unwrap().style = parse_audio_style(s)?;
+    }
     let frame_ms = args.frame_ms.unwrap_or(preset.params.frame_ms).clamp(1, 1000) as u32;
 
     let base = Color::from_hex_checked(&preset.params.color).ok_or_else(|| {
@@ -1036,7 +1091,8 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
                 match keyboard_center::audio::AudioReactive::open_with(audio_sens, params.speed) {
                     Ok(a) => {
                         println!(
-                            "аудио-монитор открыт: спектр 16 полос → верхний ряд (Esc+F1..F12)"
+                            "аудио-монитор открыт: спектр 16 полос → {}",
+                            audio_style_name(audio.style)
                         );
                         vu_audio = Some(a);
                     }
@@ -1057,7 +1113,9 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
                 }
             };
             let active = keyboard_center::devices::audio_active_row_leds(n);
-            keyboard_center::audio::audio_frame(base, params.brightness, &vu, n, active, audio_low, audio_high)
+            let geometry = keyboard_center::devices::audio_led_geometry(n);
+            let style = audio.style;
+            keyboard_center::audio::audio_frame(base, params.brightness, &vu, n, active, audio_low, audio_high, style, geometry)
         } else {
             host_frame_with(&params, t_ms, n, cols)
         };
@@ -1169,6 +1227,15 @@ fn cmd_preset(p: PresetArgs) -> anyhow::Result<u8> {
                 }
                 preset.params.audio.as_mut().unwrap().sensitivity = s;
             }
+            if let Some(s) = &a.style {
+                if preset.params.r#type != RgbMode::Audio {
+                    return Err(anyhow::anyhow!("--style допустим только с --mode audio"));
+                }
+                if preset.params.audio.is_none() {
+                    preset.params.audio = Some(keyboard_center::presets::AudioParams::default());
+                }
+                preset.params.audio.as_mut().unwrap().style = parse_audio_style(s)?;
+            }
             let path = store.save(&preset)?;
             println!("пресет «{}» сохранён: {}", preset.name, path.display());
             Ok(0)
@@ -1185,6 +1252,7 @@ fn cmd_preset(p: PresetArgs) -> anyhow::Result<u8> {
                 color_low: a.color_low,
                 color_high: a.color_high,
                 sensitivity: a.sensitivity,
+                style: a.style,
             };
             cmd_daemon(daemon_args)
         }

@@ -62,7 +62,7 @@
         commonArgs = {
           src = craneLib.cleanCargoSource ./.;
           pname = "keyboard-center";
-          version = "0.3.0";
+          version = "0.4.0";
           doCheck = false; # тесты запускаются отдельно
           nativeBuildInputs = nativeBuildInputs;
           buildInputs = buildInputs;
