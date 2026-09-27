@@ -8,7 +8,10 @@
 
 CARGO    ?= cargo
 INSTALLER ?= ./fedora_install.sh
+UNINSTALLER ?= ./fedora_uninstall.sh
 PREFIX   ?= /usr/local
+# Флаги для `make uninstall` (например: make uninstall UNINSTALL_FLAGS=--purge)
+UNINSTALL_FLAGS ?=
 
 .PHONY: all build check test release install install-user install-udev install-deps uninstall clean help
 
@@ -46,9 +49,11 @@ install-udev:
 install-deps:
 	$(INSTALLER) --install-deps
 
-## Удаление поставленного скриптом (системная установка снимает и udev-правила).
+## Полное удаление (бинарники, .desktop, иконка, udev-правила — и системные,
+## и пользовательские). Пользовательские данные не трогаются.
+## Для них: make uninstall UNINSTALL_FLAGS=--purge
 uninstall:
-	$(INSTALLER) --uninstall
+	$(UNINSTALLER) $(UNINSTALL_FLAGS)
 
 ## Полная очистка артефактов cargo.
 clean:
@@ -64,3 +69,5 @@ help:
 	@echo "  make install-user   # $(INSTALLER) --user (без sudo)"
 	@echo "  make install-udev   # sudo $(INSTALLER) --udev-only"
 	@echo "  make install-deps   # sudo $(INSTALLER) --install-deps (dnf)"
+	@echo "  make uninstall      # $(UNINSTALLER) (полное удаление)"
+	@echo "  make uninstall UNINSTALL_FLAGS=--purge   # + пресеты и кэш иконок"

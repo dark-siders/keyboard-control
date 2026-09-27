@@ -74,6 +74,9 @@ fedora-build:
   script:
     - cargo build --release --all-targets
     - cargo test --lib
+    # Синтаксис установочных/диагностических скриптов (быстро, ловит опечатки)
+    - bash -n fedora_install.sh fedora_uninstall.sh
+    - bash -n scripts/collect-data.sh scripts/ajazz-usb-diag.sh scripts/f75-usb-rev.sh scripts/f99-usb-rev.sh
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

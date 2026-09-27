@@ -11,12 +11,16 @@
 #   --uninstall удалить то, что ставил этот скрипт
 #   --dry-run   показать, что будет сделано, без изменений
 #
+# Полное удаление (в т.ч. следы старых версий и ручных установок) —
+# отдельный скрипт ./fedora_uninstall.sh (--purge, --keep-rules, --dry-run).
+#
 # Примеры:
 #   sudo ./fedora_install.sh --install-deps --system   # зависимости + системная установка
 #   sudo ./fedora_install.sh --udev-only --install-deps
 #   sudo ./fedora_install.sh --install-deps            # только поставить зависимости
 #   ./fedora_install.sh --user
 #   sudo ./fedora_install.sh --system
+#   sudo ./fedora_uninstall.sh                         # полное удаление
 set -euo pipefail
 
 # --- пути проекта -------------------------------------------------------
@@ -40,7 +44,7 @@ while [[ $# -gt 0 ]]; do
         --uninstall)   UNINSTALL=1 ;;
         --dry-run)     DRY_RUN=1 ;;
         -h|--help)
-            sed -n '1,16p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "неизвестный аргумент: $1 (см. './fedora_install.sh --help')" >&2; exit 2 ;;
@@ -125,6 +129,8 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
         # пользовательские правила не трогаем — они требуют sudo
     fi
     echo "Готово. Пользовательские настройки (профили) не удалялись."
+    echo "Для полного удаления (и следов старых/ручных установок):"
+    echo "  sudo ./fedora_uninstall.sh            # + данные: --purge"
     exit 0
 fi
 

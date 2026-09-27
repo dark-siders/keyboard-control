@@ -387,7 +387,7 @@ cargo build --release
 
 Готовые бинарники: `target/release/kbc`, `target/release/keyboard-center`.
 
-### Вариант 5 — Fedora / любой дистрибутив без nix (Makefile + fedora_install.sh)
+### Вариант 5 — Fedora / любой дистрибутив без nix (Makefile + fedora_install.sh + fedora_uninstall.sh)
 
 **Полный пошаговый сценарий** (Fedora 40/41+, аналогично других дистрибутивах с `dnf`).
 
@@ -465,6 +465,19 @@ kbc list                  # видит поддерживаемые клавиа
 keyboard-center           # запуск GUI
 ```
 
+#### Шаг 6. Удаление
+
+Полное удаление — отдельным скриптом (сносит и системную, и пользовательскую установку):
+
+```bash
+./fedora_uninstall.sh --dry-run     # сначала посмотреть, что будет удалено
+sudo ./fedora_uninstall.sh          # бинарники, .desktop, иконка, udev-правила
+sudo ./fedora_uninstall.sh --purge  # то же + пресеты (~/.config/keyboard-center) и кэш иконок
+```
+
+Или через Makefile: `make uninstall`, `make uninstall UNINSTALL_FLAGS=--purge`.
+Скрипт требует `sudo`, если найдены системные файлы; пользовательские данные по умолчанию не трогаются.
+
 Полезные таргеты Makefile:
 
 | Цель | Что делает |
@@ -476,9 +489,12 @@ keyboard-center           # запуск GUI
 | `make install` | системная установка (`fedora_install.sh --system`) |
 | `make install-udev` | только udev-правила |
 | `make install-deps` | установка зависимостей через dnf (`fedora_install.sh --install-deps`) |
-| `make uninstall` | удаление установленного |
+| `make uninstall` | полное удаление (`fedora_uninstall.sh`) |
+| `make uninstall UNINSTALL_FLAGS=--purge` | удаление вместе с пресетами и кэшем иконок |
 
 Параметры `fedora_install.sh`: `--user` (по умолчанию), `--system`, `--udev-only`, `--install-deps` (поставить системные зависимости через dnf), `--uninstall`, `--dry-run` (показать действия без изменений).
+
+Параметры `fedora_uninstall.sh`: `--purge` (пресеты `~/.config/keyboard-center` и кэш иконок), `--keep-rules` (оставить `/etc/udev/rules.d/99-keyboard-center.rules`), `--dry-run`.
 
 ---
 
@@ -503,6 +519,7 @@ keyboard-control/
 ├── Cargo.toml                # Rust: gtk4, libadwaita, hidapi, image, clap...
 ├── Makefile                  # сборка/установка без nix (для Fedora и др.)
 ├── fedora_install.sh         # установщик Fedora: зависимости (dnf) + бинарники + udev + .desktop
+├── fedora_uninstall.sh       # удалялка Fedora: бинарники, .desktop, иконка, udev-правила (--purge)
 ├── flake.nix                 # Nix Flake: packages, nixosModules, homeManagerModules
 ├── default.nix               # легаси-обёртка без флейка (nix-build)
 ├── 99-keyboard-center.rules  # udev-правила (доступ к hidraw)
@@ -581,7 +598,7 @@ keyboard-control/
 - [x] AULA F99: базовый USB/2.4G-хост-рендеринг, эффекты и аудио-реактив подтверждены; гайд для владельцев — `docs/f99-guide.md`
 - [ ] AULA F99: довести дополнительные каналы (ремап, индикаторы, polling/debounce/sleep)
 - [ ] Ajazz AK820 Pro: RGB, Screen Manager (TFT), энкодер, статика в память
-- [x] Финальная документация для сборки на Fedora (без флейка): Makefile + fedora_install.sh
+- [x] Финальная документация для сборки на Fedora (без флейка): Makefile + fedora_install.sh + fedora_uninstall.sh
 
 ---
 

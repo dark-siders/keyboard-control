@@ -274,7 +274,7 @@ pub trait KeyboardDevice {
 - GUI `keyboard-center`: Вкладки — Устройства, RGB Studio (host-движок + persistent хуки 2.4G, аудио-реактив фоновым потоком (USB, стили `row`/`bars`), файловые пресеты TOML, сохранить в память, гашение), Screen Manager (TFT Ajazz), Keymap & Fn Layer (клик-редактор F75: Press/Media/Modifier, показ раскладки, сброс), Settings (Status/battery). Потоки — через каналы + `frame_gen` (поколение кадров вместо `SourceId::remove()` — больше никаких паник glib, 10.39); аудио — отдельный `Arc<AtomicBool>` stop-флаг (10.97c). Автосейв при закрытии окна (10.38).
 - Пресеты TOML: `$XDG_CONFIG_HOME/keyboard-center/presets` (по умолч. `~/.config/keyboard-center/presets`), структура `{version, type, color, brightness, speed, frame_ms, audio}`, где `[audio]` содержит `sensitivity`, `color_low`, `color_high`, `style`; пресет `default` неудаляем; встроенные `audio-viz` (`row`) и `cava` (`bars`) также неудаляемы и доступны любой установленной сборке без внешних файлов.
 - Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `258a:004e/004f/0050`, `0328:8207/8208/8209`. **В правилах обязательно `ATTRS{}`, не `ATTR{}`** — у hidraw нет своего `idVendor` (он в USB-родителе), `ATTR{}` не срабатывает никогда (10.103). На NixOS ручная установка в `/etc/udev/rules.d` невозможна (EROFS) — только через конфиг: `services.udev.packages` (наш модуль) или `services.udev.extraRules`; модуль постоянно подключён в `~/nixosniri` на хосте `darkside_pc` (10.103).
-- Fedora: `Makefile` (`make release`, `install/install-user/install-udev/uninstall/clean/help/install-deps`), `fedora_install.sh` (`--user/--system/--udev-only/--install-deps/--dry-run/--uninstall`), CI-джоб `fedora-build` (dnf-пакеты одной строкой в `.gitlab-ci.yml`, без `\`-переносов — иначе YAML-folding склеивает, 10.58).
+- Fedora: `Makefile` (`make release`, `install/install-user/install-udev/uninstall/clean/help/install-deps`), `fedora_install.sh` (`--user/--system/--udev-only/--install-deps/--dry-run/--uninstall`), `fedora_uninstall.sh` (полное удаление системной + пользовательской установки, флаги `--purge` (пресеты `~/.config/keyboard-center` + кэш иконок) / `--keep-rules` / `--dry-run`; требует sudo при наличии системных файлов), CI-джоб `fedora-build` (dnf-пакеты одной строкой в `.gitlab-ci.yml`, без `\`-переносов — иначе YAML-folding склеивает, 10.58; + `bash -n` для всех скриптов, 10.105).
 - Диагностика: `scripts/collect-data.sh` (read-only, `--device f99|ajazz`, `--sg`, `--auto`, результат `~/kbc-diag-ГГГГММДД-ЧЧММСС/{01..37}*.txt` + tar.gz; для F99 `--write-tests` делегирует в `scripts/f99-usb-rev.sh`; для Ajazz добавляет `28-ajazz-diag.txt`), `scripts/ajazz-usb-diag.sh` (Ajazz, read-only, `--device`/`--sg`, архив `~/kbc-diag-ajazz-*.tar.gz`), `docs/collect-data.md`, `docs/f99-guide.md` (для владельцев F99), `docs/ajazz-guide.md` (для владельцев Ajazz). Дамп прошивки F75: `data/firmware/f75_firmware.hex` (61440 б, Intel HEX; read-only, MD5 прошивки `564524ecd3aed509c3bba432f0398aca`).
 - **Открытые вопросы / такие задачи:** 2) ремап F99 W-канал (0x03 не работает, read-only, 10.82); 3) Ajazz на живом железе; 4) BT-канал (не тестировался, закрыт по батарее); 5) ~~откат временных правок `~/nixosniri` (10.2) + решение судьбы модуля в системном флейке~~ — **ЗАКРЫТО 10.103**: временных правок не осталось, модуль подключён постоянно (input `keyboard-center` + `nixosModules.default`, хост `darkside_pc`); 6) публикация в GitLab / релиз (по желанию владельца); 7) идеи на будущее (реализуемые, после F99+Ajazz): host-эффекты-сенсоры (CPU/GPU/RAM → цвет), трей + уведомление о низком заряде 2.4G, D-Bus API (интеграция с Waybar), авто-бэкап/restore перед remap (страховка от инцидентов типа 10.81), расширение host-эффектов (Fire/Matrix/…), горячая смена профилей по окну — по решению владельца. (audio-reactive — СДЕЛАНО, см. 10.97–10.97e.)
 
@@ -504,6 +504,8 @@ pub trait KeyboardDevice {
 10.103 — 2026-09-28 — доступ к hidraw после `nixos-rebuild` разобран и исправлен: в `99-keyboard-center.rules` `ATTR{}` → `ATTRS{}` (было — правила молча не срабатывали никогда); на NixOS ручная установка правил невозможна (`/etc/udev/rules.d` → симлинк на read-only `/etc/static`), модуль `keyboard-center` ПОСТОЯННО подключён в `~/nixosniri` (input + `nixosModules.default` на хосте `darkside_pc`), до перезапуска — страховка `services.udev.extraRules`; `plugdev` уже был в `core/userset.nix`; `target/`-бинари переживают GC, т.к. все их библиотеки закреплены системой. Фикс правил закоммичен локально (`c424502`), **без пуша**. Подробности — блок «10.103 ДОСТУП К HIDRAW / UDEV-ПРАВИЛА» ниже.
 
 10.104 — 2026-09-28 — иконка приложения не отображалась в меню (лаунчер): в `flake.nix` `postInstall` копировал `.desktop` и `.svg` через `cp <исходник> $out/share/<каталог>/` (без явного имени приёмника) → Nix 2.34 кладёт файлы репо в store как `<хэш>-keyboard-center.desktop` / `<хэш>-keyboard-center.svg`, `cp` брал basename, и в `$out` файлы получали префикс-хэш (`kgswh2nnv…-keyboard-center.desktop`, `if0rp850…-keyboard-center.svg`). Лаунчер имя `.desktop` не учитывает, но `Icon=keyboard-center` не резолвился. Фикс: `install -Dm444` с явными именами (desktop, svg, udev-правило). `nix build .#keyboard-center` — успешно, имена в `$out` правильные. Подробности — блок «10.104 ИКОНКА ПРИЛОЖЕНИЯ В МЕНЮ» ниже.
+
+10.105 — 2026-09-28 — удаление на Fedora/без nix вынесено в отдельный скрипт: новый `fedora_uninstall.sh` (полное удаление системной + пользовательской установки — бинарники, `.desktop`, иконка, udev-правила + reload/trigger; флаги `--purge` (пресеты + кэш иконок) / `--keep-rules` / `--dry-run`; требует sudo при наличии системных файлов); `Makefile` — `UNINSTALLER`, цель `uninstall` идёт через новый скрипт (+ `UNINSTALL_FLAGS=--purge`); `fedora_install.sh` — шапка/подсказка про новый скрипт, `--help` больше не печатает shebang; README — «Шаг 6. Удаление», таблица таргетов, параметры обоих скриптов, дерево проекта, чеклист; CI-джоб `fedora-build` — `bash -n` для установочных и диагностических скриптов. Проверено: `bash -n` для всех 6 скриптов — OK, `make help` / `make -n uninstall` — OK, `--dry-run` — OK. Правки разрешены владельцем; **коммит делает владелец сам**.
 
 10.102 — 2026-09-25 — подготовка версии 0.4.0: версия синхронизирована в `Cargo.toml`, `Cargo.lock`, `flake.nix` и README; в README добавлен раздел с составом релиза. `cargo check --all-targets` — 0 ошибок, `cargo test --lib` — 31/31, `cargo build --release` — успешно, `nix build .#keyboard-center` — успешно; `target/release/kbc --version` и `result/bin/kbc --version` — `0.4.0`. Сохранились два предсуществующих предупреждения `unused_mut` в `src/gui/keymap_editor.rs:308,323`.
 
@@ -839,4 +841,38 @@ kbc preset save my-bars --mode audio --style bars --brightness 200
 
 - Вход в `~/nixosniri` идёт с GitLab (`gitlab:dark_siders/keyboard-control`, зафиксирован на `1ea1d62`), фикс пока не запушен → до коммита/пуша в системе останется старая версия пакета. Пути: запушить фикс → `nix flake update keyboard-center` → `sudo nixos-rebuild switch --flake .#darkside_pc`; либо временно указать в `~/nixosniri` локальный путь `path:/home/darkside/keyboard-control`.
 - Коммит/пуш — только по явной просьбе владельца.
+
+---
+
+## 10.105 УДАЛЕНИЕ НА FEDORA / БЕЗ NIX (сессия 2026-09-28)
+
+> Запрос владельца: «может напишешь скрипт аналогичный установке, только под удаление» (контекст: на Fedora стояла старая версия, `make release` падал из-за прав на `target/`, `fedora_install.sh --uninstall` сносит только «своё» в одном режиме). Решение владельца по объёму: сносить **и системную, и пользовательскую** установки, данные (`~/.config/keyboard-center`) — только под флагом.
+
+### НОВЫЙ СКРИПТ `fedora_uninstall.sh`
+
+- Удаляет всегда: `/usr/local/bin/{kbc,keyboard-center}`, `/usr/share/applications/keyboard-center.desktop`, `/usr/share/icons/hicolor/scalable/apps/keyboard-center.svg`, `~/.local/bin/{kbc,keyboard-center}`, `~/.local/share/applications/keyboard-center.desktop`, `~/.local/share/icons/hicolor/scalable/apps/keyboard-center.svg`.
+- Udev-правило `/etc/udev/rules.d/99-keyboard-center.rules` + `udevadm control --reload-rules && udevadm trigger` (если не `--keep-rules`).
+- Флаги: `--purge` — дополнительно `~/.config/keyboard-center` (пресеты) и `~/.cache/icons`, `~/.cache/gtk-4.0`; `--keep-rules`; `--dry-run` (план действий, ничего не меняя).
+- Перед удалением скрипт проверяет наличие системных файлов: если они есть, а `uid != 0` — понятная ошибка с подсказкой `sudo ./fedora_uninstall.sh`; если ничего не найдено — сообщает и всё равно выполняет `rm -f` (идемпотентно).
+- Стиль как у `fedora_install.sh`: `set -euo pipefail`, функция `run` с поддержкой `--dry-run`, русские комментарии, `--help` через `sed -n '2,19p'` (диапазон подобран так, чтобы не печатать shebang — в `fedora_install.sh` тот же баг исправлен, было `sed -n '1,16p'`).
+
+### ЧТО ОБНОВЛЕНО ВМЕСТЕ
+
+- `Makefile`: `UNINSTALLER ?= ./fedora_uninstall.sh`, `UNINSTALL_FLAGS ?=`, цель `uninstall` → `$(UNINSTALLER) $(UNINSTALL_FLAGS)`, две строки в `help`. Установочные таргеты не тронуты.
+- `fedora_install.sh`: в шапке — блок про `fedora_uninstall.sh` (+ пример), в выводе блока `--uninstall` — подсказка «для полного удаления: sudo ./fedora_uninstall.sh», диапазон `--help` исправлен (`1,16p` → `2,21p`).
+- `README.md`: заголовок «Вариант 5» дополнен, новый «Шаг 6. Удаление» (dry-run/sudo/purge), таблица make-таргетов (`make uninstall`, `make uninstall UNINSTALL_FLAGS=--purge`), отдельная строка с параметрами `fedora_uninstall.sh`, дерево проекта, пункт Roadmap.
+- `.gitlab-ci.yml`: в джобе `fedora-build` добавлены две строки `bash -n` для установочных и диагностических скриптов (ловит опечатки до merge). ВНИМАНИЕ: dnf-строка с пакетами остаётся одной строкой без `\`-переносов (10.58).
+- `AGENTS.md`: сводка Fedora + запись 10.105 (этот блок).
+
+### ПРОВЕРКИ
+
+- `bash -n` для всех шести скриптов (`fedora_install.sh`, `fedora_uninstall.sh`, `scripts/{collect-data,ajazz-usb-diag,f75-usb-rev,f99-usb-rev}.sh`) — OK.
+- `./fedora_uninstall.sh --help`, `--dry-run`, `--dry-run --purge` — OK; `make help`, `make -n uninstall`, `make -n uninstall UNINSTALL_FLAGS=--purge` — OK.
+- Живой прогон удаления на Fedora делает владелец (на NixOS-хосте файлов нет — скрипт корректно отвечает «ничего не найдено»).
+- ВНИМАНИЕ (не связано с этой правкой): на Fedora `make release` падал с `Permission denied` на `target/release/libkeyboard_center.d` — каталог `target/` принадлежит root (сборка шла через `sudo`). Решение: `sudo chown -R $USER:$USER target` или `sudo rm -rf target`. Рекомендация владельцу: собирать от пользователя, sudo — только на `fedora_install.sh --system/--udev-only`.
+
+### ОСТАЛОСЬ
+
+- **Коммит и пуш — делает владелец сам** (незапушены: `c424502` udev `ATTRS` 10.103, фикс иконки 10.104, удалялка 10.105).
+- Для NixOS-хоста после пуша: `nix flake update keyboard-center` + `sudo nixos-rebuild switch --flake .#darkside_pc` (иначе в системе останется пакет с битым именем иконки, 10.104).
 
