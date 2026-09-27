@@ -1,19 +1,39 @@
 # --- udev-правила для Keyboard-Center ---
 # Дают доступ пользователю к HIDRAW-устройствам механических клавиатур
-# без root-прав. Установка:
+# без root-прав.
+#
+# ВАЖНО про синтаксис: используется ATTRS{}, а не ATTR{}.
+# У hidraw-устройства в собственном sysfs-каталоге атрибута idVendor нет —
+# он лежит выше, в USB-родителе (например .../3-2/idVendor). Совпадение по
+# ATTR{} на SUBSYSTEM=="hidraw" не срабатывает НИКОГДА, правило молча
+# игнорируется. ATTRS{} ищет атрибут по всей цепочке родителей — так же
+# поступают правила steam: /etc/udev/rules.d/60-steam-input.rules
+# (KERNEL=="hidraw*", ATTRS{idVendor}=="...", MODE="0660", TAG+="uaccess").
+#
+# Установка вручную (Fedora, Arch, Debian — обычный Linux):
 #   sudo cp 99-keyboard-center.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
+#   sudo usermod -aG plugdev "$USER"   # затем перелогин
+#
+# На NixOS ручная установка НЕ работает: /etc/udev/rules.d — симлинк на
+# /etc/static/udev/rules.d, а это read-only bind-mount стора (EROFS).
+# Правила ставятся только через конфигурацию:
+#   services.udev.packages = [ pkgs.keyboard-center ];   # модуль проекта
+#   # или services.udev.extraRules = [ ... те же правила ... ];
 #
 # VID/PID для 3 режимов подключения (USB / 2.4G Dongle / Bluetooth)
 # могут отличаться в зависимости от ревизии. Если клавиатура
 # не определяется — добавьте PID из вывода `lsusb` / `udevadm monitor`.
 
-# --- Общие переменные ---
-# Общая группа для доступа к HIDRAW (в NixOS:-users = "users", убедитесь что
-# пользователь состоит в ней). Группу можно сменить на свою, например "keyboard".
-GROUP="plugdev"
-MODE="0664"
+# --- Общие переменные (справочно) ---
+# Ниже MODE/GROUP заданы в каждом правиле явно. Общая группа для доступа
+# к HIDRAW — plugdev; на NixOS её создаёт модуль projects.keyboard-center,
+# а пользователя нужно вписать вручную:
+#   users.users.ваше_имя.extraGroups = [ "plugdev" ];
+# Группу можно сменить на свою, например "keyboard".
+# GROUP="plugdev"
+# MODE="0664"
 
 # ============================================================
 # Ajazz AK820 Pro
@@ -21,23 +41,23 @@ MODE="0664"
 
 # Wired + 2.4 GHz dongle режим (основная ревизия 0x8009 по ресёрчу wsclx,
 # VID 0x0C45 = Sonix SN32F299)
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="8009", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="8009", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # Вторая ревизия (kabelklaus, журнал 10.61)
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="800a", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="800a", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # Сток fw v1.14 (PID сменился на 0x8099, jdlien, журнал 10.61)
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="8099", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="8099", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # Bluetooth HID
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="fefe", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="fefe", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # ISP-режим (bootloader под пробелом, fwpb/ajazz-ak820-pro) — для отладки
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="7140", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="7140", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # ============================================================
@@ -45,26 +65,26 @@ ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0c45", ATTR{idProduct}=="71
 # ============================================================
 
 # USB
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004b", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", ATTRS{idProduct}=="004b", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # 2.4 GHz Dongle
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004c", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", ATTRS{idProduct}=="004c", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # Bluetooth
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004d", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", ATTRS{idProduct}=="004d", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # Ревизия «BY Tech Gaming Keyboard» (USB, PID 010C)
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="010c", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", ATTRS{idProduct}=="010c", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # ============================================================
 # Compx 2.4G Wireless Receiver (общий для AULA F75/F99)
 # ============================================================
 
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="3554", ATTR{idProduct}=="fa09", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fa09", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # ============================================================
@@ -72,15 +92,15 @@ ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="3554", ATTR{idProduct}=="fa
 # ============================================================
 
 # USB
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004e", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", ATTRS{idProduct}=="004e", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # 2.4 GHz Dongle
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="004f", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", ATTRS{idProduct}=="004f", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # Bluetooth
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="0050", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", ATTRS{idProduct}=="0050", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
 # ============================================================
@@ -89,8 +109,8 @@ ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", ATTR{idProduct}=="00
 # неизвестных ревизий PID).
 # ============================================================
 
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="0328", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0328", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
-ACTION=="add", SUBSYSTEM=="hidraw", ATTR{idVendor}=="258A", \
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258A", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
