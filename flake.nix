@@ -77,14 +77,21 @@
           // {
             inherit cargoArtifacts;
             postInstall = ''
-              # Установка .desktop + иконки
-              mkdir -p $out/share/applications
-              mkdir -p $out/share/icons/hicolor/scalable/apps
-              cp ${./data/keyboard-center.desktop} $out/share/applications/
-              cp ${./data/keyboard-center.svg} $out/share/icons/hicolor/scalable/apps/
+              # Установка .desktop + иконки.
+              # ВАЖНО: только install -D с ЯВНЫМ именем приёмника.
+              # `cp <исходник> $out/share/<каталог>/` копирует файл под
+              # basename'ом store-пути исходника, а Nix (2.34) кладёт файлы
+              # репозитория в store как `<хэш>-keyboard-center.desktop` /
+              # `<хэш>-keyboard-center.svg` — в итоге .desktop и иконка в $out
+              # получали префикс-хэш, `Icon=keyboard-center` не резолвился,
+              # и приложение показывалось в меню без иконки.
+              install -Dm444 ${./data/keyboard-center.desktop} \
+                $out/share/applications/keyboard-center.desktop
+              install -Dm444 ${./data/keyboard-center.svg} \
+                $out/share/icons/hicolor/scalable/apps/keyboard-center.svg
               # Установка udev-правил (для ручной установки)
-              mkdir -p $out/lib/udev/rules.d
-              cp ${./99-keyboard-center.rules} $out/lib/udev/rules.d/99-keyboard-center.rules
+              install -Dm444 ${./99-keyboard-center.rules} \
+                $out/lib/udev/rules.d/99-keyboard-center.rules
             '';
           }
         );

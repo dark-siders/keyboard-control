@@ -273,10 +273,10 @@ pub trait KeyboardDevice {
 - CLI `kbc`: `list / info / probe / ajazz-diag / raw feature-send/feature-get/output-send/input-read / wl-read-pages / rgb [--mode (вкл. audio — USB-only)|--style row|bars|--color|--brightness|--speed|--hold|--hw-effect|--light-on/--light-off] / screen --image / time / battery / save [--effect NN|--brightness|--speed] / remap --list|--key|--to|--media|--modifier|--layer / set-poll <Hz> / set-debounce <ms> / set-sleep <sec> / profile save|load|eeprom-save / monitor / preset save|list|apply|remove / daemon [--preset|--style row|bars|--frame-ms|…]` (встроенные аудио-пресеты `audio-viz` и `cava`, в фоне без GUI).
 - GUI `keyboard-center`: Вкладки — Устройства, RGB Studio (host-движок + persistent хуки 2.4G, аудио-реактив фоновым потоком (USB, стили `row`/`bars`), файловые пресеты TOML, сохранить в память, гашение), Screen Manager (TFT Ajazz), Keymap & Fn Layer (клик-редактор F75: Press/Media/Modifier, показ раскладки, сброс), Settings (Status/battery). Потоки — через каналы + `frame_gen` (поколение кадров вместо `SourceId::remove()` — больше никаких паник glib, 10.39); аудио — отдельный `Arc<AtomicBool>` stop-флаг (10.97c). Автосейв при закрытии окна (10.38).
 - Пресеты TOML: `$XDG_CONFIG_HOME/keyboard-center/presets` (по умолч. `~/.config/keyboard-center/presets`), структура `{version, type, color, brightness, speed, frame_ms, audio}`, где `[audio]` содержит `sensitivity`, `color_low`, `color_high`, `style`; пресет `default` неудаляем; встроенные `audio-viz` (`row`) и `cava` (`bars`) также неудаляемы и доступны любой установленной сборке без внешних файлов.
-- Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `258a:004e/004f/0050`, `0328:8207/8208/8209`.
+- Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `258a:004e/004f/0050`, `0328:8207/8208/8209`. **В правилах обязательно `ATTRS{}`, не `ATTR{}`** — у hidraw нет своего `idVendor` (он в USB-родителе), `ATTR{}` не срабатывает никогда (10.103). На NixOS ручная установка в `/etc/udev/rules.d` невозможна (EROFS) — только через конфиг: `services.udev.packages` (наш модуль) или `services.udev.extraRules`; модуль постоянно подключён в `~/nixosniri` на хосте `darkside_pc` (10.103).
 - Fedora: `Makefile` (`make release`, `install/install-user/install-udev/uninstall/clean/help/install-deps`), `fedora_install.sh` (`--user/--system/--udev-only/--install-deps/--dry-run/--uninstall`), CI-джоб `fedora-build` (dnf-пакеты одной строкой в `.gitlab-ci.yml`, без `\`-переносов — иначе YAML-folding склеивает, 10.58).
 - Диагностика: `scripts/collect-data.sh` (read-only, `--device f99|ajazz`, `--sg`, `--auto`, результат `~/kbc-diag-ГГГГММДД-ЧЧММСС/{01..37}*.txt` + tar.gz; для F99 `--write-tests` делегирует в `scripts/f99-usb-rev.sh`; для Ajazz добавляет `28-ajazz-diag.txt`), `scripts/ajazz-usb-diag.sh` (Ajazz, read-only, `--device`/`--sg`, архив `~/kbc-diag-ajazz-*.tar.gz`), `docs/collect-data.md`, `docs/f99-guide.md` (для владельцев F99), `docs/ajazz-guide.md` (для владельцев Ajazz). Дамп прошивки F75: `data/firmware/f75_firmware.hex` (61440 б, Intel HEX; read-only, MD5 прошивки `564524ecd3aed509c3bba432f0398aca`).
-- **Открытые вопросы / такие задачи:** 2) ремап F99 W-канал (0x03 не работает, read-only, 10.82); 3) Ajazz на живом железе; 4) BT-канал (не тестировался, закрыт по батарее); 5) откат временных правок `~/nixosniri` (10.2) + решение судьбы модуля в системном флейке; 6) публикация в GitLab / релиз (по желанию владельца); 7) идеи на будущее (реализуемые, после F99+Ajazz): host-эффекты-сенсоры (CPU/GPU/RAM → цвет), трей + уведомление о низком заряде 2.4G, D-Bus API (интеграция с Waybar), авто-бэкап/restore перед remap (страховка от инцидентов типа 10.81), расширение host-эффектов (Fire/Matrix/…), горячая смена профилей по окну — по решению владельца. (audio-reactive — СДЕЛАНО, см. 10.97–10.97e.)
+- **Открытые вопросы / такие задачи:** 2) ремап F99 W-канал (0x03 не работает, read-only, 10.82); 3) Ajazz на живом железе; 4) BT-канал (не тестировался, закрыт по батарее); 5) ~~откат временных правок `~/nixosniri` (10.2) + решение судьбы модуля в системном флейке~~ — **ЗАКРЫТО 10.103**: временных правок не осталось, модуль подключён постоянно (input `keyboard-center` + `nixosModules.default`, хост `darkside_pc`); 6) публикация в GitLab / релиз (по желанию владельца); 7) идеи на будущее (реализуемые, после F99+Ajazz): host-эффекты-сенсоры (CPU/GPU/RAM → цвет), трей + уведомление о низком заряде 2.4G, D-Bus API (интеграция с Waybar), авто-бэкап/restore перед remap (страховка от инцидентов типа 10.81), расширение host-эффектов (Fire/Matrix/…), горячая смена профилей по окну — по решению владельца. (audio-reactive — СДЕЛАНО, см. 10.97–10.97e.)
 
 ---
 
@@ -500,6 +500,10 @@ pub trait KeyboardDevice {
 10.100 — 2026-09-25 — Phase 2 аудио-реактива: Cava-стиль `style = "bars"` с точной геометрией OpenRGB для F75/F99, CLI/GUI-выбор стиля и встроенный пресет `cava`; `audio-viz` сохранён как совместимый row-режим. Тесты 31/31. Подробности — блок «10.100 АУДИО-РЕАКТИВ PHASE 2: CAVA-СТИЛЬ (BARS)» ниже.
 
 10.101 — 2026-09-25 — синхронизация документации после 10.100: удалены временные пользовательские тестовые пресеты `test-apply`/`test-audio`/`test-audio2` (в репозитории не лежали), уточнено, что `cava` — встроенный пресет бинарника (доступен любой установленной сборке без внешних файлов), исправлено описание геометрии F99 (известные позиции NumPad участвуют в Bars), README и `docs/f99-guide.md` приведены в соответствие. Код не менялся; `cargo test --lib` — 31/31, `cargo check --all-targets` — 0 ошибок, `cargo build --release` — OK.
+
+10.103 — 2026-09-28 — доступ к hidraw после `nixos-rebuild` разобран и исправлен: в `99-keyboard-center.rules` `ATTR{}` → `ATTRS{}` (было — правила молча не срабатывали никогда); на NixOS ручная установка правил невозможна (`/etc/udev/rules.d` → симлинк на read-only `/etc/static`), модуль `keyboard-center` ПОСТОЯННО подключён в `~/nixosniri` (input + `nixosModules.default` на хосте `darkside_pc`), до перезапуска — страховка `services.udev.extraRules`; `plugdev` уже был в `core/userset.nix`; `target/`-бинари переживают GC, т.к. все их библиотеки закреплены системой. Фикс правил закоммичен локально (`c424502`), **без пуша**. Подробности — блок «10.103 ДОСТУП К HIDRAW / UDEV-ПРАВИЛА» ниже.
+
+10.104 — 2026-09-28 — иконка приложения не отображалась в меню (лаунчер): в `flake.nix` `postInstall` копировал `.desktop` и `.svg` через `cp <исходник> $out/share/<каталог>/` (без явного имени приёмника) → Nix 2.34 кладёт файлы репо в store как `<хэш>-keyboard-center.desktop` / `<хэш>-keyboard-center.svg`, `cp` брал basename, и в `$out` файлы получали префикс-хэш (`kgswh2nnv…-keyboard-center.desktop`, `if0rp850…-keyboard-center.svg`). Лаунчер имя `.desktop` не учитывает, но `Icon=keyboard-center` не резолвился. Фикс: `install -Dm444` с явными именами (desktop, svg, udev-правило). `nix build .#keyboard-center` — успешно, имена в `$out` правильные. Подробности — блок «10.104 ИКОНКА ПРИЛОЖЕНИЯ В МЕНЮ» ниже.
 
 10.102 — 2026-09-25 — подготовка версии 0.4.0: версия синхронизирована в `Cargo.toml`, `Cargo.lock`, `flake.nix` и README; в README добавлен раздел с составом релиза. `cargo check --all-targets` — 0 ошибок, `cargo test --lib` — 31/31, `cargo build --release` — успешно, `nix build .#keyboard-center` — успешно; `target/release/kbc --version` и `result/bin/kbc --version` — `0.4.0`. Сохранились два предсуществующих предупреждения `unused_mut` в `src/gui/keymap_editor.rs:308,323`.
 
@@ -760,3 +764,79 @@ kbc preset save my-bars --mode audio --style bars --brightness 200
 - В Bars участвуют все известные позиции F75/F99, включая NumPad у F99; LED без известной позиции сохраняют базовый цвет.
 - F99 keymap write остаётся `Unsupported`; визуализация Bars от этого не зависит.
 - Визуальная проверка на живом F75/F99 и калибровка порогов остаются отдельными задачами.
+
+---
+
+## 10.103 ДОСТУП К HIDRAW / UDEV-ПРАВИЛА (сессия 2026-09-28)
+
+> Жалоба владельца: «при сканировании устройства ошибка hid — отказано в доступе» (на живом F75, USB, PID `258A:010C`). Диагностика велась на хосте `darkside_pc` (вне репозитория — `~/nixosniri`, работа только с явного разрешения владельца). Решение владельца: «подключим в nixosniri на pc хосте».
+
+### ДИАГНОСТИКА (что было на самом деле)
+
+- `/dev/hidraw0` и `/dev/hidraw1` — `crw------- root root` (режим 0600), оба интерфейса F75 (`HID_PHYS=usb-0000:07:00.3-2.2`).
+- Ошибка приложения: `hidapi error: Failed to open a device with path '/dev/hidraw1': Permission denied` (то же для `info`, `battery`, `rgb`). Сканирование (`kbc list`) при этом работает — hidapi перечисляет устройства без открытия.
+- Группы `plugdev` в системе **нет**; пользователь `darkside` в `users/wheel/disk/video/networkmanager/libvirtd/kvm` — не в `plugdev`.
+- `99-keyboard-center.rules` в `/etc/udev/rules.d` **отсутствует** → модуль проекта в системном флейке не включён (временные правки `~/nixosniri` из 10.2 к этому моменту уже были откачены).
+
+### ГЛАВНАЯ НАХОДКА: ПРАВИЛА БЫЛИ СЛОМАНЫ (`ATTR{}` вместо `ATTRS{}`)
+
+- В `99-keyboard-center.rules` использовался матч `ATTR{idVendor}`/`ATTR{idProduct}` при `SUBSYSTEM=="hidraw"`. У hidraw-устройства **в собственном sysfs-каталоге атрибута `idVendor` нет**: `/sys/class/hidraw/hidraw0/` содержит только `dev, device, power, subsystem, uevent`, а каталог устройства (`.../0003:258A:010C.0006/`) — `country, hidraw, input, modalias, uevent, report_descriptor`. `idVendor` лежит на 4+ уровня выше, в USB-родителе: `…/usb3/3-2/idVendor`.
+- Следствие: `ATTR{}` на hidraw **не срабатывает никогда**, правило молча игнорируется, `MODE`/`GROUP`/`TAG` не применяются — даже если файл установлен. То есть просто скопировать правила в систему было бы бессмысленно.
+- Подтверждение из живой системы: реальные рабочие правила для hidraw используют `ATTRS` — `/etc/udev/rules.d/60-steam-input.rules:8` (`KERNEL=="hidraw*", ATTRS{idVendor}=="28de", MODE="0660", TAG+="uaccess"`), а также `60-persistent-hidraw.rules:13` (`ATTRS{bInterfaceNumber}`). Плюс проверка `udevadm verify 99-keyboard-center.rules` (systemd 260) — синтаксис чистый, единственное замечание `Failed to resolve group 'plugdev'` (группы ещё нет).
+- **Фикс:** `ATTR{` → `ATTRS{` во всех 15 правилах файла; шапка файла переписана — объяснение, почему именно `ATTRS` (со ссылкой на steam-правила), отдельная инструкция для обычных Linux-дистрибутивов (`cp` + `udevadm reload` + `usermod -aG plugdev` + перелогин) и примечание про NixOS. Мёртвые строки-заглушки `GROUP="plugdev"` / `MODE="0664"` в начале файла (udev их не подставляет) закомментированы. Коммит локальный: `c424502` — **без пуша** (решение владельца), GitLab-репозиторий остался на `1ea1d62`.
+
+### NIXOS: РУЧНАЯ УСТАНОВКА ПРАВИЛ НЕВОЗМОЖНА
+
+- `/etc/udev/rules.d` — **симлинк** на `/etc/static/udev/rules.d`, а `/etc/static` — read-only bind-mount стора: запись даёт `EROFS` («Файловая система доступна только для чтения»), проверено. Поэтому инструкция `sudo cp … /etc/udev/rules.d/` из шапки правил на NixOS нерабочая.
+- `/etc/group` — обычный (не read-only) файл, но он генерируется заново при каждой загрузке → `groupadd`/`usermod` не переживают ребут. `/etc/sudoers.d` на NixOS вообще отсутствует.
+- Вывод: единственный постоянный путь — конфигурация: `services.udev.packages` (наш `nixos-module.nix` это уже делает) либо `services.udev.extraRules`.
+
+### ЧТО СДЕЛАНО В `~/nixosniri` (PC-хост, по решению владельца)
+
+- `flake.nix`: input `keyboard-center = { url = "gitlab:dark_siders/keyboard-control"; inputs.nixpkgs.follows = "nixpkgs"; }` (репозиторий публичный), добавлен в деструктуризацию `outputs` и в список модулей `keyboard-center.nixosModules.default`. `nix flake update keyboard-center` → lock обновлён, input зафиксирован на `1ea1d62`.
+- `hosts/darkside_pc/default.nix`: `programs.keyboard-center.enable = true;`, `programs.keyboard-center.enableUdevRules = false;` и **страховка** `services.udev.extraRules` — 4 правила с `ATTRS{idVendor}` (`258a`, `3554`, `0c45`, `0328`) → `MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"`. Страховка нужна потому, что вход идёт с GitLab, а фикс `ATTRS` не запушен; правила из пакета не ставятся, дублирования нет. Комментарий в файле объясняет, что после пуша фикса строки можно удалить, а `enableUdevRules` вернуть в `true`. Файл собирается в `etc/udev/rules.d/99-local.rules` (номер 99 → грузится после системных правил, поэтому перебивает их).
+- Строку `users.users.darkside.extraGroups = [ "plugdev" ]` в хосте **убрали как дубль** — группа уже прописана глобально в `modules/core/userset.nix:18` (просто текущий конфиг на машине давно не пересобирался, поэтому группа и не существовала). Побочно: `plugdev` в обоих хостах, модуль пока включён только на PC.
+- Сборка `nix build .#nixosConfigurations.darkside_pc.config.system.build.toplevel` — успешно; в closure системы пакет `keyboard-center-0.4.0`; `programs.keyboard-center.enable = true`; `extraRules` на месте.
+- **Не сделано (нужен sudo):** `sudo nixos-rebuild switch --flake .#darkside_pc` — владелец выполняет сам, затем перелогин (вступление в `plugdev`) и проверка `getent group plugdev` / `ls -l /dev/hidraw0` / `kbc info 258A:010C` без sudo.
+
+### ПРО `./target/` И GC (ответ на вопрос владельца «как запускать через ./target/… после перезагрузки»)
+
+- Отдельная проблема от прав: `nix-gc.timer` в `~/nixosniri` — еженедельно (понедельник 00:00), а `target/` не является GC-корнем → библиотеки стора удаляются, бинарь перестаёт запускаться (ошибка загрузки ELF).
+- Проверено: все 14 store-путей, нужных `target/release/kbc` (`ldd`: pulseaudio, systemd-minimal-libs, libgcc, glibc, dbus-1-lib, flac/vorbis/opus/libsndfile/mpg123 и др.), входят в requisites новой системы → после `switch` бинари из `target/` переживут и ребут, и GC. Отдельный `nix build .#keyboard-center` не потребовался.
+- Альтернатива без всяких пересборок: `sudo`-запуск или разовое `sudo chmod 664 /dev/hidraw0 /dev/hidraw1` после ребута (удобно для отладки, но не переживает переподключение).
+
+---
+
+## 10.104 ИКОНКА ПРИЛОЖЕНИЯ В МЕНЮ (сессия 2026-09-28)
+
+> Жалоба владельца: модуль подключён в `~/nixosniri` (NixOS-модуль, `environment.systemPackages`), приложение есть в списке, но «само название без иконки». Разрешение владельца на правку `flake.nix` получено явно.
+
+### ДИАГНОСТИКА (живая система, read-only)
+
+- `.desktop` находится лаунчером через `XDG_DATA_DIRS` → `/run/current-system/sw/share/applications/`, где лежит симлинк `kgswh2nnv321cbn30683a05wd3sq29r4-keyboard-center.desktop` → store-путь пакета. Содержимое файла валидно (`Icon=keyboard-center`), имя — нет.
+- Иконка в системе: `/run/current-system/sw/share/icons/hicolor/scalable/apps/if0rp850pqn0vdppw9m56kgq23dgrada-keyboard-center.svg` — имя с префиксом-хэшем, поэтому `Icon=keyboard-center` не резолвится ни в одном лаунчере (noctalia/rofi/GTK).
+- Udev-правило установилось ПРАВИЛЬНО (`lib/udev/rules.d/99-keyboard-center.rules`) — там в `cp` destination был указан явно, basename не использовался.
+
+### ПРИЧИНА
+
+`postInstall` в `flake.nix` делал `cp ${./data/keyboard-center.desktop} $out/share/applications/`. При интерполяции пути файла из дерева флейка Nix 2.34 создаёт store-путь `<хэш>-keyboard-center.desktop` (баснейм = полное store-имя), а `cp` с destination-каталогом копирует файл под баснеймом источника → в `$out` файл получался `kgswh2nnv321cbn30683a05wd3sq29r4-keyboard-center.desktop`. Лаунчер имя `.desktop` не учитывает (приложение видно), но `Icon=keyboard-center` резолвится по ИМЕНИ файла иконки — и не находится.
+
+### ФИКС (`flake.nix`, `postInstall`)
+
+Все три файла ставятся через `install -Dm444` с явными именами приёмника (независимо от того, как Nix назовёт store-путь исходника):
+
+- `install -Dm444 <desktop> $out/share/applications/keyboard-center.desktop`
+- `install -Dm444 <svg> $out/share/icons/hicolor/scalable/apps/keyboard-center.svg`
+- `install -Dm444 <rules> $out/lib/udev/rules.d/99-keyboard-center.rules`
+
+В коде оставлен комментарий-предупреждение, почему `cp` в каталог использовать нельзя. Общее правило для nixpkgs: **никогда не `cp <исходник-из-флейка> $out/share/<каталог>/`** — только `install -D`/`installShellFiles` с явным именем.
+
+### ПРОВЕРКА
+
+- `nix build .#keyboard-center` — успешно; `result/share/applications/keyboard-center.desktop` (518 б) и `result/share/icons/hicolor/scalable/apps/keyboard-center.svg` (2597 б) — имена правильные, размеры совпадают с исходниками в `data/`; `result/bin/kbc --version` = `0.4.0`.
+
+### ОСТАЛОСЬ (вне репозитория, за владельцем)
+
+- Вход в `~/nixosniri` идёт с GitLab (`gitlab:dark_siders/keyboard-control`, зафиксирован на `1ea1d62`), фикс пока не запушен → до коммита/пуша в системе останется старая версия пакета. Пути: запушить фикс → `nix flake update keyboard-center` → `sudo nixos-rebuild switch --flake .#darkside_pc`; либо временно указать в `~/nixosniri` локальный путь `path:/home/darkside/keyboard-control`.
+- Коммит/пуш — только по явной просьбе владельца.
+
