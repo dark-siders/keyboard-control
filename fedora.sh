@@ -178,6 +178,37 @@ install_udev_rules() {
     echo "Udev-правила установлены."
 }
 
+# Пересборка кэшей иконок и .desktop (иначе в меню не появляется/не исчезает
+# иконка приложения на Fedora/GNOME, сессия 10.107b).
+refresh_icon_cache() { # $1 = user|system
+    local icon_dir desktop_dir
+    if [[ "$1" == "system" ]]; then
+        icon_dir="/usr/share/icons/hicolor"
+        desktop_dir="/usr/share/applications"
+        if [[ "$(id -u)" -ne 0 && "$DRY_RUN" -ne 1 ]]; then
+            echo "  пересборка системного кэша иконок требует root — пропущено."
+            return 0
+        fi
+    else
+        icon_dir="$HOME/.local/share/icons/hicolor"
+        desktop_dir="$HOME/.local/share/applications"
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        if [[ -d "$icon_dir" ]]; then
+            run gtk-update-icon-cache -f "$icon_dir" || echo "  (нет index.theme в $icon_dir — пропущено)"
+        else
+            echo "  каталог $icon_dir отсутствует — кэш иконок не трогаем."
+        fi
+    else
+        echo "  gtk-update-icon-cache не найден — кэш иконок не пересобран."
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        [[ -d "$desktop_dir" ]] && run update-desktop-database "$desktop_dir" || true
+    else
+        echo "  update-desktop-database не найден — кэш .desktop не пересобран."
+    fi
+}
+
 install_deps() {
     echo "Установка системных зависимостей через dnf..."
     [[ "$DRY_RUN" -eq 1 || "$(id -u)" -eq 0 ]] || {
@@ -251,6 +282,9 @@ do_uninstall() {
     else
         echo "Пользовательские данные не тронуты (~/.config/keyboard-center). Снести их: $0 uninstall --purge"
     fi
+    # Убираем ссылку на иконку из кэшей после удаления файлов.
+    refresh_icon_cache system
+    refresh_icon_cache user
     echo "Готово."
 }
 
@@ -319,9 +353,11 @@ case "$ACTION" in
             need_root
             build_release
             install_files system
+            refresh_icon_cache system
         else
             build_release
             install_files user
+            refresh_icon_cache user
         fi
         ;;
     update)
@@ -335,6 +371,7 @@ case "$ACTION" in
         fi
         build_release
         install_files "$TARGET"
+        refresh_icon_cache "$TARGET"
         echo "Обновление завершено: бинарники пересобраны и установлены."
         ;;
     uninstall)

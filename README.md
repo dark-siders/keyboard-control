@@ -490,6 +490,8 @@ sudo ./fedora.sh uninstall --purge  # то же + пресеты (~/.config/keyb
 
 Режимы `fedora.sh`: `install` (по умолчанию `--user`, также `--system`, `--udev-only`), `update` (`--auto`/`--user`/`--system`), `uninstall`, `deps`. Флаги: `--install-deps` (поставить системные зависимости через dnf), `--purge` (пресеты `~/.config/keyboard-center` и кэш иконок), `--keep-rules` (оставить `/etc/udev/rules.d/99-keyboard-center.rules`), `--dry-run`. Без аргументов — интерактивное меню.
 
+После установки/обновления/удаления скрипт пересобирает кэши иконок и `.desktop` (`gtk-update-icon-cache` + `update-desktop-database`) — без этого иконка в меню приложений не появится/не исчезнет на рабочих столах на базе GTK.
+
 ---
 
 ## Работа с несколькими моделями

@@ -1016,6 +1016,7 @@ Production-код не менялся. Все действия — read-only д�
   - `deps` — системные зависимости через dnf (`rust cargo gcc pkgconf gtk4-devel libadwaita-devel glib2-devel gdk-pixbuf2-devel cairo-devel pango-devel hidapi-devel libudev-devel pulseaudio-libs-devel`).
 - **Стиль** — как у старых скриптов: `set -euo pipefail`, `run()` с поддержкой `--dry-run`, русские комментарии, `--help` через `sed -n` по шапке. Функции: `need_root` (перезапуск `sudo $0 install --<target>`), `detect_target` (позиция для update), `build_release`, `install_files`, `install_udev_rules`, `install_deps`, `do_uninstall`, `interactive_menu`.
 - **Памятка по доступу** (plugdev/udev) выводится после user-установки.
+- **Пересборка кэша иконок/`.desktop`** (`refresh_icon_cache`): после `install`/`update`/`uninstall` для соответствующей позиции вызываются `gtk-update-icon-cache -f <hicolor>` + `update-desktop-database <applications>` (если утилиты есть; каталог отсутствует — пропускается; системный без root — пропуск с сообщением). Без этого на Fedora/GNOME иконка не появляется/не исчезает в меню, т.к. читается `icon-theme.cache`, а не файл `.svg` напрямую (10.107b).
 - `git rm` удалены оба старых скрипта.
 
 ### ОБНОВЛЕННЫЕ ФАЙЛЫ
@@ -1037,6 +1038,13 @@ Production-код не менялся. Все действия — read-only д�
 - `./fedora.sh --help` — печатает шапку без shebang (sed `2,30p`).
 - `./fedora.sh uninstall --dry-run`, `deps --dry-run`, `update --auto --dry-run`, `install --system --dry-run`, `install --udev-only --dry-run` — вывод корректен, ничего не меняет.
 - `make -n install`, `make -n update`, `make -n uninstall UNINSTALL_FLAGS=--purge` — команды на новый скрипт.
+
+### ДОРАБОТКА 10.107b — иконка в меню (2026-09-28)
+
+- Владелец: «удалил скриптом и установил заново на Fedora, опять пропала картинка в списке программ».
+- Причина: на Fedora/GNOME иконка читается из кэша `icon-theme.cache`, а скрипт после установки его не пересобирал — `.svg` ложился на место, но в меню не появлялся (и не исчезал при удалении). Это и есть причина «опять», а не регрессия фикса 10.104 (там была другая проблема — имена с хэшем в Nix-пакете).
+- Фикс: в `fedora.sh` функция `refresh_icon_cache` (user|system) вызывает `gtk-update-icon-cache -f …` и `update-desktop-database …`; подключена после `install`/`update`/`uninstall`. Специальных случаев: нет утилиты → сообщение; нет каталога (`~/.local/share/icons/hicolor` до первой установки) → пропуск; системный кэш без root → пропуск с сообщением.
+- Проверено `--dry-run` для всех веток, `bash -n` OK.
 
 ### ОСТАЛОСЬ
 
