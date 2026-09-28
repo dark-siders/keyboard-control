@@ -70,16 +70,16 @@ sg plugdev -c "kbc list"
 
 ```bash
 # зависимости для сборки (dnf)
-sudo ./fedora_install.sh --install-deps
+sudo ./fedora.sh deps
 
 # собрать release
 make release
 
 # установить на уровне пользователя (без sudo) — бинарники, .desktop, иконка
-./fedora_install.sh --user
+./fedora.sh install --user
 
-# + udev-правила под доступ к hidraw (см. README, Вариант 5, Шаг 4)
-sudo ./fedora_install.sh --udev-only
+# + udev-правила под доступ к hidraw (см. README, Вариант 5, Шаг 3)
+sudo ./fedora.sh install --udev-only
 ```
 
 > [!NOTE]

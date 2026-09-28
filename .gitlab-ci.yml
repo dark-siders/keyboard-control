@@ -65,7 +65,7 @@ build:
 
 # --- Fedora: проверка, что пакет собирается без nix (dnf + cargo) ------
 # Свежий Fedora-контейнер: ставим системные dev-пакеты (как это делает
-# fedora_install.sh --install-deps), затем обычный cargo build/test.
+# fedora.sh deps), затем обычный cargo build/test.
 fedora-build:
   stage: build
   image: fedora:latest
@@ -75,7 +75,7 @@ fedora-build:
     - cargo build --release --all-targets
     - cargo test --lib
     # Синтаксис установочных/диагностических скриптов (быстро, ловит опечатки)
-    - bash -n fedora_install.sh fedora_uninstall.sh
+    - bash -n fedora.sh
     - bash -n scripts/collect-data.sh scripts/ajazz-usb-diag.sh scripts/f75-usb-rev.sh scripts/f99-usb-rev.sh
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

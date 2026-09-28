@@ -387,14 +387,19 @@ cargo build --release
 
 Готовые бинарники: `target/release/kbc`, `target/release/keyboard-center`.
 
-### Вариант 5 — Fedora / любой дистрибутив без nix (Makefile + fedora_install.sh + fedora_uninstall.sh)
+### Вариант 5 — Fedora / любой дистрибутив без nix (Makefile + fedora.sh)
+
+Один интерактивный скрипт `fedora.sh` вместо установки и удаления по отдельности.
+Запустите без аргументов — скрипт спросит, что делать: **установить с нуля**,
+**обновить до последней версии** (пересобрать и переустановить) или **полностью удалить**.
+При установке/обновлении дополнительно выбирается место (для пользователя или системно).
 
 **Полный пошаговый сценарий** (Fedora 40/41+, аналогично других дистрибутивах с `dnf`).
 
 #### Шаг 1. Разрешения на доступ к клавиатуре (группа `plugdev`)
 
 Доступ к `/dev/hidraw` без root даёт группа `plugdev` и udev-правила `99-keyboard-center.rules`.
-Скрипт установки создаёт правило через флаг `--system`, а группу нужно сделать один раз:
+Скрипт установки создаёт правило при системной установке, а группу нужно сделать один раз:
 
 ```bash
 sudo groupadd plugdev           # ошибка «уже существует» — не страшно
@@ -406,57 +411,47 @@ sudo usermod -aG plugdev $USER
 > Проверка: `id -nG` должен содержать `plugdev`. Быстрый временный способ без перелогина —
 > обернуть команду: `sg plugdev -c "kbc list"`.
 
-#### Шаг 2. Установка зависимостей
-
-Либо автоматически, флагом скрипта (ставит Rust, GTK4/Libadwaita dev-пакеты и hidapi):
+#### Шаг 2. Установка зависимостей и сборка
 
 ```bash
-sudo ./fedora_install.sh --install-deps
+sudo ./fedora.sh deps           # системные зависимости через dnf (Rust, GTK4/hidapi dev-пакеты)
+make release                    # cargo build --release
 ```
 
-Либо вручную, чтобы контролировать состав:
+Или всё одной командой — скрипт поставит зависимости и сам соберёт:
+`sudo ./fedora.sh install --install-deps --system`.
+
+#### Шаг 3. Установка
+
+Проще всего запустить интерактивно и выбрать пункт «Установить с нуля»:
 
 ```bash
-sudo dnf install gcc gtk4-devel libadwaita-devel hidapi-devel glib2-devel \
-                 cairo-devel pango-devel gdk-pixbuf2-devel libudev-devel
+./fedora.sh
 ```
 
-(`rust`/`cargo`, если ещё не стоят: `sudo dnf install rust cargo` — их тоже ставит `--install-deps`.)
-
-#### Шаг 3. Сборка
+Либо сразу указать режим:
 
 ```bash
-make release            # = cargo build --release
+./fedora.sh install --user                 # для пользователя: ~/.local/bin, без sudo
+sudo ./fedora.sh install --system          # системно: /usr/local/bin + udev + .desktop
+sudo ./fedora.sh install --udev-only       # только 99-keyboard-center.rules
 ```
 
-Готовые бинарники: `target/release/kbc`, `target/release/keyboard-center`.
+> [!NOTE]
+> При **пользовательской** установке (`--user`) udev-правило не ставится — без него hidraw
+> не откроется даже с группой `plugdev`. Решите разово (нужен sudo):
+> `sudo ./fedora.sh install --udev-only`.
 
-#### Шаг 4а. Установка для своего пользователя (без sudo)
+#### Шаг 4. Обновление до последней версии
+
+Скрипт пересобирает release-бинарники из текущих исходников и переустанавливает их туда,
+где программа уже стоит (system или user — определяется автоматически):
 
 ```bash
-./fedora_install.sh --user
+./fedora.sh update
 ```
 
-Ставит `kbc`/`keyboard-center` в `~/.local/bin`, `.desktop` и иконку в `~/.local/share`.
-**Udev-правило так не ставится** — без него hidraw не откроется даже с группой `plugdev`.
-Решите разово (нужен sudo):
-
-```bash
-sudo ./fedora_install.sh --udev-only   # только 99-keyboard-center.rules + reload/trigger
-```
-
-#### Шаг 4б. Системная установка (все сразу, нужен sudo)
-
-```bash
-sudo ./fedora_install.sh --system
-```
-
-Ставит бинарники в `/usr/local/bin`, глобальный `.desktop`+иконку и udev-правила
-(с перезагрузкой правил и триггером). Сочетается с шагом 2:
-
-```bash
-sudo ./fedora_install.sh --install-deps --system   # всё в одной команде
-```
+Или через Makefile: `make update`. Так «прилетают» любые изменения из последнего кода.
 
 #### Шаг 5. Проверка
 
@@ -467,12 +462,12 @@ keyboard-center           # запуск GUI
 
 #### Шаг 6. Удаление
 
-Полное удаление — отдельным скриптом (сносит и системную, и пользовательскую установку):
+Запустите интерактивно и выберите «Полностью удалить», либо напрямую:
 
 ```bash
-./fedora_uninstall.sh --dry-run     # сначала посмотреть, что будет удалено
-sudo ./fedora_uninstall.sh          # бинарники, .desktop, иконка, udev-правила
-sudo ./fedora_uninstall.sh --purge  # то же + пресеты (~/.config/keyboard-center) и кэш иконок
+./fedora.sh uninstall --dry-run     # сначала посмотреть, что будет удалено
+sudo ./fedora.sh uninstall          # бинарники, .desktop, иконка, udev-правила
+sudo ./fedora.sh uninstall --purge  # то же + пресеты (~/.config/keyboard-center) и кэш иконок
 ```
 
 Или через Makefile: `make uninstall`, `make uninstall UNINSTALL_FLAGS=--purge`.
@@ -485,16 +480,15 @@ sudo ./fedora_uninstall.sh --purge  # то же + пресеты (~/.config/keyb
 | `make build` / `make release` | debug / оптимизированная сборка |
 | `make check` | `cargo check --all-targets` |
 | `make test` | `cargo test --lib` |
-| `make install-user` | локальная установка без sudo |
-| `make install` | системная установка (`fedora_install.sh --system`) |
+| `make install-user` | локальная установка без sudo (`fedora.sh install --user`) |
+| `make install` | системная установка (`fedora.sh install --system`) |
 | `make install-udev` | только udev-правила |
-| `make install-deps` | установка зависимостей через dnf (`fedora_install.sh --install-deps`) |
-| `make uninstall` | полное удаление (`fedora_uninstall.sh`) |
+| `make update` | пересборка + переустановка туда, где стоит (`fedora.sh update --auto`) |
+| `make install-deps` | установка зависимостей через dnf (`fedora.sh deps`) |
+| `make uninstall` | полное удаление (`fedora.sh uninstall`) |
 | `make uninstall UNINSTALL_FLAGS=--purge` | удаление вместе с пресетами и кэшем иконок |
 
-Параметры `fedora_install.sh`: `--user` (по умолчанию), `--system`, `--udev-only`, `--install-deps` (поставить системные зависимости через dnf), `--uninstall`, `--dry-run` (показать действия без изменений).
-
-Параметры `fedora_uninstall.sh`: `--purge` (пресеты `~/.config/keyboard-center` и кэш иконок), `--keep-rules` (оставить `/etc/udev/rules.d/99-keyboard-center.rules`), `--dry-run`.
+Режимы `fedora.sh`: `install` (по умолчанию `--user`, также `--system`, `--udev-only`), `update` (`--auto`/`--user`/`--system`), `uninstall`, `deps`. Флаги: `--install-deps` (поставить системные зависимости через dnf), `--purge` (пресеты `~/.config/keyboard-center` и кэш иконок), `--keep-rules` (оставить `/etc/udev/rules.d/99-keyboard-center.rules`), `--dry-run`. Без аргументов — интерактивное меню.
 
 ---
 
@@ -518,8 +512,7 @@ keyboard-control/
 ├── AGENTS.md                 # внутренняя документация/журнал (для агента)
 ├── Cargo.toml                # Rust: gtk4, libadwaita, hidapi, image, clap...
 ├── Makefile                  # сборка/установка без nix (для Fedora и др.)
-├── fedora_install.sh         # установщик Fedora: зависимости (dnf) + бинарники + udev + .desktop
-├── fedora_uninstall.sh       # удалялка Fedora: бинарники, .desktop, иконка, udev-правила (--purge)
+├── fedora.sh                 # Fedora/без nix: установка, обновление, удаление (интерактивное меню)
 ├── flake.nix                 # Nix Flake: packages, nixosModules, homeManagerModules
 ├── default.nix               # легаси-обёртка без флейка (nix-build)
 ├── 99-keyboard-center.rules  # udev-правила (доступ к hidraw)
@@ -598,7 +591,7 @@ keyboard-control/
 - [x] AULA F99: базовый USB/2.4G-хост-рендеринг, эффекты и аудио-реактив подтверждены; гайд для владельцев — `docs/f99-guide.md`
 - [ ] AULA F99: довести дополнительные каналы (ремап, индикаторы, polling/debounce/sleep)
 - [ ] Ajazz AK820 Pro: RGB, Screen Manager (TFT), энкодер, статика в память
-- [x] Финальная документация для сборки на Fedora (без флейка): Makefile + fedora_install.sh + fedora_uninstall.sh
+- [x] Финальная документация для сборки на Fedora (без флейка): Makefile + fedora.sh (установка/обновление/удаление)
 
 ---
 
