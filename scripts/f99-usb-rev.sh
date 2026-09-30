@@ -215,7 +215,7 @@ t1_config_roundtrip() {
     local write_pkt
     write_pkt="$(printf '06 04 00 00 01 00 80 00 %s' \
         "$(printf '%s' "$new_data" | awk '{ s=$9; for (i=10; i<=NF; i++) s=s " " $i; print s }')"; \
-        yes 00 | head -384 | tr '\n' ' ')"
+        for ((i=0;i<384;i++)); do printf ' 00'; done)"
 
     echo "— записываю селектор 0x$sel_new (пакет 520 б)…" >> "$OUT_DIR/T1-config-write.txt"
     run_kbc raw "$PID_USB" feature-send "$write_pkt" >> "$OUT_DIR/T1-config-write.txt" 2>&1 || true
@@ -245,7 +245,7 @@ t1_config_roundtrip() {
     local restore_pkt
     restore_pkt="$(printf '06 04 00 00 01 00 80 00 %s' \
         "$(printf '%s' "$old_data" | awk '{ s=$9; for (i=10; i<=NF; i++) s=s " " $i; print s }')"; \
-        yes 00 | head -384 | tr '\n' ' ')"
+        for ((i=0;i<384;i++)); do printf ' 00'; done)"
     run_kbc raw "$PID_USB" feature-send "$restore_pkt" >> "$OUT_DIR/T1-config-write.txt" 2>&1 || true
     sleep 5
     readback="$(run_kbc raw "$PID_USB" feature-send "$(packet_read 0x84 0x0080)" >/dev/null 2>&1; run_kbc raw "$PID_USB" feature-get 06 520 \
@@ -405,8 +405,7 @@ t4_keymap_write() {
     # Формат: 06 03 <layer> 00 01 00 00 FF + 512 байт слотов + 5A A5 на конце
     local write_pkt
     write_pkt="$(printf '06 03 00 00 01 00 00 FF %s 5A A5' \
-        "$(printf '%s' "$new_km" | awk '{ s=$1; for(i=2;i<=NF;i++) s=s " " $i; print s }')"; \
-        yes 00 | head -0 | tr '\n' ' ')"
+        "$(printf '%s' "$new_km" | awk '{ s=$1; for(i=2;i<=NF;i++) s=s " " $i; print s }')")"
  
     echo "— записываю keymap через 0x03 (layer 0)..." >> "$OUT_DIR/T4-keymap-write.txt"
     run_kbc raw "$PID_USB" feature-send "$write_pkt" >> "$OUT_DIR/T4-keymap-write.txt" 2>&1 || true
