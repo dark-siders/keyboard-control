@@ -157,6 +157,31 @@ impl HidBridge {
     pub fn read_input(&self, buf: &mut [u8], timeout_ms: i32) -> hidapi::HidResult<usize> {
         self.device.read_timeout(buf, timeout_ms)
     }
+
+    /// Найти и открыть boot keyboard интерфейс (usage_page=0x0001, usage=0x0006)
+    /// для отправки output-report 0x02 (индикаторы Caps/Num/Scroll).
+    /// Возвращает HidDevice или ошибку, если интерфейс не найден.
+    pub fn open_boot_keyboard(&self) -> hidapi::HidResult<HidDevice> {
+        let api = HidApi::new()?;
+        for d in api.device_list() {
+            if d.vendor_id() != self.vid || d.product_id() != self.pid {
+                continue;
+            }
+            if d.usage_page() == 0x0001 && d.usage() == 0x0006 {
+                let path = d.path();
+                if path.to_bytes().is_empty() {
+                    continue;
+                }
+                let cstr = std::ffi::CString::new(path.to_bytes().to_vec())
+                    .map_err(|e| hidapi::HidError::from(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                return api.open_path(&cstr);
+            }
+        }
+        Err(hidapi::HidError::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "boot keyboard interface not found",
+        )))
+    }
 }
 
 // HidBridge передаётся между фоновым потоком (открытие после кика клавиатуры)

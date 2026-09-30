@@ -561,6 +561,28 @@ pub trait KeyboardDevice {
 
 10.108 — 2026-09-30 — фикс `scripts/f99-usb-rev.sh` (тесты владельца F99, orflem): (1) `run_kbc` при `--sg` не экранировал аргументы → `sg plugdev -c` разбивал 520-байтный hex по пробелам, clap видел лишние аргументы (`unexpected argument '84'`); перенесён фикс `printf '%q'` из `collect-data.sh`; (2) `packet_read_keymap` форматировал слой через `%s` (байт `0` полутетрадой вместо `00`) → «нечётное число hex-цифр: 06 83 00 0 01 00 00 02»; теперь `%02X`; (3) `yes 00 | head -NNN` в write-пакетах T1/T4 килл-sировал скрипт через **SIGPIPE 141** (`head` закрывал пайп, `yes` получал SIGPIPE, `pipefail` превращал в 141; на выходе `{ec: 141}` после ответа «да» в T1): пад переписан циклами `for ((i=0;i<384;i++)); do printf ' 00'; done` (в T4 `yes | head -0` был пустым и просто удалён). Заодно `packet_read`/`packet_read_keymap` приведены к варианту `collect-data.sh` (цикл до 512 нулей вместо `yes 00 | head`). Проверено: `bash -n`, длина hex ровно 520 б.
 
+10.109 — 2026-09-30 — полный прогон `scripts/f99-usb-rev.sh --device f99 --write-tests` на железе (orflem, F99 USB `258A:010C`, PSD `0xA4`). Все 6 тестов прошли без SIGPIPE. Ключевые находки:
+- **T1 config round-trip (06 04):** ✓ запись/чтение конфига работает, `data[10]` (селектор эффекта) меняется и читается обратно. **Визуально эффект не меняется** — self-define селектора нет (как F75, 10.86), host-рендеринг перебивает.
+- **T2 boot indicators (output-report 0x02):** ✓ **индикаторы Caps/Num/Scroll РАБОТАЮТ** через boot keyboard output-report (на F75 — Broken pipe!). Значит F99 поддерживает стандартный HID LED report.
+- **T3 self-define hunt (06 0A color table):** ✓ color table пишется/читается (красные 3 клавиши в readback). **Self-define селектор НЕ НАЙДЕН** — per-key цвета визуально не отображаются ни при каком `Fn+\`. Подтверждает: self-define не существует (как F75 10.86).
+- **T4 keymap W-channel (0x03):** пропущен (owner ответил "нет"). По 10.82 — ожидаемо read-only.
+- **T5 color table per-key + self-define:** readback не совпал с записанным, self-define не найден.
+- **T6 indicators config diff:** **НАЙДЕНЫ байты индикаторов в конфиге** (дифф показывает изменения вне `[58..125]`): `data[9]` (0x01→0x00) и `data[10]` (0x12→0x00). `data[10]` — также селектор эффекта (конфликт: нажатие NumLock сбросило эффект в 0x00). Требует уточнения: возможно, индикаторы маппятся на те же байты, или прошивка F99 специфична. Файлы: `T6-config-ind-diff.txt`, `T6-indicators-diff.txt`.
+
+Выводы для `aula_f99.rs`:
+1. `write_config` (06 04) — реализовать для USB (как F75).
+2. `set_rgb_color` для индикаторов — через boot output-report `0x02` (работает на F99).
+3. Self-define — убрать попытки, честный `Unsupported`.
+4. W-channel keymap `0x03` — оставить `Unsupported` (read-only).
+5. Добавить константы индикаторов из T6 diff после уточнения offsets.
+
+10.110 — 2026-09-30 — реализация находок F99 (журнал 10.109) в `src/devices/aula_f99.rs` и `src/devices/hid.rs`:
+- **Boot indicators (output-report 0x02):** реализован `set_rgb_color` для специальных KeyId: `0xFF00` = CapsLock (bit 1), `0xFF01` = NumLock (bit 0), `0xFF02` = ScrollLock (bit 2). Чёрный цвет (0,0,0) = выключить, любой другой = включить. Добавлен `HidBridge::open_boot_keyboard()` — поиск boot keyboard интерфейса (usage_page=0x0001, usage=0x0006) и отправка output-report `[0x02, mask]`.
+- **Индикаторы в конфиге:** добавлены константы `CFG_INDICATOR_CAPS = 9` и `CFG_INDICATOR_NUM_EFFECT = 10` (T6 diff, журнал 10.109). `data[10]` — конфликт: селектор эффекта + NumLock (нажатие NumLock сбрасывает эффект в 0x00).
+- **Self-define / W-channel keymap:** уже честный `Unsupported` — оставлено без изменений.
+- **`write_config` (06 04):** уже был реализован (строки 199–213), диагностика подтвердила работоспособность.
+- Тесты: `cargo test --lib` — 31/31, `cargo build --release` — OK.
+
 ---
 
 ## 10.94 FIX «КРИВАЯ ВЁРСТКА» НА СТАРТЕ ПК: ПАУЗА 4 С ПЕРЕД ПЕРВЫМ КАДРОМ HOST-РЕНДЕРИНГА (сессия 2026-09-23)

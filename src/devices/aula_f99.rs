@@ -40,6 +40,12 @@ pub const RGB_COLS: usize = 24;
 /// для аудио-реактива.
 pub const AUDIO_ACTIVE_ROW_LEDS: &[usize] = &[0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72];
 
+/// Конфиг-оффсеты индикаторов (T6 diff, журнал 10.109):
+/// - data[9] — CapsLock (0x01 = вкл, 0x00 = выкл)
+/// - data[10] — NumLock / селектор эффекта (конфликт прошивки: NumLock сбрасывает эффект в 0x00)
+pub const CFG_INDICATOR_CAPS: usize = 9;
+pub const CFG_INDICATOR_NUM_EFFECT: usize = 10;
+
 /// Геометрия LED-матрицы для cava-стиля (bars): `LED index -> (row, col)`.
 /// Построена из OpenRGB `SinowealthKeyboard10cDevices.cpp` / `aula_f99_layout`
 /// (модель 0xA4) с применением edit_keys (физическая раскладка 6×19).
@@ -320,10 +326,28 @@ impl KeyboardDevice for AulaF99 {
         ))
     }
 
-    fn set_rgb_color(&self, _key: KeyId, _color: Color) -> Result<()> {
-        Err(Error::Unsupported(
-            "поклавишный цвет только через host-render_frame (per-key не ревёрснут)",
-        ))
+    fn set_rgb_color(&self, key: KeyId, color: Color) -> Result<()> {
+        // Специальные KeyId для индикаторов (boot keyboard output-report 0x02):
+        // 0xFF00 = CapsLock, 0xFF01 = NumLock, 0xFF02 = ScrollLock.
+        // colour.r/g/b = 0 (чёрный) -> выключить, иначе -> включить.
+        const INDICATOR_CAPS: u16 = 0xFF00;
+        const INDICATOR_NUM: u16 = 0xFF01;
+        const INDICATOR_SCROLL: u16 = 0xFF02;
+
+        let (indicator_bit, on) = match key.0 {
+            INDICATOR_CAPS => (0x02, !(color.r == 0 && color.g == 0 && color.b == 0)),
+            INDICATOR_NUM => (0x01, !(color.r == 0 && color.g == 0 && color.b == 0)),
+            INDICATOR_SCROLL => (0x04, !(color.r == 0 && color.g == 0 && color.b == 0)),
+            _ => return Err(Error::Unsupported("поклавишный цвет только через host-render_frame (per-key не ревёрснут)".into())),
+        };
+
+        // Открываем boot keyboard интерфейс и шлём output-report 0x02.
+        // Формат: [report_id=0x02, led_mask] (стандартный HID boot keyboard LED report).
+        let boot = self.bridge.open_boot_keyboard()?;
+        let mask = if on { indicator_bit } else { 0x00 };
+        let report = [0x02, mask];
+        boot.send_output_report(&report)?;
+        Ok(())
     }
 
     fn set_rgb_brightness(&self, _level: u8) -> Result<()> {
