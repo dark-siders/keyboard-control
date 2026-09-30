@@ -77,7 +77,12 @@ KBC_BIN="$(find_kbc)"
 
 run_kbc() { # обёртка: вызов kbc с/без sg plugdev
     if [ "$USE_SG" = "1" ]; then
-        sg plugdev -c "${KBC_BIN} $*"
+        # Экранирование через printf '%q' — иначе `sg plugdev -c` разобьёт
+        # полный 520-байтный hex-пакет по пробелам и clap не соберёт его
+        # в один аргумент (перенос фикса из collect-data.sh, см. 10.108).
+        local cmd
+        cmd="$(printf '%q ' "$KBC_BIN" "$@")"
+        sg plugdev -c "$cmd"
     else
         "$KBC_BIN" "$@"
     fi
@@ -127,14 +132,16 @@ packet_read() { # $1=cmd hex, $2=длина LE (Пример: 0x84 0x0080)
     local cmd="$1" len="$2"
     local lo hi
     lo=$(( len & 0xFF )); hi=$(( (len >> 8) & 0xFF ))
-    printf '06 %02X 00 00 01 00 %02X %02X ' "$((cmd))" "$lo" "$hi"
-    yes 00 | head -512 | tr '\n' ' '
+    printf '06 %02X 00 00 01 00 %02X %02X' "$((cmd))" "$lo" "$hi"
+    for ((i = 0; i < 512; i++)); do printf ' 00'; done
 }
 
 packet_read_keymap() { # $1=слой (0=Default, 1=FN1)
-    local layer="$1"
-    printf '06 83 00 %s 01 00 00 02 ' "$layer"
-    yes 00 | head -512 | tr '\n' ' '
+    # Слой обязательно форматировать %02X: без этого байт слоя выдаётся
+    # полутетрадой ("0" вместо "00") и hex-строка становится нечётной (10.108).
+    local layer="$1" i
+    printf '06 83 00 %02X 01 00 00 02' "$(( layer ))"
+    for ((i = 0; i < 512; i++)); do printf ' 00'; done
 }
 
 feature_get_line() { # последняя строка вывода feature-get (сам hex-ответ)
