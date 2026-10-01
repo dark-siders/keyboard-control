@@ -60,6 +60,12 @@ pulse = { package = "libpulse-binding", version = "2" }
 psimple = { package = "libpulse-simple-binding", version = "2" }
 rustfft = "6"
 
+# Трей (журнал 10.111): сворачивание GUI в системный трей через
+# StatusNotifierItem (SNI) + com.canonical.dbusmenu (меню). Чистый D-Bus
+# поверх zbus — НИКАКИХ новых системных зависимостей (GTK4 traya не имеет).
+# `blocking` — синхронный API (спавн в фоновом потоке, без tokio в main loop).
+ksni = { version = "0.3", features = ["blocking"] }
+
 [profile.release]
 lto = true
 opt-level = 3

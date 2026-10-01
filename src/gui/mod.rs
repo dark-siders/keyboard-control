@@ -8,3 +8,4 @@ pub mod keymap_editor;
 pub mod rgb_studio;
 pub mod screen_manager;
 pub mod settings_panel;
+pub mod tray;

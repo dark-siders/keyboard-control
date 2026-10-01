@@ -58,6 +58,7 @@
 - **Батарея (2.4G-ресивер)** — процент заряда по каналу 0x13/0x05.
 - **Автосохранение при закрытии GUI** — последний выбор эффекта/света записывается сам.
 - **Выбор командного HID-интерфейса** — автоматически находит вендорский usages-page канал (hidraw), без ручного выбора.
+- **Системный трей (SNI)** — окно можно свернуть в трей: крестик прячет окно (host-эффекты продолжают идти), реальный выход — из меню трея или меню «Выход» (с автосейвом). Отключить трей: `KEYBOARD_CENTER_NO_TRAY=1 keyboard-center`. Без SNI-хоста (панели) поведение прежнее.
 
 ### GUI (`keyboard-center`)
 
@@ -512,7 +513,7 @@ AULA F75            258A:010C   # USB, «BY Tech Gaming Keyboard»
 ```
 keyboard-control/
 ├── AGENTS.md                 # внутренняя документация/журнал (для агента)
-├── Cargo.toml                # Rust: gtk4, libadwaita, hidapi, image, clap...
+├── Cargo.toml                # Rust: gtk4, libadwaita, hidapi, image, clap, ksni...'
 ├── Makefile                  # сборка/установка без nix (для Fedora и др.)
 ├── fedora.sh                 # Fedora/без nix: установка, обновление, удаление (интерактивное меню)
 ├── flake.nix                 # Nix Flake: packages, nixosModules, homeManagerModules
@@ -554,7 +555,8 @@ keyboard-control/
     │   ├── rgb_studio.rs     # RGB & Light Studio
     │   ├── screen_manager.rs # Screen Manager (Ajazz)
     │   ├── keymap_editor.rs  # Keymap & Fn Layer
-    │   └── settings_panel.rs # System & Power (батарея, poll rate...)
+    │   ├── settings_panel.rs # System & Power (батарея, poll rate...)
+    │   └── tray.rs           # системный трей (SNI, ksni)
     ├── screen/converter.rs   # GIF/PNG → формат экрана TFT
     └── profiles/storage.rs   # TOML-профили + EEPROM
 ```

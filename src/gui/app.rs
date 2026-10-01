@@ -13,7 +13,7 @@ use crate::devices::scanner::FoundDevice;
 use crate::devices::{KeyboardDevice, Layout};
 use crate::VERSION;
 
-use super::{keymap_editor, rgb_studio, screen_manager, settings_panel};
+use super::{keymap_editor, rgb_studio, screen_manager, settings_panel, tray};
 
 /// Текущее устройство в приложении.
 type DeviceSlot = Rc<RefCell<Option<Rc<dyn KeyboardDevice>>>>;
@@ -91,9 +91,67 @@ fn build_ui(app: &adw::Application) {
 
     toolbar.set_content(Some(&root));
     win.set_content(Some(&toolbar));
+
+    // --- Трей (SNI, журнал 10.111) ----------------------------------------
+    // Сворачивание в системный трей через ksni. Поведение close-request:
+    //   * трей онлайн — крестик прячет окно (hide), эффекты продолжают идти;
+    //   * трей офлайн/нет хоста — прежний автосейв + закрытие;
+    //   * реальный выход — только из меню трея / header «Выход» (RealQuit).
+    // Отключить трей можно переменной KEYBOARD_CENTER_NO_TRAY (непустая).
+    let (tray_tx, tray_rx) = std::sync::mpsc::channel::<tray::TrayCmd>();
+    let tray_online: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+    let real_quit: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+
+    if std::env::var_os("KEYBOARD_CENTER_NO_TRAY").is_none() {
+        tray::spawn(tray_tx);
+        // Приём команд из D-Bus-потока трея в главном GTK-цикле (mpsc опрос).
+        let win_c = win.clone();
+        let online = tray_online.clone();
+        let quit_flag = real_quit.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            while let Ok(cmd) = tray_rx.try_recv() {
+                match cmd {
+                    tray::TrayCmd::ToggleWindow => {
+                        if win_c.is_visible() {
+                            win_c.set_visible(false);
+                        } else {
+                            win_c.present();
+                        }
+                    }
+                    tray::TrayCmd::RealQuit => {
+                        *quit_flag.borrow_mut() = true;
+                        win_c.close();
+                    }
+                    tray::TrayCmd::Available => *online.borrow_mut() = true,
+                    tray::TrayCmd::Unavailable => *online.borrow_mut() = false,
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    // Явное действие «Выход» (меню header ссылается на "app.quit"):
+    // реальное закрытие с автосейвом, минуя сворачивание в трей.
+    let quit_act = gio::SimpleAction::new("quit", None);
+    {
+        let win_c = win.clone();
+        let quit_flag = real_quit.clone();
+        quit_act.connect_activate(move |_, _| {
+            *quit_flag.borrow_mut() = true;
+            win_c.close();
+        });
+    }
+    app.add_action(&quit_act);
+
     // Автосохранение при закрытии: докинуть последнее состояние (свет выкл /
     // выбранный эффект) в память клавиатуры, чтобы оно держалось без приложения.
-    setup_close_autosave(&win, persist_probe, make_last_vidpid());
+    setup_close_autosave(
+        &win,
+        persist_probe,
+        make_last_vidpid(),
+        tray_online,
+        real_quit,
+    );
     win.present();
 }
 
@@ -110,6 +168,8 @@ fn setup_close_autosave(
     win: &adw::ApplicationWindow,
     probe: Rc<dyn Fn() -> Option<rgb_studio::SaveKind>>,
     last_vidpid: impl Fn() -> Option<(u16, u16)> + 'static,
+    tray_online: Rc<RefCell<bool>>,
+    real_quit: Rc<RefCell<bool>>,
 ) {
     // Защита от зацикливания: close-request срабатывает повторно, когда мы сами
     // зовём win.close() после завершения записи.
@@ -128,6 +188,15 @@ fn setup_close_autosave(
         if *saving.borrow() {
             return glib::Propagation::Proceed;
         }
+
+        // Трей активен и это не реальный выход — сворачиваем в трей (10.111).
+        // Запись в память не делаем: host-эффекты продолжают идти, окно лишь
+        // спрятано. Реальный выход — из меню трея / header «Выход».
+        if *tray_online.borrow() && !*real_quit.borrow() {
+            win.set_visible(false);
+            return glib::Propagation::Stop;
+        }
+
         // Нечего сохранять (свет горит и эффект не выбран) — просто закрываем.
         let Some(action) = probe() else {
             return glib::Propagation::Proceed;
