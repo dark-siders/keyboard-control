@@ -264,11 +264,11 @@ collect_readonly() {
 
 # ---------- write-тесты (только --write-tests) ----------
 # Полная транзакция подсветки: framing/final берутся из глобалов FRAMING/FINAL.
-apply_effect() { # $1=hex эффекта $2=метка $3=файл $4=br(деф.2) $5=speed(деф.0)
-    local br="${4:-2}" sp="${5:-0}"
+apply_effect() { # $1=hex эффекта $2=метка $3=файл $4=br(2) $5=speed(0) $6=R $7=G $8=B
+    local br="${4:-2}" sp="${5:-0}" r="${6:-FF}" g="${7:-00}" b="${8:-00}"
     send_pkt "START(0x18)" "$(ctl_packet 0x18 0x00 0x01)" "$3"
     send_pkt "MODE(0x13)"   "$(ctl_packet 0x13 0x00 0x01)" "$3"
-    send_pkt "data($2)"     "$(mode_data_packet "$1" FF 00 00 "$br" "$sp")" "$3" 0
+    send_pkt "data($2)"     "$(mode_data_packet "$1" "$r" "$g" "$b" "$br" "$sp")" "$3" 0
     send_pkt "FINAL($FINAL)" "$(ctl_packet "$FINAL" 0x00 0x01)" "$3"
     sleep 1
 }
@@ -383,8 +383,8 @@ EOF
 
     # Обязательно оставляем статичный приглушённый свет (не Off!)
     echo "— финальное состояние: Static (белый, яркость 1, скорость 0)" >> "$OUT_DIR/T3-sweep.txt"
-    apply_effect 01 "Static white dim" "$OUT_DIR/T3-sweep.txt" 1 0
-    ok "клавиатура оставлена в Static (яркость 1)"
+    apply_effect 01 "Static white dim" "$OUT_DIR/T3-sweep.txt" 1 0 FF FF FF
+    ok "клавиатура оставлена в Static белый (яркость 1)"
 }
 
 # T4: синхронизация времени на TFT-экран (как sync_system_time)

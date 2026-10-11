@@ -567,20 +567,34 @@ impl AjazzAk820 {
         p
     }
 
-    /// Отправить feature-репорт по control-каналу. `pkt[0]` — report id:
-    /// 0x04 для командных пакетов, код эффекта для mode-data.
-    /// GET_REPORT-хендшейк делается ТОЛЬКО для report id 0x04 (gohv usb.rs:
-    /// прошивке это нужно, чтобы продвинуть стейт-машину; для mode-data
-    /// (report id = код эффекта) хендшейк ломает EP0, поэтому пропускаем).
+    /// Отправить feature-репорт по control-каналу 0xFF13. `pkt[0]` — ЛОГИЧЕСКИЙ
+    /// первый байт пакета (0x04 для команд, код эффекта для mode-data).
+    ///
+    /// КРИТИЧНО (живое железо 0C45:8009, журнал 10.112): 0xFF13 — НЕнумерованный
+    /// 64-байтный feature-report (дескриптор `0613FF...B102` без `85 xx`). hidapi
+    /// на hidraw трактует `buf[0]` как НОМЕР report-а, поэтому 64-байтный пакет с
+    /// `buf[0]=0x04` уходил бы как «report id 4» (его у устройства нет) и прошивка
+    /// его молча игнорировала. Шлём 65 байт: ведущий `0x00` (report id) + те же 64
+    /// байта пакета (framing B). Подтверждено на железе: так оживают подсветка и
+    /// часы. GET_REPORT-хендшейк — только для команд (pkt[0]==0x04, gohv usb.rs);
+    /// на нашем железе он отдаёт Broken pipe, но это безвредно (ошибку игнорируем).
     fn send_ctl(&self, dev: &hidapi::HidDevice, pkt: &[u8; ctl::PACKET_LEN]) -> Result<()> {
-        dev.send_feature_report(pkt).map_err(Error::from)?;
+        let buf = Self::ctl_frame(pkt);
+        dev.send_feature_report(&buf).map_err(Error::from)?;
         if pkt[0] == ctl::REPORT_ID_CMD {
-            let mut resp = [0u8; ctl::PACKET_LEN];
-            resp[0] = ctl::REPORT_ID_CMD;
+            let mut resp = [0u8; ctl::PACKET_LEN + 1];
             let _ = dev.get_feature_report(&mut resp);
         }
         std::thread::sleep(Duration::from_millis(10));
         Ok(())
+    }
+
+    /// Транспортная обёртка control-пакета: ведущий report id `0x00` (framing B)
+    /// + 64 байта логического пакета. Причина — см. `send_ctl` (журнал 10.112).
+    fn ctl_frame(pkt: &[u8; ctl::PACKET_LEN]) -> [u8; ctl::PACKET_LEN + 1] {
+        let mut buf = [0u8; ctl::PACKET_LEN + 1];
+        buf[1..].copy_from_slice(pkt);
+        buf
     }
 
     /// Загрузить payload (256-байтный заголовок + пиксельные кадры LE) на
@@ -928,7 +942,7 @@ impl KeyboardDevice for AjazzAk820 {
         self.send_ctl(&dev, &Self::control_packet(ctl::START, 0x00, 0x01))?;
         self.send_ctl(&dev, &Self::control_packet(ctl::TIME, 0x00, 0x01))?;
 
-        // data-пакет: report id 0x00 (НЕ 0x04).
+        // data-пакет: логический первый байт 0x00 (НЕ 0x04).
         let mut data = [0u8; ctl::PACKET_LEN];
         data[1] = 0x01;
         data[2] = 0x5A;
@@ -942,7 +956,9 @@ impl KeyboardDevice for AjazzAk820 {
         data[10] = 0x04;
         data[62] = ctl::DELIM.0;
         data[63] = ctl::DELIM.1;
-        dev.send_feature_report(&data).map_err(Error::from)?;
+        // send_ctl навешивает ведущий report id 0x00 (framing B, журнал 10.112);
+        // pkt[0]=0x00 → хендшейк не делается.
+        self.send_ctl(&dev, &data)?;
 
         self.send_ctl(&dev, &Self::control_packet(ctl::SAVE, 0x00, 0x00))?;
         Ok(())
@@ -1168,12 +1184,13 @@ impl KeyboardDevice for AjazzAk820 {
         self.send_ctl(&dev, &Self::control_packet(ctl::START, 0x00, 0x01))?;
         self.send_ctl(&dev, &Self::control_packet(ctl::SLEEP, 0x01, 0x01))?;
 
-        // data-пакет: report id 0x00, ступень сна на байте 8, трейлер AA 55.
+        // data-пакет: логический первый байт 0x00, ступень сна на байте 8,
+        // трейлер AA 55. send_ctl навешивает ведущий report id 0x00 (framing B).
         let mut data = [0u8; ctl::PACKET_LEN];
         data[8] = step;
         data[62] = ctl::DELIM.0;
         data[63] = ctl::DELIM.1;
-        dev.send_feature_report(&data).map_err(Error::from)?;
+        self.send_ctl(&dev, &data)?;
 
         Ok(())
     }
@@ -1351,5 +1368,34 @@ mod tests {
         assert_eq!(&pkt[8..8 + payload.len()], &payload, "payload с offset 8");
         let non_last = AjazzAk820::build_frame(0x23, 3, 0x0102, &payload, false);
         assert_eq!(non_last[6], 0, "last-флаг сброшен");
+    }
+
+    #[test]
+    fn ctl_frame_prepends_report_id_zero() {
+        // framing B (журнал 10.112): 65-б транспортный буфер = report id 0x00 +
+        // 64-б логический пакет как есть. Ни один логический байт не теряется.
+        let pkt = AjazzAk820::control_packet(ctl::START, 0x00, 0x01);
+        assert_eq!(pkt[0], ctl::REPORT_ID_CMD, "логический первый байт = 0x04");
+        assert_eq!(pkt[1], ctl::START);
+        let framed = AjazzAk820::ctl_frame(&pkt);
+        assert_eq!(framed.len(), ctl::PACKET_LEN + 1);
+        assert_eq!(framed[0], 0x00, "ведущий report id");
+        assert_eq!(&framed[1..], &pkt[..], "логический пакет сохранён");
+
+        // mode-data: логический первый байт = код эффекта (0x01 Static).
+        let data = AjazzAk820::mode_data_packet(
+            AjazzMode::Static,
+            [0xFF, 0x00, 0x00],
+            false,
+            2,
+            0,
+            0,
+        );
+        let framed = AjazzAk820::ctl_frame(&data);
+        assert_eq!(framed[0], 0x00, "ведущий report id");
+        assert_eq!(framed[1], AjazzMode::Static as u8, "код эффекта");
+        assert_eq!(&framed[2..5], &[0xFF, 0x00, 0x00], "RGB");
+        assert_eq!(framed[15], ctl::DELIM.1, "трейлер 0x55");
+        assert_eq!(framed[16], ctl::DELIM.0, "трейлер 0xAA");
     }
 }
