@@ -1,13 +1,13 @@
 // --- Ajazz AK820 Pro ---
-// Реальная реализация протокола по wsclx/ak820pro-modder (fw 1.07,
-// hardware-verified авторами на живом железе; на нашем устройстве пока НЕ
-// проверялась — физической клавиатуры нет, журнал 10.53).
-//
-// Транспорт: 64-байтные output-репорты (REPORT_ID = 0), кадр:
-//   [0xAA, cmd, len_or_type, addr_lo, addr_hi, 0, last_flag, 0, payload…]
-// Ответ начинается с 0x55, команда в байте 1, данные — с байта 8.
-// Большие блоки (keymap 512 Б, custom-LED 512 Б, макросы) идут пачками
-// по 56 байт полезной нагрузки с инкрементом адреса (get_many/set_many).
+// Реальная реализация протокола по wsclx/ak820pro-modder (fw 1.07),
+// gohv/EPOMAKER-Ajazz-AK820-Pro, TaxMachine/ajazz-keyboard-software-linux,
+// barneygaumer-dot/ajazz820p_utils, fpb/ajazz-ak820-pro.
+// Подсветка и время/сон — через рабочий control-канал 0xFF13 (feature reports,
+// journal 10.106: подтверждён на нашем железе 0C45:8009).
+// TFT-экран — через 0xFF67 (bulk/interrupt, journal 10.60/10.61).
+// Keymap/macros/battery — через 0xFF68 (wsclx transport, journal 10.53/10.60).
+// На нашем железе 0xFF68 НЕ РАБОТАЕТ (таймаут, Output Report Count=4096 в дескрипторе
+// против 64-байтных пакетов firmware) — только 0xFF13 для подсветки.
 
 use super::hid::HidBridge;
 use super::hidshell;
@@ -48,6 +48,10 @@ mod cmd {
     #[allow(dead_code)]
     pub const SET_GAME_MODE: u8 = 33;
     pub const SET_KEY: u8 = 34;
+    /// wsclx-канал 0xFF68: SET_LED_EFFECT. На нашем железе канал 0xFF68
+    /// таймаутит (журнал 10.106), подсветка идёт через 0xFF13 — оставлено
+    /// как справочная константа протокола.
+    #[allow(dead_code)]
     pub const SET_LED_EFFECT: u8 = 35;
     pub const SET_CUSTOM_LED_DATA: u8 = 36;
     pub const SET_MACRO: u8 = 37;
@@ -78,10 +82,9 @@ mod ctl {
     pub const REPORT_ID_CMD: u8 = 0x04;
     /// Команды (gohv protocol.rs):
     pub const START: u8 = 0x18;
-    /// FINISH — задел: используется формально в полной транзакции загрузки
-    /// картинок (kabelklaus), но для sleep/time по gohv не требуется.
-    #[allow(dead_code)]
+    /// FINISH — закрывает транзакцию настройки (gohv usb.rs::transaction).
     pub const FINISH: u8 = 0xF0;
+    pub const MODE: u8 = 0x13;
     pub const TIME: u8 = 0x28;
     pub const SLEEP: u8 = 0x17;
     pub const SAVE: u8 = 0x02;
@@ -333,48 +336,56 @@ impl AjazzAk820 {
 
     // --- Подсветка ----------------------------------------------------
 
-    /// 16-байтный payload SET_LED_EFFECT (wsclx lighting::led_effect_payload).
-    fn led_effect_payload(
+    /// 64-байтный mode-data пакет (gohv protocol::mode_data_packet).
+    /// ВАЖНО: `p[0]` = код эффекта, и именно он становится report id при
+    /// отправке (gohv usb.rs: «byte 0 is the mode value itself, which hidapi
+    /// sends as the report ID»). Дельмитер — `p[14]=0x55, p[15]=0xAA`.
+    fn mode_data_packet(
         mode: AjazzMode,
         color: [u8; 3],
-        secondary: [u8; 3],
-        color_mode: u8,
-        effect_mode_type: u8,
+        rainbow: bool,
         brightness: u8,
         speed: u8,
         direction: u8,
-    ) -> [u8; 16] {
-        let mut p = [0u8; 16];
-        p[0] = mode as u8;
+    ) -> [u8; ctl::PACKET_LEN] {
+        let mut p = [0u8; ctl::PACKET_LEN];
+        p[0] = mode as u8; // report id = код эффекта
         p[1] = color[0];
         p[2] = color[1];
         p[3] = color[2];
-        p[4] = 0xFF; // driverSetting (официальный драйвер)
-        p[5] = secondary[0];
-        p[6] = secondary[1];
-        p[7] = secondary[2];
-        p[8] = color_mode;
+        p[8] = rainbow as u8;
         p[9] = brightness.min(5);
         p[10] = speed.min(5);
         p[11] = direction;
-        p[12] = effect_mode_type;
-        p[14] = 0xAA; // checkCodeL
-        p[15] = 0x55; // checkCodeH
+        p[14] = ctl::DELIM.1; // 0x55
+        p[15] = ctl::DELIM.0; // 0xAA
         p
     }
 
+    /// Применить подсветку через рабочий control-канал 0xFF13 (feature reports).
+    /// Полная транзакция (gohv usb.rs::transaction):
+    /// START (0x18) → MODE (0x13) → mode-data → FINISH (0xF0).
     fn apply_lighting(&self, mode: AjazzMode) -> Result<()> {
-        let payload = Self::led_effect_payload(
+        let dev = self.open_control()?;
+
+        // 1) START
+        self.send_ctl(&dev, &Self::control_packet(ctl::START, 0x00, 0x01))?;
+        // 2) MODE preamble
+        self.send_ctl(&dev, &Self::control_packet(ctl::MODE, 0x00, 0x01))?;
+        // 3) mode-data (report id = код эффекта)
+        let data = Self::mode_data_packet(
             mode,
             self.last_color.get(),
-            [0, 0, 0],
-            0,
-            0,
+            false,
             self.last_brightness.get(),
             self.last_speed.get(),
             0,
         );
-        self.set(cmd::SET_LED_EFFECT, &payload)?;
+        self.send_ctl(&dev, &data)?;
+        // 4) FINISH — завершение транзакции
+        self.send_ctl(&dev, &Self::control_packet(ctl::FINISH, 0x00, 0x01))?;
+        std::thread::sleep(Duration::from_millis(100));
+
         self.last_mode.set(mode as u8);
         Ok(())
     }
@@ -556,13 +567,19 @@ impl AjazzAk820 {
         p
     }
 
-    /// Отправить feature-репорт по control-каналу и прочитать подтверждение
-    /// (gohv: после каждого send ожидается feature-get; ошибку игнорируем —
-    /// прошивка может отвечать не на все report id).
+    /// Отправить feature-репорт по control-каналу. `pkt[0]` — report id:
+    /// 0x04 для командных пакетов, код эффекта для mode-data.
+    /// GET_REPORT-хендшейк делается ТОЛЬКО для report id 0x04 (gohv usb.rs:
+    /// прошивке это нужно, чтобы продвинуть стейт-машину; для mode-data
+    /// (report id = код эффекта) хендшейк ломает EP0, поэтому пропускаем).
     fn send_ctl(&self, dev: &hidapi::HidDevice, pkt: &[u8; ctl::PACKET_LEN]) -> Result<()> {
         dev.send_feature_report(pkt).map_err(Error::from)?;
-        let mut resp = [0u8; ctl::PACKET_LEN];
-        let _ = dev.get_feature_report(&mut resp);
+        if pkt[0] == ctl::REPORT_ID_CMD {
+            let mut resp = [0u8; ctl::PACKET_LEN];
+            resp[0] = ctl::REPORT_ID_CMD;
+            let _ = dev.get_feature_report(&mut resp);
+        }
+        std::thread::sleep(Duration::from_millis(10));
         Ok(())
     }
 
@@ -1217,18 +1234,7 @@ impl KeyboardDevice for AjazzAk820 {
 
     fn apply_light_persistent(&self, on: bool) -> Result<bool> {
         let mode = if on { AjazzMode::Static } else { AjazzMode::Off };
-        let payload = Self::led_effect_payload(
-            mode,
-            self.last_color.get(),
-            [0, 0, 0],
-            0,
-            0,
-            self.last_brightness.get(),
-            self.last_speed.get(),
-            0,
-        );
-        self.set(cmd::SET_LED_EFFECT, &payload)?;
-        self.last_mode.set(mode as u8);
+        self.apply_lighting(mode)?;
         Ok(true)
     }
 }
@@ -1264,19 +1270,7 @@ impl AjazzAk820 {
                 _ => AjazzMode::Shuttle,
             }
         };
-        let payload = Self::led_effect_payload(
-            mode,
-            self.last_color.get(),
-            [0, 0, 0],
-            0,
-            0,
-            self.last_brightness.get(),
-            self.last_speed.get(),
-            0,
-        );
-        self.set(cmd::SET_LED_EFFECT, &payload)?;
-        self.last_mode.set(mode_byte);
-        Ok(())
+        self.apply_lighting(mode)
     }
 }
 
