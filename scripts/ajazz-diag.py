@@ -256,9 +256,9 @@ def main():
     # открыть устройство
     try:
         # hidapi открывает по VID:PID, но нам нужен конкретный hidraw интерфейс
-        # используем open_path (Linux-specific)
+        # используем open_path (Linux-specific) — требует bytes
         dev = hid.device()
-        dev.open_path(ctrl_path)
+        dev.open_path(ctrl_path.encode())
         ok(f"Устройство открыто: {ctrl_path}")
     except Exception as e:
         fail(f"Не удалось открыть {ctrl_path}: {e}")
