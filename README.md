@@ -91,6 +91,12 @@ kbc remap 258A:010C --key 44 --to 2C          # слот 0x2C физически
 kbc remap 258A:010C --key 68 --media E2       # физическая «[» → пауза/плэй (media usage 0xE2)
 kbc remap 258A:010C --key 68 --to 2E --layer 1   # правим FN1-слой (внимание: запись применяется к ОБОИМ слоям)
 kbc remap 258A:010C --key 73 --modifier 1     # ВНИМАНИЕ: тест только на неиспользованных слотах! После теста — readback (--list)
+kbc reset 258A:010C                           # сбросить раскладку к заводской (Default + FN1) — как «Сбросить всё» в GUI
+# --- экран Ajazz AK820 Pro (TFT) и макросы ---
+kbc screen 0C45:8009 --image anim.gif         # картинка или GIF (анимация уходит целиком, все кадры)
+kbc screen 0C45:8009 --brightness 200         # яркость TFT-экрана (можно вместе с --image)
+kbc macro 0C45:8009 --record 1                # начать запись макроса №1 (набираем клавиши на клавиатуре)
+kbc macro 0C45:8009 --stop                    # остановить запись
 kbc monitor                                 # горячая замена (watch)
 # --- пресеты и даемон (плавные host-эффекты без GUI) ---
 kbc preset save wave2 --mode wave --brightness 200 --speed 60   # сохранить пресет (TOML в ~/.config/keyboard-center/presets)
@@ -125,11 +131,13 @@ kbc raw 3554:FA09 output-send "13 05 00 ..."
 | `kbc list` | список подключённых устройств | — |
 | `kbc info <VID:PID>` | детали устройства (тип, модель) | — |
 | `kbc rgb <VID:PID>` | подсветка: host-эффект (USB) или запись в память ресивера (2.4G) | `--mode` (вкл. `audio` — спектр системного звука, USB-only), `--style row\|bars` (аудио), `--color RRGGBB`, `--brightness`, `--speed`, `--hold ms`, `--light-on`, `--light-off` (2.4G), `--hw-effect HEX`*, `--color-low RRGGBB`, `--color-high RRGGBB`, `--sensitivity 0.1..2.0` (аудио)* |
-| `kbc screen <VID:PID> --image <path>` | загрузка кадра/GIF на TFT (Ajazz AK820 Pro) | `--image` |
+| `kbc screen <VID:PID>` | TFT-экран Ajazz: кадр/GIF-анимация и/или яркость | `--image <path>` (GIF → анимация целиком), `--brightness 0..255` |
 | `kbc time <VID:PID>` | синхронизация времени ПК с экраном (Ajazz) | — |
 | `kbc battery <VID:PID>` | заряд 0..100% (только 2.4G; USB/BT — инфо-сообщение) | — |
 | `kbc save <VID:PID>` | эффект/конфиг в память клавиатуры (держится без приложения) | `--effect HEX`, `--brightness`, `--speed` |
 | `kbc remap <VID:PID>` | переназначение клавиш (F75, USB; верифицировано) | `--list`, `--key slot`, `--to usage`, `--media usage`, `--modifier 0..7`, `--layer 0\|1` |
+| `kbc reset <VID:PID>` | сброс раскладки к заводской (Default + FN1) — как «Сбросить всё» в GUI | — |
+| `kbc macro <VID:PID>` | запись макроса (Ajazz AK820 Pro, device-side) | `--record N` (1..12), `--stop` |
 | `kbc set-poll <VID:PID> <Hz>` | polling rate 125 \| 250 \| 500 \| 1000 | — |
 | `kbc set-debounce <VID:PID> <ms>` | анти-дребезг | — |
 | `kbc set-sleep <VID:PID> <sec>` | автоотключение (0 = выкл) | — |
@@ -141,7 +149,6 @@ kbc raw 3554:FA09 output-send "13 05 00 ..."
 | `kbc probe <VID:PID>` | разведка HID: интерфейсы + скан feature-репортов | `--len` |
 | `kbc ajazz-diag <VID:PID>` | read-only дамп Ajazz AK820 Pro: device-info/LED/game-mode/custom-LED/keymap/макросы (только GET) | — |
 | `kbc raw <VID:PID> <op>` | raw-доступ (диагностика протокола) | `feature-get ID LEN`, `feature-send HEX`, `output-send HEX`, `input-read LEN TIMEOUT_MS`, `wl-read-pages CMD NEED`* |
-| `kbc monitor` | отслеживание горячей замены | — |
 
 Формат `VID:PID` — hex через двоеточие (например `258A:010C`); RGB-цвет — `RRGGBB` (hex); эффекты/слоты — hex (например `0B`, `0x14`).
 

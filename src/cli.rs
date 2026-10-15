@@ -4,8 +4,12 @@
 //   kbc list                         — показать найденные устройства
 //   kbc info <vid:pid>               — детали устройства
 //   kbc rgb  <vid:pid> --mode wave --brightness 180 --speed 120
-//   kbc keymap <vid:pid> --list
-//   kbc screen <vid:pid> --image file.gif
+//   kbc remap <vid:pid> --list
+//   kbc screen <vid:pid> --image file.gif   — картинка/GIF (анимация целиком)
+//   kbc screen <vid:pid> --brightness 200   — яркость TFT-экрана (Ajazz)
+//   kbc reset <vid:pid>               — сброс раскладки к заводской (Default+FN1)
+//   kbc macro <vid:pid> --record 1    — начать запись макроса (Ajazz)
+//   kbc macro <vid:pid> --stop        — остановить запись макроса
 //   kbc time  <vid:pid>
 //   kbc battery <vid:pid>
 //   kbc set-poll <vid:pid> 1000
@@ -56,7 +60,7 @@ enum Commands {
     Info(DeviceArg),
     /// Управление RGB-подсветкой
     Rgb(RgbArgs),
-    /// Загрузка изображения/GIF на экран (Ajazz AK820 Pro)
+    /// Загрузка изображения/GIF на экран и/или яркость (Ajazz AK820 Pro)
     Screen(ScreenArgs),
     /// Синхронизировать время ПК с экраном
     Time(DeviceArg),
@@ -67,6 +71,10 @@ enum Commands {
     Save(SaveArgs),
     /// Переназначение клавиш (F75: read-modify-write по реальному протоколу)
     Remap(RemapArgs),
+    /// Сбросить раскладку к заводской (Default + FN1), как «Сбросить всё» в GUI
+    Reset(DeviceArg),
+    /// Запись макросов (device-side, Ajazz AK820 Pro)
+    Macro(MacroArgs),
     /// Установить частоту опроса
     SetPoll(SetRate),
     /// Установить задержку дребезга
@@ -141,8 +149,13 @@ struct RgbArgs {
 struct ScreenArgs {
     #[arg(value_name = "VID:PID")]
     device: String,
+    /// Изображение или GIF для TFT-экрана (png/jpg/bmp/gif).
+    /// GIF-анимация отправляется целиком (несколько кадров).
     #[arg(long)]
-    image: String,
+    image: Option<String>,
+    /// Яркость TFT-экрана 0..=255 (можно без --image)
+    #[arg(long)]
+    brightness: Option<u8>,
 }
 
 #[derive(Args)]
@@ -416,6 +429,19 @@ struct RemapArgs {
     layer: u8,
 }
 
+#[derive(Args)]
+struct MacroArgs {
+    /// VID:PID например 0C45:8009
+    #[arg(value_name = "VID:PID")]
+    device: String,
+    /// Начать запись макроса с номером N (1..=12)
+    #[arg(long, value_name = "N")]
+    record: Option<u8>,
+    /// Остановить запись макроса
+    #[arg(long)]
+    stop: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match exec(cli.command) {
@@ -463,6 +489,8 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
         }
         Commands::Save(a) => cmd_save(a),
         Commands::Remap(a) => cmd_remap(a),
+        Commands::Reset(a) => cmd_reset(&a.device),
+        Commands::Macro(a) => cmd_macro(a),
         Commands::SetPoll(a) => {
             let (vid, pid) = parse_id(&a.device)?;
             let dev = open(vid, pid)?;
@@ -842,27 +870,151 @@ fn cmd_save(a: SaveArgs) -> anyhow::Result<u8> {
 }
 
 fn cmd_screen(args: ScreenArgs) -> anyhow::Result<u8> {
+    use keyboard_center::types::ScreenFrame;
     let (vid, pid) = parse_id(&args.device)?;
+
+    if args.image.is_none() && args.brightness.is_none() {
+        return Err(anyhow::anyhow!(
+            "укажите --image <файл> и/или --brightness <0..=255>"
+        ));
+    }
     let dev = open(vid, pid)?;
 
-    let bytes = std::fs::read(&args.image)
-        .map_err(|e| anyhow::anyhow!("не удалось прочитать {}: {e}", args.image))?;
-    let anim = keyboard_center::screen::converter::convert(&bytes)?;
-    let frame = anim.first_frame();
-    let size = frame.data.len();
-    println!(
-        "конвертация: {}x{} пикселей, {} кадров, {}, RGB565",
-        anim.width, anim.height, anim.frames.len(), size
-    );
+    // Яркость экрана (можно отдельно от картинки).
+    if let Some(level) = args.brightness {
+        dev.set_screen_brightness(level)?;
+        println!("яркость экрана: {level}");
+    }
 
-    let sf = keyboard_center::types::ScreenFrame {
-        width: anim.width,
-        height: anim.height,
-        data_rgb565: frame.data.clone(),
-    };
-    dev.set_screen_image(sf)?;
-    println!("картинка отправлена на экран");
+    // Картинка или анимация.
+    if let Some(path) = &args.image {
+        let bytes = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("не удалось прочитать {path}: {e}"))?;
+        let anim = keyboard_center::screen::converter::convert(&bytes)?;
+        println!(
+            "конвертация: {}x{} пикселей, {} кадров, RGB565",
+            anim.width,
+            anim.height,
+            anim.frames.len()
+        );
+
+        if anim.is_animated() {
+            // Полная анимация (GIF): отправляем все кадры разом.
+            let frames: Vec<ScreenFrame> = anim
+                .frames
+                .iter()
+                .map(|f| ScreenFrame {
+                    width: anim.width,
+                    height: anim.height,
+                    data_rgb565: f.data.clone(),
+                })
+                .collect();
+            let delays: Vec<u16> = anim.frames.iter().map(|f| f.delay_ms).collect();
+            println!(
+                "анимация: {} кадров, суммарно {} мс",
+                frames.len(),
+                anim.total_duration_ms()
+            );
+            dev.set_screen_animation(&frames, &delays)?;
+            println!("анимация отправлена на экран");
+        } else {
+            let frame = anim.first_frame();
+            let sf = ScreenFrame {
+                width: anim.width,
+                height: anim.height,
+                data_rgb565: frame.data.clone(),
+            };
+            dev.set_screen_image(sf)?;
+            println!("картинка отправлена на экран");
+        }
+    }
     Ok(0)
+}
+
+/// Переподключиться к устройству по VID:PID (клавиатура «кикает» hidraw
+/// после каждой записи keymap, поэтому нужен повторный open).
+fn reopen(vid: u16, pid: u16) -> anyhow::Result<Box<dyn keyboard_center::devices::KeyboardDevice>> {
+    let mut last_err = None;
+    for _ in 0..20 {
+        match open(vid, pid) {
+            Ok(d) => return Ok(d),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("устройство не переподключилось")))
+}
+
+/// Сбросить раскладку к заводской (Default + FN1) — аналог кнопки
+/// «Сбросить всё» в GUI. Читает заводскую раскладку с устройства; для F75
+/// (нет GET_DEFAULT_*) берёт жёстко заданный заводской дефолт из дампа.
+fn cmd_reset(device: &str) -> anyhow::Result<u8> {
+    use keyboard_center::types::{FnLayer, Keymap};
+
+    let (vid, pid) = parse_id(device)?;
+    let dev = open(vid, pid)?;
+
+    let km: Keymap = match dev.get_factory_keymap() {
+        Ok(km) => km,
+        Err(_) => {
+            if dev.connection_type() == keyboard_center::types::ConnectionType::Usb {
+                println!("Восстановление заводского дефолта F75 (hardcoded, дамп 10.72)…");
+                keyboard_center::devices::aula_f75::factory_keymap_f75()
+            } else {
+                return Err(anyhow::anyhow!(
+                    "не удалось прочитать заводскую раскладку: устройство не поддерживает эту функцию"
+                ));
+            }
+        }
+    };
+    drop(dev);
+
+    let locked = |e: &keyboard_center::devices::Error| {
+        let msg = e.to_string();
+        msg.contains("залочен") || msg.contains("защищено") || msg.contains("запрещена")
+    };
+
+    // Default-слой.
+    let mut done = 0usize;
+    for (k, act) in &km.base {
+        let dev = reopen(vid, pid)?;
+        match dev.remap_key(*k, act.clone()) {
+            Ok(_) => done += 1,
+            Err(e) if locked(&e) => continue,
+            Err(e) => return Err(anyhow::anyhow!("ошибка сброса слота {}: {e}", k.0)),
+        }
+    }
+    // FN1-слой.
+    for (k, act) in &km.fn_layer.bindings {
+        let dev = reopen(vid, pid)?;
+        match dev.set_fn_layer(FnLayer {
+            bindings: vec![(*k, act.clone())],
+        }) {
+            Ok(_) => done += 1,
+            Err(e) if locked(&e) => continue,
+            Err(e) => return Err(anyhow::anyhow!("ошибка сброса FN1 слота {}: {e}", k.0)),
+        }
+    }
+    println!("заводская раскладка восстановлена (Default + FN1), слотов записано: {done}");
+    Ok(0)
+}
+
+fn cmd_macro(a: MacroArgs) -> anyhow::Result<u8> {
+    let (vid, pid) = parse_id(&a.device)?;
+    let dev = open(vid, pid)?;
+    if let Some(id) = a.record {
+        dev.record_macro(id)?;
+        println!("запись макроса {id} начата — нажмите клавиши на клавиатуре, затем остановите (--stop)");
+        return Ok(0);
+    }
+    if a.stop {
+        dev.stop_macro()?;
+        println!("запись макроса остановлена");
+        return Ok(0);
+    }
+    Err(anyhow::anyhow!("укажите --record <N> или --stop"))
 }
 
 fn cmd_profile(p: ProfileArgs) -> anyhow::Result<u8> {
