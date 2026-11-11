@@ -60,6 +60,14 @@ ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="
 ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="7140", \
   MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
 
+# 2.4 GHz донгл (VID/PID взяты из config.xml официального ПО Ajazz,
+# журнал 10.114). Командный канал — интерфейс MI_03 (usage page 0xFF60,
+# Output/Input по 32 б, кадры wsclx + checksum). Доступ выдаём на все
+# hidraw-узлы донгла: соседний MI_04 (64 б) нужен для диагностики.
+# Это ОТДЕЛЬНОЕ устройство от клавиатуры (0c45:8009) — не путать в lsusb.
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="fdfd", \
+  MODE="0664", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"
+
 # ============================================================
 # AULA F75
 # ============================================================

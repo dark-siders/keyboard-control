@@ -735,6 +735,68 @@ pub fn build_rgb_studio(
                     );
                     return;
                 }
+                // USB Ajazz (VID 0x0C45): подсветка применяется АППАРАТНО через
+                // рабочий control-канал 0xFF13 (apply_rgb_persistent → Ok(true)),
+                // host-рендеринг не нужен и не работает (per-key 0xFF68 мёртв,
+                // журнал 10.114). Запись — в фоновом потоке, чтобы блокирующий
+                // hidapi не вешал GUI (тот же механизм, что и у 2.4G).
+                if dev.vid_pid().0 == 0x0C45 {
+                    if mode == RgbMode::Audio {
+                        status_a0.set_text(
+                            "Аудио-реактив на Ajazz недоступен (per-key канал 0xFF68 не работает)",
+                        );
+                        return;
+                    }
+                    let Some((vid, pid)) = vidpid_a() else {
+                        status_a0.set_text(
+                            "Устройство не подключено: откройте его на вкладке «Устройства»",
+                        );
+                        return;
+                    };
+                    frame_gen.set(frame_gen.get().wrapping_add(1));
+                    let st = status_a0.clone();
+                    let gen = frame_gen.clone();
+                    let my_gen = gen.get();
+                    let rx = spawn_wl_task(
+                        vid,
+                        pid,
+                        WlTask::Rgb {
+                            mode,
+                            color: Some(base),
+                            brightness,
+                            speed,
+                        },
+                    );
+                    gtk::glib::timeout_add_local(
+                        std::time::Duration::from_millis(150),
+                        move || {
+                            if gen.get() != my_gen {
+                                return glib::ControlFlow::Break;
+                            }
+                            match rx.try_recv() {
+                                Ok(Ok(_name)) => {
+                                    st.set_text(&format!(
+                                        "Ajazz: режим {mode:?} применён аппаратно \
+                                         (канал 0xFF13) — держится без приложения"
+                                    ));
+                                    glib::ControlFlow::Break
+                                }
+                                Ok(Err(e)) => {
+                                    st.set_text(&e);
+                                    glib::ControlFlow::Break
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    glib::ControlFlow::Continue
+                                }
+                                Err(_) => {
+                                    st.set_text("Сбой потока записи (канал закрыт)");
+                                    glib::ControlFlow::Break
+                                }
+                            }
+                        },
+                    );
+                    return;
+                }
                 // USB: host-rendering (аппаратной эффект-таблицы у F75/F99 нет,
                 // latch не найден) — режим/яркость/скорость рендерим НА ХОСТЕ
                 // и гоним кадрами через render_frame()-канал с keepalive.

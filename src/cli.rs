@@ -673,7 +673,39 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
                 "ресивер не поддерживает запись эффекта в память"
             )),
         };
-    } else if let Some(color) = &args.color {
+    }
+
+    // USB: Ajazz умеет аппаратное применение через рабочий control-канал 0xFF13
+    // (apply_rgb_persistent → Ok(true)); F75/F99 вернут Ok(false) и пойдут в
+    // host-рендеринг ниже. Раньше --mode/--color для Ajazz шли через render_frame
+    // (0xFF68) и падали таймаутом (журнал 10.112).
+    let usb_mode = parse_rgb_mode(args.mode.as_deref())?;
+    let wants_any = args.mode.is_some()
+        || args.color.is_some()
+        || args.brightness.is_some()
+        || args.speed.is_some();
+    if wants_any && usb_mode != RgbMode::Audio {
+        let usb_color = match &args.color {
+            Some(c) => Some(keyboard_center::types::Color::from_hex_checked(c)
+                .ok_or_else(|| anyhow::anyhow!("неверный цвет: {c} (ожидается RRGGBB)"))?),
+            None => None,
+        };
+        let brightness = args.brightness.unwrap_or(128);
+        let speed = args.speed.unwrap_or(60);
+        if dev.apply_rgb_persistent(usb_mode, usb_color, brightness, speed)? {
+            println!(
+                "режим {usb_mode:?} применён аппаратно (канал 0xFF13, держится без приложения)"
+            );
+            if args.hold.is_some() {
+                println!(
+                    "примечание: --hold для этого устройства не нужен — эффект записан в память"
+                );
+            }
+            return Ok(0);
+        }
+    }
+
+    if let Some(color) = &args.color {
         let c = keyboard_center::types::Color::from_hex_checked(color)
             .ok_or_else(|| anyhow::anyhow!("неверный цвет: {color} (ожидается RRGGBB)"))?;
         // Прямой (host-rendering) кадр: заливает ВСЕ LED заданным цветом.

@@ -53,6 +53,9 @@ mod cmd {
     /// как справочная константа протокола.
     #[allow(dead_code)]
     pub const SET_LED_EFFECT: u8 = 35;
+    /// wsclx-канал 0xFF68: custom-LED буфер. На нашей ревизии не отвечает,
+    /// per-key идёт live-кадрами `0x20`/таблицей `0x23` через 0xFF13.
+    #[allow(dead_code)]
     pub const SET_CUSTOM_LED_DATA: u8 = 36;
     pub const SET_MACRO: u8 = 37;
     pub const SET_FN_KEY: u8 = 38;
@@ -87,13 +90,37 @@ mod ctl {
     pub const MODE: u8 = 0x13;
     pub const TIME: u8 = 0x28;
     pub const SLEEP: u8 = 0x17;
+    /// COMMIT — фиксация принятой таблицы (Twyx22 `CMD_COMMIT`, а не 0xF0!).
+    /// Прежнее имя `SAVE` сохранено ниже как алиас — им пользуется синк часов.
+    pub const COMMIT: u8 = 0x02;
     pub const SAVE: u8 = 0x02;
+    /// Таблица per-key цветов: 576 б = 144 слота × 4 `[index, R, G, B]`.
+    pub const KEY_COLORS: u8 = 0x23;
+    /// Live-кадр per-key цветов (512 б подряд `[index, R, G, B]`, без сохранения).
+    pub const LIVE_COLORS: u8 = 0x20;
+    /// Чтение сохранённой таблицы цветов (Twyx22 `CMD_RGB_READ`).
+    pub const RGB_READ: u8 = 0xF5;
     /// Трейлер data-пакета (в последних двух байтах).
     pub const DELIM: (u8, u8) = (0xAA, 0x55);
     /// Usage page control-интерфейса, на котором живут эти команды.
     pub const USAGE_PAGE: u16 = 0xFF13;
     /// Интерфейс control-канала (fallback к usage page).
     pub const INTERFACE: i32 = 3;
+    /// Пауза ПЕРЕД отправкой командного пакета (config.xml официального ПО:
+    /// `cmd_delaytime` = 35 мс; Twyx22 `CMD_DELAY_MS`).
+    pub const PAUSE_MS: u64 = 35;
+    /// Пауза ПЕРЕД чтением feature-ответа (Twyx22 `READ_DELAY_MS`).
+    pub const READ_DELAY_MS: u64 = 50;
+    /// Число повторов «грязной» транзакции записи таблицы.
+    pub const RETRIES: usize = 3;
+    /// Длина таблицы per-key цветов (576 б).
+    pub const TABLE_LEN: usize = 576;
+    /// Слотов в таблице per-key цветов (144).
+    pub const TABLE_SLOTS: usize = TABLE_LEN / 4;
+    /// Длина live-кадра per-key (512 б).
+    pub const LIVE_LEN: usize = 512;
+    /// Сколько блоков по 64 б занимает таблица (576/64 = 9).
+    pub const TABLE_BLOCKS: usize = TABLE_LEN / PACKET_LEN;
 }
 
 /// 128-LED матрица (один слот на клавишу keymap'а).
@@ -102,6 +129,98 @@ const LED_COUNT: usize = 128;
 const TOTAL_SLOTS: usize = 128;
 const SLOT_BYTES: usize = 4;
 const KEYMAP_BYTES: usize = TOTAL_SLOTS * SLOT_BYTES;
+
+/// HID usage (Keyboard/Keypad page 0x07) → индекс LED/слота подсветки AK820 Pro.
+///
+/// Источник: официальный `rgb-keyboard.xml`, переписанный в `keys.rs` проекта
+/// `deddroid/ak820-rs` (decompiled from DeviceDriver.exe 1.0.0.5). Порядок
+/// индексов НЕ совпадает ни с HID usage, ни с keymap-слотами — поэтому для
+/// per-key нужен именно этот пересчёт.
+///
+/// Клавиша Fn (light index 96) в таблицу не входит: у неё нет HID usage, и
+/// адресовать её через `KeyId` невозможно.
+const HID_USAGE_TO_LED: &[(u16, u8)] = &[
+    (0x29, 1),   // Esc
+    (0x3A, 2),   // F1
+    (0x3B, 3),   // F2
+    (0x3C, 4),   // F3
+    (0x3D, 5),   // F4
+    (0x3E, 6),   // F5
+    (0x3F, 7),   // F6
+    (0x40, 8),   // F7
+    (0x41, 9),   // F8
+    (0x42, 10),  // F9
+    (0x43, 11),  // F10
+    (0x44, 12),  // F11
+    (0x45, 13),  // F12
+    (0x4C, 119), // Delete
+    (0x35, 19),  // Grave/~
+    (0x1E, 20),  // 1
+    (0x1F, 21),  // 2
+    (0x20, 22),  // 3
+    (0x21, 23),  // 4
+    (0x22, 24),  // 5
+    (0x23, 25),  // 6
+    (0x24, 26),  // 7
+    (0x25, 27),  // 8
+    (0x26, 28),  // 9
+    (0x27, 29),  // 0
+    (0x2D, 30),  // Minus
+    (0x2E, 31),  // Equal
+    (0x2A, 103), // Backspace
+    (0x4A, 117), // Home
+    (0x2B, 37),  // Tab
+    (0x14, 38),  // Q
+    (0x1A, 39),  // W
+    (0x08, 40),  // E
+    (0x15, 41),  // R
+    (0x17, 42),  // T
+    (0x1C, 43),  // Y
+    (0x18, 44),  // U
+    (0x0C, 45),  // I
+    (0x12, 46),  // O
+    (0x13, 47),  // P
+    (0x2F, 48),  // [
+    (0x30, 49),  // ]
+    (0x31, 67),  // Backslash
+    (0x4B, 118), // PageUp
+    (0x39, 55),  // CapsLock
+    (0x04, 56),  // A
+    (0x16, 57),  // S
+    (0x07, 58),  // D
+    (0x09, 59),  // F
+    (0x0A, 60),  // G
+    (0x0B, 61),  // H
+    (0x0D, 62),  // J
+    (0x0E, 63),  // K
+    (0x0F, 64),  // L
+    (0x33, 65),  // ;
+    (0x34, 66),  // '
+    (0x28, 85),  // Enter
+    (0x4E, 121), // PageDown
+    (0xE1, 73),  // Left Shift
+    (0x1D, 74),  // Z
+    (0x1B, 75),  // X
+    (0x06, 76),  // C
+    (0x19, 77),  // V
+    (0x05, 78),  // B
+    (0x11, 79),  // N
+    (0x10, 80),  // M
+    (0x36, 81),  // ,
+    (0x37, 82),  // .
+    (0x38, 83),  // /
+    (0xE5, 84),  // Right Shift
+    (0x52, 101), // Up
+    (0xE0, 91),  // Left Ctrl
+    (0xE3, 92),  // Left Win
+    (0xE2, 93),  // Left Alt
+    (0x2C, 94),  // Space
+    (0xE6, 95),  // Right Alt
+    (0xE4, 98),  // Right Ctrl
+    (0x50, 99),  // Left
+    (0x51, 100), // Down
+    (0x4F, 102), // Right
+];
 
 /// Режимы подсветки Ajazz (wsclx lighting.rs Mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,11 +510,15 @@ impl AjazzAk820 {
     }
 
     /// Чтение текущего custom-LED буфера (512 байт, 128×4).
+    /// Задел: на нашей ревизии канал 0xFF68 не отвечает (журнал 10.114),
+    /// per-key идёт через `0x20`/`0x23` на 0xFF13.
+    #[allow(dead_code)]
     fn get_custom_led(&self) -> Result<Vec<u8>> {
         self.get_many(cmd::GET_CUSTOM_LED_DATA, LED_COUNT * 4)
     }
 
-    /// Запись custom-LED буфера (512 байт).
+    /// Запись custom-LED буфера (512 байт). См. `get_custom_led` — задел.
+    #[allow(dead_code)]
     fn set_custom_led(&self, buffer: &[u8]) -> Result<()> {
         if buffer.len() != LED_COUNT * 4 {
             return Err(Error::Protocol("custom-LED буфер не 512 байт".into()));
@@ -597,6 +720,228 @@ impl AjazzAk820 {
         buf
     }
 
+    // --- Транспорт официального протокола (этапы 0-2) -------------------
+    //
+    // Сверено с реверсом официального ПО: deddroid/ak820-rs
+    // (`device.rs` feature/command/data/commit_checked/upload_table) и
+    // Twyx22/ak820-center (`device.cpp` exchange/startSession/commit),
+    // плюс gohv/EPOMAKER-Ajazz-AK820-Pro. Отличие от подтверждённого на
+    // железе `send_ctl` (журнал 10.112) — паузы и чтение ответа, поэтому
+    // живут ОТДЕЛЬНЫМИ методами: проверенный путь подсветки не тронут.
+
+    /// 16-битная сумма всех байтов (wrapping). Прошивка возвращает её в
+    /// COMMIT-ответе, чтобы приложение убедилось в целостности таблицы.
+    fn sum16(data: &[u8]) -> u16 {
+        data.iter()
+            .fold(0u16, |acc, b| acc.wrapping_add(*b as u16))
+    }
+
+    /// Командный пакет с 16-битным счётчиком в `[8..10]`: число следующих
+    /// data-пакетов / блоков (deddroid `protocol::control`).
+    fn control_count(cmd: u8, byte2: u8, count: u16) -> [u8; ctl::PACKET_LEN] {
+        let mut p = Self::control_packet(cmd, byte2, 0);
+        p[8] = (count & 0xFF) as u8;
+        p[9] = (count >> 8) as u8;
+        p
+    }
+
+    /// Отправить feature-репорт и НЕ ждать ответа (data-пакеты таблиц).
+    /// `pause` — пауза ПЕРЕД отправкой (как в Twyx22 `exchange`).
+    fn ctl_feature(
+        dev: &hidapi::HidDevice,
+        pkt: &[u8; ctl::PACKET_LEN],
+        pause: Duration,
+    ) -> Result<()> {
+        std::thread::sleep(pause);
+        let buf = Self::ctl_frame(pkt);
+        dev.send_feature_report(&buf).map_err(Error::from)?;
+        Ok(())
+    }
+
+    /// Отправить пакет и прочитать ответ. `None` = ответа нет: на нашем железе
+    /// `get_feature_report` может отдавать Broken pipe — это НЕ ошибка
+    /// транспорта, вызывающая сторона решает, критично ли отсутствие ответа.
+    fn ctl_exchange(
+        dev: &hidapi::HidDevice,
+        pkt: &[u8; ctl::PACKET_LEN],
+    ) -> Result<Option<[u8; ctl::PACKET_LEN]>> {
+        Self::ctl_feature(dev, pkt, Duration::from_millis(ctl::PAUSE_MS))?;
+        std::thread::sleep(Duration::from_millis(ctl::READ_DELAY_MS));
+        let mut resp = [0u8; ctl::PACKET_LEN + 1];
+        match dev.get_feature_report(&mut resp) {
+            Ok(_) => {
+                let mut out = [0u8; ctl::PACKET_LEN];
+                out.copy_from_slice(&resp[1..]);
+                Ok(Some(out))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Отправить блок данных чанками по 64 б без чтения ответа
+    /// (deddroid `data`/`packets`; нулевое дополнение последнего чанка).
+    fn ctl_data(dev: &hidapi::HidDevice, data: &[u8], pause: Duration) -> Result<()> {
+        for chunk in data.chunks(ctl::PACKET_LEN) {
+            let mut pkt = [0u8; ctl::PACKET_LEN];
+            pkt[..chunk.len()].copy_from_slice(chunk);
+            Self::ctl_feature(dev, &pkt, pause)?;
+        }
+        Ok(())
+    }
+
+    /// COMMIT + сверка 16-битной суммы, которую прошивка вернула в ответе
+    /// (deddroid `commit_checked`). `Some(true)` — сумма совпала, `Some(false)` —
+    /// не совпала, `None` — ответа не было. `None` НЕ считается провалом:
+    /// иначе на нашем железе (Broken pipe на GET_REPORT) запись таблиц падала
+    /// бы всегда.
+    fn ctl_commit_checked(dev: &hidapi::HidDevice, data: &[u8]) -> Result<Option<bool>> {
+        let reply = Self::ctl_exchange(dev, &Self::control_count(ctl::COMMIT, 0, 0))?;
+        Ok(reply.map(|r| u16::from_le_bytes([r[5], r[6]]) == Self::sum16(data)))
+    }
+
+    /// Записать таблицу на control-канал:
+    /// `START(0x18)` → `<команда>` (count = число блоков) → данные →
+    /// `COMMIT` со сверкой суммы → `FINISH(0xF0)`.
+    /// Одна и та же последовательность у Twyx22 (`writeCustomRgb`) и deddroid
+    /// (`upload_table`). Повторяем до `RETRIES` раз, если COMMIT вернул
+    /// несовпадение суммы (200 мс между попытками).
+    fn upload_table(
+        &self,
+        dev: &hidapi::HidDevice,
+        command: u8,
+        table: &[u8],
+        what: &str,
+    ) -> Result<()> {
+        let blocks = table.len().div_ceil(ctl::PACKET_LEN) as u16;
+        let pause = Duration::from_millis(ctl::PAUSE_MS);
+        for attempt in 1..=ctl::RETRIES {
+            Self::ctl_exchange(dev, &Self::control_count(ctl::START, 0, 0))?;
+            Self::ctl_exchange(dev, &Self::control_count(command, 0, blocks))?;
+            Self::ctl_data(dev, table, pause)?;
+            let ok = Self::ctl_commit_checked(dev, table)?;
+            if ok != Some(false) {
+                // Some(true) — сумма сошлась; None — ответа нет, но запись
+                // отправлена (на нашем железе GET_REPORT недоступен).
+                Self::ctl_exchange(dev, &Self::control_count(ctl::SAVE, 0, 0))?;
+                return Ok(());
+            }
+            if attempt < ctl::RETRIES {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        Err(Error::Protocol(format!(
+            "клавиатура не подтвердила приём таблицы ({what}) после {} попыток",
+            ctl::RETRIES
+        )))
+    }
+
+    /// Индекс LED/слота подсветки по HID usage клавиши (страница 0x07).
+    /// `None` — клавиша без отдельного LED в таблице (например Fn).
+    fn light_index_for_usage(usage: u16) -> Option<u8> {
+        HID_USAGE_TO_LED
+            .iter()
+            .find(|(u, _)| *u == usage)
+            .map(|(_, idx)| *idx)
+    }
+
+    /// Собрать 576-байтную таблицу `[index, R, G, B]` из упакованного
+    /// readback-а `RGBRGB…` (432 б = 144 слота × 3). Трейлер `AA 55`
+    /// записывается в последние два байта, слот пишется только если
+    /// `slot*4+4 <= 574` (как в deddroid `protocol::table`).
+    fn color_table_from_rgb(rgb: &[u8]) -> Result<Vec<u8>> {
+        let need = ctl::TABLE_SLOTS * 3;
+        if rgb.len() < need {
+            return Err(Error::Protocol(format!(
+                "readback таблицы цветов короче ожидаемого: {} < {need} б",
+                rgb.len()
+            )));
+        }
+        let mut t = vec![0u8; ctl::TABLE_LEN];
+        for slot in 0..ctl::TABLE_SLOTS {
+            let off = slot * 4;
+            if off + 4 <= ctl::TABLE_LEN - 2 {
+                t[off] = slot as u8;
+                t[off + 1] = rgb[slot * 3];
+                t[off + 2] = rgb[slot * 3 + 1];
+                t[off + 3] = rgb[slot * 3 + 2];
+            }
+        }
+        t[ctl::TABLE_LEN - 2] = ctl::DELIM.0;
+        t[ctl::TABLE_LEN - 1] = ctl::DELIM.1;
+        Ok(t)
+    }
+
+    /// Прочитать сохранённую таблицу per-key цветов: команда `0xF5` с count=9,
+    /// первый блок приходит в ответе (63 полезных байта), далее 8 блоков по
+    /// 64 б; завершается COMMIT (Twyx22 `readCustomRgb`).
+    fn read_key_colors(&self, dev: &hidapi::HidDevice) -> Result<Vec<u8>> {
+        let need = ctl::TABLE_SLOTS * 3;
+        let cmd = Self::control_count(ctl::RGB_READ, 0, ctl::TABLE_BLOCKS as u16);
+        let first = Self::ctl_exchange(dev, &cmd)?.ok_or_else(|| {
+            Error::Protocol(
+                "клавиатура не ответила на чтение таблицы цветов (0xF5); \
+                 per-key RMW невозможен"
+                    .into(),
+            )
+        })?;
+        let mut raw = Vec::with_capacity(ctl::TABLE_LEN);
+        raw.extend_from_slice(&first[1..]);
+        for _ in 1..ctl::TABLE_BLOCKS {
+            let zero = [0u8; ctl::PACKET_LEN];
+            let next = Self::ctl_exchange(dev, &zero)?.ok_or_else(|| {
+                Error::Protocol("чтение таблицы цветов оборвалось: нет ответа".into())
+            })?;
+            raw.extend_from_slice(&next);
+        }
+        let _ = Self::ctl_exchange(dev, &Self::control_count(ctl::COMMIT, 0, 0));
+        if raw.len() < need {
+            return Err(Error::Protocol(format!(
+                "readback таблицы цветов короткий: {} < {need} б",
+                raw.len()
+            )));
+        }
+        raw.truncate(need);
+        Ok(raw)
+    }
+
+    /// Записать таблицу per-key цветов через `0x23` (144 слота × 4 б).
+    fn write_key_colors(&self, dev: &hidapi::HidDevice, table: &[u8]) -> Result<()> {
+        self.upload_table(dev, ctl::KEY_COLORS, table, "per-key цвета")
+    }
+
+    /// Живой (несохраняемый) per-key кадр: `0x20` count=8 → 512 б данных →
+    /// `COMMIT` → чтение статуса без проверки (deddroid `live_frame`).
+    /// FINISH здесь НЕ отправляется — прошивка сама возвращается к
+    /// сохранённому эффекту, когда кадры перестают приходить.
+    fn apply_live_frame(&self, dev: &hidapi::HidDevice, data: &[u8]) -> Result<()> {
+        Self::ctl_feature(
+            dev,
+            &Self::control_count(ctl::LIVE_COLORS, 0, 8),
+            Duration::from_millis(5),
+        )?;
+        Self::ctl_data(dev, data, Duration::from_millis(2))?;
+        Self::ctl_feature(
+            dev,
+            &Self::control_count(ctl::COMMIT, 0, 0),
+            Duration::from_millis(5),
+        )?;
+        std::thread::sleep(Duration::from_millis(5));
+        let mut resp = [0u8; ctl::PACKET_LEN + 1];
+        let _ = dev.get_feature_report(&mut resp);
+        Ok(())
+    }
+
+    /// 512-байтный live-кадр из пар `(light index, цвет)`: подряд
+    /// `[index, R, G, B]`, нулевое дополнение до 512 (deddroid `live_frame`).
+    fn live_frame_from_pairs(pairs: &[(u8, [u8; 3])]) -> Vec<u8> {
+        let mut d = Vec::with_capacity(ctl::LIVE_LEN);
+        for (i, [r, g, b]) in pairs.iter().take(ctl::LIVE_LEN / 4) {
+            d.extend_from_slice(&[*i, *r, *g, *b]);
+        }
+        d.resize(ctl::LIVE_LEN, 0);
+        d
+    }
+
     /// Загрузить payload (256-байтный заголовок + пиксельные кадры LE) на
     /// TFT-интерфейс 0xFF67 чанками по 4096, затем переключить дисплей на
     /// user-содержимое. Общий хвост для `set_screen_image`/`set_screen_animation`.
@@ -692,7 +1037,11 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn is_connected(&self) -> bool {
-        self.get_device_info().is_ok()
+        // Раньше проверялось через get_device_info() → канал 0xFF68, который на
+        // живом железе таймаутит (журнал 10.106/10.112), поэтому всегда было
+        // «нет». Проверяем через рабочий control-канал 0xFF13: если он открылся
+        // по VID/PID — устройство живо и подключено.
+        self.open_control().is_ok()
     }
 
     fn vid_pid(&self) -> (u16, u16) {
@@ -706,13 +1055,29 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn set_rgb_color(&self, key: KeyId, color: Color) -> Result<()> {
-        let mut buffer = self.get_custom_led()?;
-        let slot = (key.0 as usize) * 4;
-        buffer[slot] = slot as u8;
-        buffer[slot + 1] = color.r;
-        buffer[slot + 2] = color.g;
-        buffer[slot + 3] = color.b;
-        self.set_custom_led(&buffer)
+        // `KeyId` для Ajazz — HID usage (страница 0x07), а таблица цветов
+        // адресуется собственными light-индексами (порядок другой!). Для CLI
+        // `--color` этот путь недостижим (ранний выход в apply_rgb_persistent),
+        // поэтому RMW цветовой таблицы используется только точечно.
+        let idx = Self::light_index_for_usage(key.0).ok_or_else(|| {
+            Error::Unsupported(
+                "у клавиши нет отдельного LED в таблице цветов Ajazz (HID usage не найден)",
+            )
+        })?;
+        let dev = self.open_control()?;
+        // read-modify-write: читаем сохранённую таблицу (432 б упакованного
+        // RGB), правим один слот, пишем обратно (576 б `[index, R, G, B]`).
+        let rgb = self.read_key_colors(&dev)?;
+        let mut table = Self::color_table_from_rgb(&rgb)?;
+        let off = idx as usize * 4;
+        table[off + 1] = color.r;
+        table[off + 2] = color.g;
+        table[off + 3] = color.b;
+        self.write_key_colors(&dev, &table)?;
+        // Сохранённая таблица видна только в Custom-режиме — переключаемся.
+        drop(dev);
+        self.last_color.set([color.r, color.g, color.b]);
+        self.apply_lighting(AjazzMode::Custom)
     }
 
     fn set_rgb_brightness(&self, level: u8) -> Result<()> {
@@ -732,19 +1097,30 @@ impl KeyboardDevice for AjazzAk820 {
         Ok(())
     }
 
-    /// Хост-рендеринг: заливаем custom-LED буфер и включаем Custom-режим.
+    /// Хост-рендеринг: одноцветный кадр → Static (0xFF13), разноцветный →
+    /// live-кадр `0x20` (per-key, без сохранения во флеш).
+    ///
+    /// Раньше per-key был честным `Unsupported`: буфер 0xFF68 (SET_CUSTOM_LED_DATA)
+    /// на нашей ревизии не отвечает. По реверсу официального ПО per-key кадры
+    /// живут на control-канале 0xFF13 (`live_frame`, deddroid `device.rs`), так
+    /// что их можно слать и здесь. НЕ проверено на живом железе (журнал 10.114).
     fn render_frame(&self, colors: &[Color]) -> Result<()> {
-        let mut map = vec![0u8; LED_COUNT * 4];
-        for i in 0..LED_COUNT {
-            map[i * 4] = i as u8;
-            if let Some(c) = colors.get(i) {
-                map[i * 4 + 1] = c.r;
-                map[i * 4 + 2] = c.g;
-                map[i * 4 + 3] = c.b;
-            }
+        if let Some(uniform) = Self::uniform_frame_color(colors) {
+            self.last_color.set([uniform.r, uniform.g, uniform.b]);
+            return self.apply_lighting(AjazzMode::Static);
         }
-        self.set_custom_led(&map)?;
-        self.apply_lighting(AjazzMode::Custom)
+        // Разноцветный кадр: индекс элемента = light-индекс LED (у Ajazz нет
+        // отдельной геометрии, led_count не переопределён — порядок задаётся
+        // вызывающей стороной).
+        let pairs: Vec<(u8, [u8; 3])> = colors
+            .iter()
+            .take(ctl::LIVE_LEN / 4)
+            .enumerate()
+            .map(|(i, c)| (i as u8, [c.r, c.g, c.b]))
+            .collect();
+        let data = Self::live_frame_from_pairs(&pairs);
+        let dev = self.open_control()?;
+        self.apply_live_frame(&dev, &data)
     }
 
     fn get_rgb_preset(&self) -> Result<Vec<RgbPreset>> {
@@ -1196,8 +1572,32 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn get_battery_level(&self) -> Result<Option<u8>> {
-        let info = self.get_device_info()?;
-        Ok(Some(info[17]))
+        // Заряд читается по control-каналу 0xFF13 (Twyx22 `Device::battery`:
+        // пакет `[1]=0x20 [2]=0x01` в 65-байтном буфере, ответ `0x20 0x01`,
+        // уровень в 4-м байте, 0xFF = «на проводе»/100%, <=100 — проценты).
+        if let Ok(dev) = self.open_control() {
+            let mut pkt = [0u8; ctl::PACKET_LEN];
+            pkt[0] = 0x20;
+            pkt[1] = 0x01;
+            if let Ok(Some(r)) = Self::ctl_exchange(&dev, &pkt) {
+                // r — логический пакет без report id: r[0]=0x20, r[1]=0x01.
+                if r[0] == 0x20 && r[1] == 0x01 {
+                    let level = r[3];
+                    if level == 0xFF {
+                        return Ok(Some(100));
+                    }
+                    if level <= 100 {
+                        return Ok(Some(level));
+                    }
+                }
+            }
+        }
+        // Фоллбек на device_info[17] через 0xFF68 (на нашем железе не
+        // отвечает, журнал 10.106/10.112); при недоступности — честный None.
+        match self.get_device_info() {
+            Ok(info) => Ok(Some(info[17])),
+            Err(_) => Ok(None),
+        }
     }
 
     // --- EEPROM ----------------------------------------------------------
@@ -1231,21 +1631,25 @@ impl KeyboardDevice for AjazzAk820 {
             .set((brightness as u16 * 5 / 255).min(5) as u8);
         self.last_speed.set((speed as u16 * 5 / 255).min(5) as u8);
 
-        let aj_mode = AjazzMode::from_our_mode(mode);
+        // Custom (per-key): заливаем ВСЮ таблицу цветов одним цветом через
+        // подтверждённый control-канал 0xFF13 (`0x23`, 144 слота), затем
+        // включаем режим Custom. Без цвета — только переключаем режим.
+        // Прежний путь через 0xFF68 (SET_CUSTOM_LED_DATA) на нашей ревизии
+        // таймаутил (журнал 10.106/10.112).
         if mode == RgbMode::Custom {
-            // В Custom-режиме красим весь буфер цветом и включаем Custom.
             if let Some(c) = color {
-                let mut map = vec![0u8; LED_COUNT * 4];
-                for i in 0..LED_COUNT {
-                    map[i * 4] = i as u8;
-                    map[i * 4 + 1] = c.r;
-                    map[i * 4 + 2] = c.g;
-                    map[i * 4 + 3] = c.b;
-                }
-                self.set_custom_led(&map)?;
+                let rgb: Vec<u8> = std::iter::repeat([c.r, c.g, c.b])
+                    .take(ctl::TABLE_SLOTS)
+                    .flatten()
+                    .collect();
+                let table = Self::color_table_from_rgb(&rgb)?;
+                let dev = self.open_control()?;
+                self.write_key_colors(&dev, &table)?;
             }
+            return self.apply_lighting(AjazzMode::Custom).map(|()| true);
         }
-        self.apply_lighting(aj_mode)?;
+
+        self.apply_lighting(AjazzMode::from_our_mode(mode))?;
         Ok(true)
     }
 
@@ -1258,6 +1662,16 @@ impl KeyboardDevice for AjazzAk820 {
 
 // Применение последнего аппаратного режима из last_mode (для CLI/GUI).
 impl AjazzAk820 {
+    /// Цвет одноцветного кадра: `Some(c)` — все цвета совпадают (пустой кадр =
+    /// чёрный = выключить), `None` — кадр разноцветный (нужен per-key live-кадр).
+    fn uniform_frame_color(colors: &[Color]) -> Option<Color> {
+        match colors.first() {
+            None => Some(Color::new(0, 0, 0)),
+            Some(&first) if colors.iter().all(|&c| c == first) => Some(first),
+            Some(_) => None,
+        }
+    }
+
     fn apply_current_mode(&self) -> Result<()> {
         let mode_byte = self.last_mode.get();
         let mode = if mode_byte >= 0x80 {
@@ -1397,5 +1811,87 @@ mod tests {
         assert_eq!(&framed[2..5], &[0xFF, 0x00, 0x00], "RGB");
         assert_eq!(framed[15], ctl::DELIM.1, "трейлер 0x55");
         assert_eq!(framed[16], ctl::DELIM.0, "трейлер 0xAA");
+    }
+
+    #[test]
+    fn uniform_frame_color_detects_per_key() {
+        use crate::types::Color;
+        // Пустой кадр = выключить свет (чёрный).
+        assert_eq!(
+            AjazzAk820::uniform_frame_color(&[]),
+            Some(Color::new(0, 0, 0))
+        );
+        // Одноцветный кадр = этот цвет.
+        let red = Color::new(255, 0, 0);
+        assert_eq!(
+            AjazzAk820::uniform_frame_color(&[red, red, red]),
+            Some(red)
+        );
+        // Разноцветный кадр → per-key live-кадр (None).
+        let green = Color::new(0, 255, 0);
+        assert_eq!(AjazzAk820::uniform_frame_color(&[red, green]), None);
+    }
+
+    #[test]
+    fn control_count_encodes_le_count() {
+        let p = AjazzAk820::control_count(ctl::KEY_COLORS, 0, 9);
+        assert_eq!(p[0], ctl::REPORT_ID_CMD);
+        assert_eq!(p[1], ctl::KEY_COLORS);
+        assert_eq!(p[8], 9);
+        assert_eq!(p[9], 0);
+        let big = AjazzAk820::control_count(ctl::LIVE_COLORS, 0, 0x0102);
+        assert_eq!(&big[8..10], &[0x02, 0x01], "count little-endian");
+    }
+
+    #[test]
+    fn sum16_wraps_and_matches_firmware_expectation() {
+        // Пустая таблица и таблица из нулей — сумма 0.
+        assert_eq!(AjazzAk820::sum16(&[]), 0);
+        assert_eq!(AjazzAk820::sum16(&[0u8; 64]), 0);
+        // 255*257 = 65535 = u16::MAX — ровно на границе, без переполнения.
+        assert_eq!(AjazzAk820::sum16(&[0xFF; 257]), 0xFFFF);
+        // 255*258 = 65790 → wrapping даёт 254 (0x00FE), а не панику.
+        assert_eq!(AjazzAk820::sum16(&[0xFF; 258]), 0x00FE);
+        assert_eq!(AjazzAk820::sum16(&[1, 2, 3]), 6);
+    }
+
+    #[test]
+    fn color_table_from_rgb_packs_slots_and_trailer() {
+        // 432 б упакованного RGB → 576 б `[index, R, G, B]` + трейлер AA 55.
+        let mut rgb = vec![0u8; ctl::TABLE_SLOTS * 3];
+        rgb[0..3].copy_from_slice(&[0x11, 0x22, 0x33]); // слот 0
+        rgb[3..6].copy_from_slice(&[0x44, 0x55, 0x66]); // слот 1
+        let table = AjazzAk820::color_table_from_rgb(&rgb).unwrap();
+        assert_eq!(table.len(), ctl::TABLE_LEN);
+        assert_eq!(&table[0..4], &[0, 0x11, 0x22, 0x33]);
+        assert_eq!(&table[4..8], &[1, 0x44, 0x55, 0x66]);
+        assert_eq!(&table[ctl::TABLE_LEN - 2..], &[0xAA, 0x55]);
+        // Слот 143 (off 572) не влезает до трейлера — остаётся нулевым,
+        // а последние два байта занимает трейлер.
+        assert_eq!(&table[572..576], &[0, 0, 0xAA, 0x55]);
+        // Короткий буфер — ошибка, а не тихая запись мусора.
+        assert!(AjazzAk820::color_table_from_rgb(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn light_index_lookup_uses_official_table() {
+        assert_eq!(AjazzAk820::light_index_for_usage(0x29), Some(1), "Esc");
+        assert_eq!(AjazzAk820::light_index_for_usage(0x3A), Some(2), "F1");
+        assert_eq!(AjazzAk820::light_index_for_usage(0x2C), Some(94), "Space");
+        // Fn (light 96) в таблице отсутствует — у неё нет HID usage.
+        assert_eq!(AjazzAk820::light_index_for_usage(0xFFFF), None);
+    }
+
+    #[test]
+    fn live_frame_pads_to_512() {
+        let red = [0xFF, 0x00, 0x00];
+        let data = AjazzAk820::live_frame_from_pairs(&[(1, red), (5, [0, 0xFF, 0])]);
+        assert_eq!(data.len(), ctl::LIVE_LEN);
+        assert_eq!(&data[0..4], &[1, 0xFF, 0x00, 0x00]);
+        assert_eq!(&data[4..8], &[5, 0x00, 0xFF, 0x00]);
+        assert!(data[8..].iter().all(|&b| b == 0), "хвост нулевой");
+        // Больше 128 пар — лишние отбрасываются, длина всё равно 512.
+        let many: Vec<(u8, [u8; 3])> = (0..200).map(|i| (i as u8, red)).collect();
+        assert_eq!(AjazzAk820::live_frame_from_pairs(&many).len(), ctl::LIVE_LEN);
     }
 }

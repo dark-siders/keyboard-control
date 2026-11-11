@@ -65,7 +65,7 @@
 - USB: VID `0x0C45` PID `0x8009` (наш, ревизии также `0x800A` / `0x8099`); ISP `0x0C45:0x7140` — **работает** (10.106)
 - BT: VID `0x0C45` PID `0xFEFE` — не тестировалась
 - ⚠ Ранее в журнале стояли неверные `0x0328:8207/8208/8209` — это PID из заброшенного ресёрча, НЕ наш чип. Удалены (10.106).
-- ⚠ `0x0C45:0xFDFD` «Microdia 2.4G Dongle» — **НЕ клавиатура**, постоянно висит на шине; легко спутать с Ajazz по общему VID (10.106).
+- **2.4G-донгл: VID `0x0C45` PID `0xFDFD`** — **это донгл Ajazz** (не «Microdia-пустышка», как ошибочно считалось в 10.106): у него есть командный канал `0xFF60` на интерфейсе `MI_03`, 32-байтовые кадры wsclx + checksum (подробности — раздел A1, 10.114). Подсветка через него пока не применена.
 
 **AULA F99:**
 - USB: VID `0x258A` PID `0x010C` (ревизия «BY Tech», делит PID с F75; отличается моделью PSD `0xA4`) — **работает**
@@ -295,6 +295,15 @@ pub trait KeyboardDevice {
 
 > **Живое железо появилось 2026-09-28** — у владельца на Fedora-машине (см. 10.106). До этого вся поддержка Ajazz была построена на ресёрче.
 
+#### A1. 2.4G-донгл `0C45:FDFD` — командный канал `0xFF60` (найден 10.114, подсветка НЕ дожата)
+
+- **Донгл 2.4G = отдельный PID `0C45:FDFD`** (НЕ «Microdia 2.4G Dongle»-пустышка, как ошибочно было в 10.106 — у него ЕСТЬ командный канал). Подтверждено `config.xml` из официального установщика `AJAZZ_AK820_Pro...V1.0.0.5.exe`: `<mode value="2" desc="2.4G TYPE-A" vid="0C45" pid="FDFD" product_name="2.4G Dongle" hid_interface="VID_0C45&PID_FDFD&MI_03"/>`.
+- **Интерфейс = `MI_03`** = hidraw с usage page `0xFF60` (дескриптор `0660FF...`), **Output 32 байта + Input 32 байта** (unnumbered, feature-репорта нет). Рядом `MI_04` — тоже `0xFF60`, но 64 байта (отвечает фиксированным `0F 01 01 11`, не командный).
+- **Протокол = wsclx-команды** (те же cmd-id, что на USB): `GET_DEVICE_INFO`=16, `GET_KEY`=18, `GET_LED_EFFECT`=19, `GET_FN_KEY`=22, `SET_LED_EFFECT`=35 и т.д. Кадр 32 байта: `[0]=0xAA (magic), [1]=cmd, [2]=len, [3..4]=addr, [6]=last, [8..]=payload, [31]=checksum` (checksum = сумма байтов кадра; дизасм DeviceDriver.exe подтвердил цикл суммирования).
+- **GET-команды эхо-отвечают** (`AA cmd len … checksum`), т.е. транспорт живой. **`SET_LED_EFFECT` пока НЕ применяется визуально** — не выяснен точный commit/формат payload для 2.4G (нужен дальнейший дизасм `DeviceDriver.exe` или usbmon-захват официального ПО). udev-правило проекта `0xfdfd` НЕ покрывает (узлы `root root`, нужен chmod/правило).
+- **Деталь реверса 10.114:** донгл эхо-возвращает ТОЛЬКО заголовок (`AA cmd len checksum`), payload в эхо всегда нулевой; реальные данные не приходят ни через hidraw8, ни через hidraw9. hidraw9 (`MI_04`, 64б) на ЛЮБУЮ команду отвечает фиксированным `0F 01 01 11` (похоже на статус/версию, не на ответ). `SET_LED_EFFECT` не меняет подсветку ни через 32б, ни через 64б канал (проверено с полной checksum суммой `[0..30]`, с сессией `START(1)→SET(35)→END(2)`, после физического пробуждения клавиатуры). Вывод: нужен usbmon-захват реального трафика официального ПО (Windows/ВМ) — эмпирический перебор исчерпан.
+- Инструменты для реверса (без sudo): `innoextract` и `radare2` скачаны RPM в `/tmp/opencode/` (innoextract распаковал установщик → `app/DeviceDriver.exe` + `app/config.xml`; radare2 запускается с `LD_LIBRARY_PATH=/tmp/opencode/usr/lib64`).
+
 #### A. Канал `0xFF13` (control) — ЕДИНСТВЕННЫЙ подтверждённый на нашем железе
 
 - **Как найти узел:** НЕ хардкодить `/dev/hidrawN` — нумерация сдвигается при каждом переподключении. Искать по `report_descriptor`, в котором есть `06 13 FF` (usage page `0xFF13`, usage `0x0001`):
@@ -306,13 +315,17 @@ pub trait KeyboardDevice {
 - **Дескриптор:** `0613ff0901a101150026ff007508954009028102090391020a00ffb102c0` — Usage Page `FF13`, Usage `0001`, Input 64 б / Output 64 б / **Feature 64 б** (unnumbered, без Report ID в дескрипторе, но `buf[0]` в HIDAPI = report ID = `0x00`).
 - **Транспорт / ФРЕЙМИНГ (КРИТИЧНО, подтверждено 10.112):** логический пакет — 64 байта; в hidraw/hidapi его надо слать как **65 байт: ведущий `0x00` (report id) + те же 64 байта**. Причина: 0xFF13 — НЕнумерованный feature-report, а `hidapi::send_feature_report` трактует `buf[0]` как НОМЕР report-а. Если послать 64 байта с `buf[0]=0x04`, уйдёт «report id 4» (которого у устройства нет) и прошивка молча игнорирует пакет (transmission при этом без ошибок!). Рабочий вызов: `kbc raw 0C45:8009 --path /dev/hidrawNN feature-send <130 hex = 65 б>`. Проверка `GET_REPORT 0x04` на нашем железе отдаёт `Broken pipe` — хендшейк не нужен (безвреден).
 - **Протокол (MemerGamer / `AjazzAk820ProUnofficialWebdriver`, подтверждён на нашем железе 10.112).** Три шага: `RESET` → `CONFIGURE <команда>` → data-пакет, финал `FINISH (0xF0)`.
-  - Преамбула: `p[0]=0x04`, `p[1]=<команда>`, `p[8]=0x01` (для sleep ещё `p[2]=0x01`).
-  - Команды: `0x18` RESET, `0x13` MODE (подсветка), `0x28` TIME (часы), `0x17` SLEEP, `0x02` SAVE, финал `0xF0` FINISH.
+  - Преамбула: `p[0]=0x04`, `p[1]=<команда>`, `p[2]=<аргумент>`, `p[8..10]=count` LE (число следующих data-пакетов/блоков) — так устроен транспорт в реверсе официального ПО (10.115).
+  - Команды: `0x18` RESET/START, `0x13` MODE (подсветка), `0x28` TIME (часы), `0x17` SLEEP, `0x02` SAVE/COMMIT, `0x23` KEY_COLORS (сохранённая per-key таблица), `0x20` LIVE_COLORS (живой кадр), `0xF5` чтение таблицы цветов, финал `0xF0` FINISH.
+  - **Per-key saved (10.115, НЕ проверено на железе):** `START(0x18,0,0)` → `KEY_COLORS(0x23,0,9)` → 9 блоков по 64 б (576 б: 144 слота × `[index,R,G,B]` + трейлер `AA 55`) → `COMMIT(0x02)` со сверкой 16-битной суммы → `FINISH(0xF0,0,0)`.
+  - **Per-key live (10.115, НЕ проверено на железе):** `feature(0x20,0,8)` → 512 б (128 групп `[index,R,G,B]`, нулевое дополнение) → `feature(0x02,0,0)` → `get_feature_report`; `FINISH` не нужен.
+  - **Чтение таблицы (`0xF5`, count=9, 10.115):** первый ответ — 63 полезных байта, затем 8 блоков по 64, затем `COMMIT`; итого 575 б → обрезать до 432 (упакованный RGB 144×3).
+  - **Заряд АКБ (10.115, НЕ проверено на железе):** пакет `0x20 0x01`; ответ проверять по логическим `r[0]==0x20 && r[1]==0x01`, уровень — `r[3]` (`0xFF` → 100).
   - Data-пакет подсветки: `p[0]=<эффект 0x00..0x13>`, `p[1..3]=RGB`, `p[8]=rainbow`, `p[9]=яркость 0..5`, `p[10]=скорость 0..5`, `p[11]=direction`, `p[14]=0x55`, `p[15]=0xAA`.
   - **Эффекты `0x00..0x13`:** `00` Off, `01` Static, `02` Single On, `03` Single Off, `04` Glittering, `05` Falling, `06` Colourful, `07` Breath, `08` Spectrum, `09` Outward, `0a` Scrolling, `0b` Rolling, `0c` Rotating, `0d` Explode, `0e` Launch, `0f` Ripples, `10` Flowing, `11` Pulsating, `12` Tilt, `13` Shuttle.
   - **Яркость/скорость 0..5, а НЕ 0..255.** `0x05` — максимум. Ошибка «поставил 0xFF» ведёт к нулю на плате.
   - Data-пакеты времени/sleep: `p[0..1]`, маркер `p[62]=0xAA`, `p[63]=0x55`.
-- **СТАТУС 10.106→10.112:** транспорт и фрейминг (65 байт = 00+64) подтверждены; **подсветка работает** через последовательность `04 18 → 04 13 → data-пакет → 04 F0` (framing B). Время подтверждено с десятичным форматом (НЕ BCD). GET_REPORT 0x04 отдаёт Broken pipe (безвредно).
+- **СТАТУС 10.106→10.115:** транспорт и фрейминг (65 байт = 00+64) подтверждены; **подсветка работает** через последовательность `04 18 → 04 13 → data-пакет → 04 F0` (framing B). Время подтверждено с десятичным форматом (НЕ BCD). GET_REPORT 0x04 отдаёт Broken pipe (безвредно). Per-key (`0x23`/`0x20`), чтение таблицы (`0xF5`) и заряд АКБ (`0x20 0x01`) реализованы по реверсу официального ПО, но **на живом железе ещё не проверены**.
 
 #### B. Канал `0xFF68` (wsclx fw 1.07) — ресёрч, НА НАШЕМ ЖЕЛЕЗЕ НЕ РАБОТАЕТ
 
@@ -325,7 +338,7 @@ pub trait KeyboardDevice {
 
 #### C. Грабли Ajazz (НЕ ПОВТОРЯТЬ — все воспроизведены 10.106)
 
-- **`0C45:FDFD` «Microdia 2.4G Dongle» — НЕ клавиатура.** Постоянно висит на той же шине, 5 HID-интерфейсов, все interrupt-IN, ноль Output/Feature, ни `FF13`, ни `FF68`. В usbmon-разборе легко спутать с Ajazz (тот же VID `0c45`).
+- **`0C45:FDFD` — это 2.4G-донгл Ajazz, а НЕ «Microdia-пустышка»** (опровергнуто в 10.114, ранее ошибочно — 10.106). `config.xml` официального ПО: `2.4G TYPE-A, vid=0C45 pid=FDFD, hid_interface=VID_0C45&PID_FDFD&MI_03`. У `MI_03` есть Output/Input по 32 б на usage page `0xFF60` и живой эхо-транспорт. **НО:** это отдельное устройство от клавиатуры — не путать с `0C45:8009` при разборе usbmon; команды `SET_LED_EFFECT` визуально не применяются (не найден commit/payload).
 - **Синтаксис `kbc raw`:** `VID:PID` — **позиционный** аргумент, `--path` — отдельный флаг. `kbc raw 0C45:8009 --path /dev/hidraw13 feature-send <hex>`. Вариант `--device 0C45:8009` не существует.
 - **Путь — только `/dev/hidrawN`**, sysfs-путь `/sys/class/hidraw/hidrawN` в `hidapi` не откроется.
 - **HEX должен быть ровно 130 символов** (65 байт). 129 → «нечётное число hex-цифр». При копировании в терминал символы теряются — генерировать пайтоном, а не вручную.
@@ -357,10 +370,10 @@ pub trait KeyboardDevice {
 - CLI `kbc`: `list / info / probe / ajazz-diag / raw feature-send/feature-get/output-send/input-read / wl-read-pages / rgb [--mode (вкл. audio — USB-only)|--style row|bars|--color|--brightness|--speed|--hold|--hw-effect|--light-on/--light-off] / screen [--image|--brightness] / reset / macro --record|--stop / time / battery / save [--effect NN|--brightness|--speed] / remap --list|--key|--to|--media|--modifier|--layer / set-poll <Hz> / set-debounce <ms> / set-sleep <sec> / profile save|load|eeprom-save / monitor / preset save|list|apply|remove / daemon [--preset|--style row|bars|--frame-ms|…]` (встроенные аудио-пресеты `audio-viz` и `cava`, в фоне без GUI).
 - GUI `keyboard-center`: Вкладки — Устройства, RGB Studio (host-движок + persistent хуки 2.4G, аудио-реактив фоновым потоком (USB, стили `row`/`bars`), файловые пресеты TOML, сохранить в память, гашение), Screen Manager (TFT Ajazz), Keymap & Fn Layer (клик-редактор F75: Press/Media/Modifier, показ раскладки, сброс), Settings (Status/battery). Потоки — через каналы + `frame_gen` (поколение кадров вместо `SourceId::remove()` — больше никаких паник glib, 10.39); аудио — отдельный `Arc<AtomicBool>` stop-флаг (10.97c). Автосейв при закрытии окна (10.38). **Сворачивание в системный трей (SNI) через ksni** (10.111): крестик прячет окно в трей, реальный выход — из меню трея/header (автосейв); отключается `KEYBOARD_CENTER_NO_TRAY`; без SNI-хоста — прежнее поведение.
 - Пресеты TOML: `$XDG_CONFIG_HOME/keyboard-center/presets` (по умолч. `~/.config/keyboard-center/presets`), структура `{version, type, color, brightness, speed, frame_ms, audio}`, где `[audio]` содержит `sensitivity`, `color_low`, `color_high`, `style`; пресет `default` неудаляем; встроенные `audio-viz` (`row`) и `cava` (`bars`) также неудаляемы и доступны любой установленной сборке без внешних файлов.
-- Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `258a:004e/004f/0050`, `0328:8207/8208/8209`. **В правилах обязательно `ATTRS{}`, не `ATTR{}`** — у hidraw нет своего `idVendor` (он в USB-родителе), `ATTR{}` не срабатывает никогда (10.103). На NixOS ручная установка в `/etc/udev/rules.d` невозможна (EROFS) — только через конфиг: `services.udev.packages` (наш модуль) или `services.udev.extraRules`; модуль постоянно подключён в `~/nixosniri` на хосте `darkside_pc` (10.103).
+- Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `0c45:fdfd` (2.4G-донгл Ajazz, добавлен 10.114), `258a:004e/004f/0050`, `0328:8207/8208/8209`. **В правилах обязательно `ATTRS{}`, не `ATTR{}`** — у hidraw нет своего `idVendor` (он в USB-родителе), `ATTR{}` не срабатывает никогда (10.103). На NixOS ручная установка в `/etc/udev/rules.d` невозможна (EROFS) — только через конфиг: `services.udev.packages` (наш модуль) или `services.udev.extraRules`; модуль постоянно подключён в `~/nixosniri` на хосте `darkside_pc` (10.103).
 - Fedora: `Makefile` (`make release`, `install/install-user/install-udev/update/uninstall/clean/help/install-deps`), единый `fedora.sh` (интерактивное меню + режимы `install [--user|--system|--udev-only]` / `update [--auto|--user|--system]` (пересборка + переустановка по месту) / `uninstall [--purge|--keep-rules]` / `deps`; флаги `--install-deps`/`--dry-run`; заменил `fedora_install.sh` и `fedora_uninstall.sh`, 10.107), CI-джоб `fedora-build` (dnf-пакеты одной строкой в `.gitlab-ci.yml`, без `\`-переносов — иначе YAML-folding склеивает, 10.58; + `bash -n` для всех скриптов, 10.105).
 - Диагностика: `scripts/collect-data.sh` (read-only, `--device f99|ajazz`, `--sg`, `--auto`, результат `~/kbc-diag-ГГГГММДД-ЧЧММСС/{01..37}*.txt` + tar.gz; для F99 `--write-tests` делегирует в `scripts/f99-usb-rev.sh`; для Ajazz добавляет `28-ajazz-diag.txt`), `scripts/ajazz-usb-diag.sh` (Ajazz, read-only, `--device`/`--sg`, архив `~/kbc-diag-ajazz-*.tar.gz`), `docs/collect-data.md`, `docs/f99-guide.md` (для владельцев F99), `docs/ajazz-guide.md` (для владельцев Ajazz). Дамп прошивки F75: `data/firmware/f75_firmware.hex` (61440 б, Intel HEX; read-only, MD5 прошивки `564524ecd3aed509c3bba432f0398aca`).
-- **Открытые вопросы / такие задачи:** 2) ремап F99 W-канал (0x03 не работает, read-only, 10.82); 3) Ajazz — канал `0xFF13` подтверждён (транспорт и фрейминг), подсветка/время через control-канал работают (10.112); wsclx `0xFF68` — таймаут, альтернатива (10.106); 4) BT-канал (не тестировался, закрыт по батарее); 5) ~~откат временных правок `~/nixosniri` (10.2) + решение судьбы модуля в системном флейке~~ — **ЗАКРЫТО 10.103**: временных правок не осталось, модуль подключён постоянно (input `keyboard-center` + `nixosModules.default`, хост `darkside_pc`); 6) публикация в GitLab / релиз (по желанию владельца); 7) идеи на будущее (реализуемые, после F99+Ajazz): уведомление о низком заряде 2.4G, D-Bus API (интеграция с Waybar), авто-бэкап/restore перед remap (страховка от инцидентов типа 10.81), расширение host-эффектов (Fire/Matrix/…), горячая смена профилей по окну — по решению владельца. (трей — СДЕЛАНО, см. 10.111; audio-reactive — СДЕЛАНО, см. 10.97–10.97e.)
+- **Открытые вопросы / такие задачи:** 2) ремап F99 W-канал (0x03 не работает, read-only, 10.82); 3) Ajazz — канал `0xFF13` подтверждён (транспорт и фрейминг), подсветка/время/Sleep РАБОТАЮТ (10.112, 10.114); per-key (`0x23`/`0x20`), чтение таблицы (`0xF5`) и заряд АКБ (`0x20 0x01`) реализованы по реверсу официального ПО — **ждут живой проверки** (10.115), план оставшихся этапов 3–7 — в `docs/ajazz-guide.md` (раздел A1); wsclx `0xFF68` (keymap/макросы) и TFT (`0xFF67`) на ревизии 8009 не отвечают/отсутствуют; 2.4G-донгл `0C45:FDFD` — канал `0xFF60` найден, `SET_LED_EFFECT` не применяется (10.114); 4) BT-канал (не тестировался, закрыт по батарее); 5) ~~откат временных правок `~/nixosniri` (10.2) + решение судьбы модуля в системном флейке~~ — **ЗАКРЫТО 10.103**: временных правок не осталось, модуль подключён постоянно (input `keyboard-center` + `nixosModules.default`, хост `darkside_pc`); 6) публикация в GitLab / релиз (по желанию владельца); 7) идеи на будущее (реализуемые, после F99+Ajazz): уведомление о низком заряде 2.4G, D-Bus API (интеграция с Waybar), авто-бэкап/restore перед remap (страховка от инцидентов типа 10.81), расширение host-эффектов (Fire/Matrix/…), горячая смена профилей по окну — по решению владельца. (трей — СДЕЛАНО, см. 10.111; audio-reactive — СДЕЛАНО, см. 10.97–10.97e.)
 
 
 10.111 — 2026-10-01 — сворачивание GUI в системный трей (SNI). GTK4/Libadwaita трая не имеют; реализация на `ksni 0.3` (feature `blocking`): org.kde.StatusNotifierItem + com.canonical.dbusmenu, чистый D-Bus поверх zbus, работает под Wayland/Niri. Решение владельца: крестик = в трей (но с настройкой), только сворачивание (без заряда/иконки батареи); пункты меню «Скрыть/Выход» даже без трея — НЕ делать; отключение флагом `KEYBOARD_CENTER_NO_TRAY` — ок.
@@ -607,7 +620,7 @@ pub trait KeyboardDevice {
 
 10.102 — 2026-09-25 — подготовка версии 0.4.0: версия синхронизирована в `Cargo.toml`, `Cargo.lock`, `flake.nix` и README; в README добавлен раздел с составом релиза. `cargo check --all-targets` — 0 ошибок, `cargo test --lib` — 31/31, `cargo build --release` — успешно, `nix build .#keyboard-center` — успешно; `target/release/kbc --version` и `result/bin/kbc --version` — `0.4.0`. Сохранились два предсуществующих предупреждения `unused_mut` в `src/gui/keymap_editor.rs:308,323`.
 
-10.106 — 2026-09-28 — **живая разведка Ajazz AK820 Pro на Fedora-машине владельца.** Переподключение USB сдвинуло нумерацию hidraw → старые пути умерли; `/dev/hidrawN` хардкодить нельзя, узел ищется по `06 13 FF` в `report_descriptor`. `0xFF13` = unnumbered Feature **64 б**, HIDAPI-буфер = 65 б (report ID `0x00` + 64). **Подтверждено живьём:** `feature-send` 64 б уходит без EPIPE (у FF68 Feature нет вообще → EPIPE, и `output-send` FF68 таймаутит из-за `Report Count = 4096` в дескрипторе против 64-байтных пакетов firmware). Найден первоисточник протокола подсветки (MemerGamer `AjazzAk820ProUnofficialWebdriver`, кредит gohv + KyleBoyer/TFTTimeSync-node): 3 шага `04 18` RESET → `04 13 …` CONFIGURE → data-пакет; **команда в `p[1]`, `p[0]` = код эффекта**, яркость/скорость **0..5**. Первые попытки были собраны неверно (команда в `p[0]`, яркость `0xFF`, без преамбулы) — визуального эффекта не дали, отправка при этом проходила. Также: `0C45:FDFD` «Microdia 2.4G Dongle» — не клавиатура (5 интерфейсов, только interrupt-IN, нет FF13/FF68), в usbmon легко спутать; ошибки «нечётное число hex-цифр» = потеря символа при копировании. Правильная последовательность на живом железе **ещё не проверена**.
+10.106 — 2026-09-28 — **живая разведка Ajazz AK820 Pro на Fedora-машине владельца.** Переподключение USB сдвинуло нумерацию hidraw → старые пути умерли; `/dev/hidrawN` хардкодить нельзя, узел ищется по `06 13 FF` в `report_descriptor`. `0xFF13` = unnumbered Feature **64 б**, HIDAPI-буфер = 65 б (report ID `0x00` + 64). **Подтверждено живьём:** `feature-send` 64 б уходит без EPIPE (у FF68 Feature нет вообще → EPIPE, и `output-send` FF68 таймаутит из-за `Report Count = 4096` в дескрипторе против 64-байтных пакетов firmware). Найден первоисточник протокола подсветки (MemerGamer `AjazzAk820ProUnofficialWebdriver`, кредит gohv + KyleBoyer/TFTTimeSync-node): 3 шага `04 18` RESET → `04 13 …` CONFIGURE → data-пакет; **команда в `p[1]`, `p[0]` = код эффекта**, яркость/скорость **0..5**. Первые попытки были собраны неверно (команда в `p[0]`, яркость `0xFF`, без преамбулы) — визуального эффекта не дали, отправка при этом проходила. Также: `0C45:FDFD` «Microdia 2.4G Dongle» — не клавиатура (5 интерфейсов, только interrupt-IN, нет FF13/FF68), в usbmon легко спутать; ошибки «нечётное число hex-цифр» = потеря символа при копировании. **(опровергнуто в 10.114: у `FDFD` есть командный канал `0xFF60` — это 2.4G-донгл Ajazz.)** Правильная последовательность на живом железе **ещё не проверена**.
 
 10.107 — 2026-09-28 — Fedora: два скрипта заменены одним `fedora.sh` (интерактивное меню: установка с нуля / обновление / удаление; установка и обновление — user или system). Правки логотипа GUI откачены (владелец отказался от идеи): `src/gui/app.rs`/`Cargo.toml`/`Cargo.lock` вернуты из git, `data/keyboard-center.png` удалён. Подробности — блок «10.107 ЕДИНЫЙ FEDORA.SH» ниже.
 
@@ -643,6 +656,10 @@ pub trait KeyboardDevice {
 - Проверить у владельца на NixOS+Noctalia: крестик сворачивает, клик по иконке/меню возвращает окно, «Выход» закрывает с автосейвом; при отсутствии SNI-хоста — прежнее поведение.
 
 10.112 — 2026-10-11 — **живая проверка 0xFF13 framing B на 0C45:8009.** По результатам прогона `scripts/ajazz-usb-diag.sh`+доработок `ajazz-usb-rev.sh` (framing a/b, финал `0xF0`, десятичное время, graceful SIGPIPE) подтверждено: 0xFF13 — unnumbered feature 64-б, нужен **65-б буфер (report id `0x00` + 64)**. T2 `b:0xF0` зажёг Static, T4 время подтвердилось. Причина бага драйвера: `hidapi::send_feature_report` трактует `buf[0]` как номер report-а → пакет с `buf[0]=0x04` уходил как report id 4 и игнорировался. Исправлено в драйвере: `send_ctl` формирует `ctl_frame` `[0x00]++pkt` (65 б); `sync_system_time` и `set_sleep_timer` переведены на `self::send_ctl()`. Добавлен юнит-тест `ctl_frame_prepends_report_id_zero`. Тесты lib — 32/32, `cargo build --release` OK. Часть дефектов (`kbc rgb --color` через `render_frame` → мёртвый 0xFF68, `is_connected` через `get_device_info`) оставлена вне этого fix.
+
+10.114 — 2026-11-11 — **фаза 1 доработки Ajazz AK820 Pro по живому железу (Fedora, 0C45:8009).** Прислана владельцем архивом `keyboard-center-2.4g-changes` (патч + журнал); в архиве этот пункт пронумерован 10.113, здесь перенумерован, т.к. 10.113 у нас занят (CLI). Диагностика подтвердила: рабочий канал только `0xFF13` (подсветка 20 режимов + время + сон, первоисточник gohv/EPOMAKER-Ajazz-AK820-Pro); `0xFF68` (wsclx) мёртв — пишет в hidraw без ошибок, но НИКОГДА не отвечает (размер output-репорта 64/65/4096/4097 байт не влияет). Исправлено: (1) `is_connected` → `open_control().is_ok()` (0xFF13) вместо `get_device_info()` (0xFF68) — `kbc info` теперь «да»; (2) `kbc rgb --mode/--color` для USB через `apply_rgb_persistent` (0xFF13) вместо host-рендеринга `render_frame` (0xFF68) — `kbc rgb --mode static --color` загорает; (3) `render_frame` одноцветный кадр → Static через 0xFF13, разноцветный per-key → честный `Unsupported`; (4) `apply_rgb_persistent` Custom → Static (per-key buffer через 0xFF68 недоступен); (5) `get_battery_level` → `Ok(None)` при мёртвом 0xFF68 (без 500-мс таймаута наружу). Подтверждено на железе: info «да», static зелёный загорелся, battery без ошибки. Per-key/keymap/macros/TFT/battery (0xFF68/0xFF67) — отложено до фазы 2 (нужен usbmon-захват официального ПО). Подробности — блок «10.114 ФАЗА 1 ДОРАБОТКИ AJAZZ».
+
+10.115 — 2026-11-11 — **этапы 0–2 Ajazz AK820 Pro: транспорт `0xFF13` в драйвере, батарея, per-key.** Основа — реверс официального ПО (`Twyx22/ak820-center` `device.cpp`, `deddroid/ak820-rs` `device.rs`/`protocol.rs`, сверено с `gohv/EPOMAKER-Ajazz-AK820-Pro`), а не гадание. В `src/devices/ajazz_ak820.rs` добавлен `mod ctl`: 65-байтовый feature-транспорт (`ctl_feature`/`ctl_exchange`/`ctl_data`), команды `0x18 START`, `0x23 KEY_COLORS`, `0x20 LIVE_COLORS`, `0xF5 RGB_READ`, `0x02 COMMIT`, `0xF0 FINISH`, `sum16`, `upload_table`, карта `HID_USAGE_TO_LED` (79 пар), `color_table_from_rgb`/`read_key_colors`/`write_key_colors`/`apply_live_frame`/`live_frame_from_pairs`. Батарея — `0x20 0x01` через `0xFF13` (уровень в `r[3]`); `set_rgb_color` — read-modify-write таблицы `0x23` + `apply_lighting(Custom)`; `render_frame` — одноцветный → Static, разноцветный → live-кадры `0x20`; `apply_rgb_persistent(Custom)` заливает все 144 слота цветом. Тесты lib **38/38**, check --all-targets 0 ошибок, release OK (потребовался `RUST_MIN_STACK=16777216 --jobs 2` — SIGSEGV в rustc). **Per-key и батарея на живом железе НЕ проверены** — проверены только подсветка/время/сон (10.112). Подробности — блок «10.115 ЭТАПЫ 0–2 AJAZZ».
 
 ---
 
@@ -1207,7 +1224,7 @@ Usage Page `FF13`, Usage `0001`, **Input 64 б** (`81 02`), **Output 64 б** (`9
 ### ЧИСТО ИНФОРМАЦИОННО (не ошибка)
 
 - Разбор `/tmp/opencode/ak820.pcap`: старый захват (220 с) содержал только энумерацию, LED SET_REPORT и обычные 8-байтовые клавиатурные Input — **ни одного 64-байтового report от `kbc`**, потому что команды шли не в то окно (переподключение).
-- Новый захват показал `0C45:FDFD` «Microdia 2.4G Dongle» — устройство с 5 HID-интерфейсами, **все interrupt-IN, ноль Output/Feature, ни `FF13`, ни `FF68`**. Это **не клавиатура**; оно присутствует на шине постоянно (в обоих захватах) и при разборе usbmon легко спутывается с Ajazz по общему VID `0c45`.
+- Новый захват показал `0C45:FDFD` «Microdia 2.4G Dongle» — устройство с 5 HID-интерфейсами, **все interrupt-IN, ноль Output/Feature, ни `FF13`, ни `FF68`**. Это **не клавиатура**; оно присутствует на шине постоянно (в обоих захватах) и при разборе usbmon легко спутывается с Ajazz по общему VID `0c45`. **(опровергнуто в 10.114: `FDFD` — 2.4G-донгл Ajazz с командным каналом `0xFF60` на `MI_03`.)**
 - `kbc` на Fedora-машине владельца (`/usr/local/bin/kbc`) поддерживает `--path` и подходит для этих тестов.
 - Формат pcap: linktype 220, сырой 64-байтовый usbmon-заголовок; существующий парсер `usbmon_ajazz.py` принимает текстовый usbmon, а не бинарный pcap.
 
@@ -1276,3 +1293,87 @@ Production-код не менялся. Все действия — read-only д�
 - **Коммит/пуш — делает владелец сам** (незапушены: `c424502` udev `ATTRS` 10.103, фикс иконки 10.104, удалялка в составе этой сессии, единый `fedora.sh` 10.107).
 - На NixOS-хосте изменений Fedora-пути не требуется; логотип GUI откачен без следов.
 - Прогонить живой `fedora.sh update` на Fedora (владелец): должен пересобрать release и переустановить по месту.
+
+---
+
+## 10.114 ФАЗА 1 ДОРАБОТКИ AJAZZ AK820 PRO (сессия 2026-11-11, в архиве — 10.113)
+
+> Живое железо Ajazz AK820 Pro (`0C45:8009`) на Fedora-машине пользователя. Цель — доработать софт, не трогая работу без железа. Разрешение на правки кода получено явно.
+
+### ДИАГНОСТИКА (живое железо, read-only + подтверждённые эксперименты)
+
+- Интерфейсы `0C45:8009` (4 hidraw): `hidraw10` boot keyboard (usage 0x01/0x06), `hidraw11` consumer/system, `hidraw12` **usage 0xFF68** (wsclx: Input 64 б, **Output Report Count = `96 00` = 4096 б**, feature-репорта нет), `hidraw13` **usage 0xFF13** (control: Input/Output/Feature по 64 б).
+- **`0xFF13` работает** (подтверждено): `kbc time` — OK; `kbc daemon --mode static --color FF0000` → загорелась красная Static.
+- **`0xFF68` мёртв**: `kbc battery` → таймаут cmd 0x10 (GET_DEVICE_INFO). Прямой hidraw-эксперимент (`os.write`/`os.read` через select) показал: write принимает ЛЮБОЙ размер (64/65/4096/4097 байт) без ошибки, но ответа НЕТ ни на одном интерфейсе. Значит причина не в размере буфера — протокол/канал не применим к этой ревизии (или нужен иной handshake). Первоисточник `gohv/EPOMAKER-Ajazz-AK820-Pro` подтверждает: interface 3 (0xFF13) = только lighting/sleep/clock; per-key/keymap/macros/TFT через 0xFF68/0xFF67 в open-source не реализованы.
+- **Критичная находка по 0xFF13**: raw-отправка `feature-send` БЕЗ последующего `get_feature_report` (handshake, что делает `send_ctl` в драйвере) НЕ применяет команду — подсветка не загорается. `kbc raw` handshake не делает, поэтому для живой отладки подсветки использовать драйверный путь (`kbc daemon`), а не `kbc raw`.
+
+### ЧТО ИСПРАВЛЕНО
+
+1. **`is_connected`** (`ajazz_ak820.rs`): было `get_device_info().is_ok()` (0xFF68 → всегда false) → стало `open_control().is_ok()` (проверка живого control-канала 0xFF13). Итог: `kbc info 0C45:8009` → «Подключено: да».
+2. **`kbc rgb --mode/--color` для USB** (`cli.rs`, `cmd_rgb`): раньше шло через host-рендеринг `render_frame` (0xFF68) и падало таймаутом; теперь перед host-веткой пробуется `apply_rgb_persistent` (для Ajazz → Ok(true), применяет через 0xFF13). F75/F99 (Ok(false)) как и раньше проваливаются в host-рендеринг. Итог: `kbc rgb --mode static --color 00FF00` загорает зелёным.
+3. **`render_frame`** (`ajazz_ak820.rs`): одноцветный кадр → Static через 0xFF13 (работает); разноцветный per-key → честный `Error::Unsupported` (вместо молчаливого таймаута 0xFF68). Логика вынесена в чистую `resolve_uniform_frame` + юнит-тест.
+4. **`apply_rgb_persistent`** (`ajazz_ak820.rs`): режим `Custom` больше не дёргает `set_custom_led` (0xFF68) — одноцветный Custom эквивалентен Static, применяется через 0xFF13.
+5. **`get_battery_level`** (`ajazz_ak820.rs`): при недоступном 0xFF68 возвращает `Ok(None)` (честно, без 500-мс таймаута наружу). `kbc battery` показывает штатное «батарея по USB не читается».
+6. **Зависание GUI при смене пресета** (`rgb_studio.rs`): при применении пресета на USB-устройствах GUI запускал host-рендеринг (таймер 40 мс → `render_frame` в главном потоке). Новый `render_frame` для Ajazz реально применяет свет через 0xFF13 (hidapi-открытие + handshake) — блокировал главный поток на каждом тике. Для Ajazz (VID `0x0C45`) теперь применяется аппаратно через `apply_rgb_persistent` в фоновом потоке (`spawn_wl_task`, тот же механизм, что и 2.4G), а не host-рендерингом.
+
+### ПРОВЕРКИ
+
+- `cargo check --all-targets` — 0 ошибок (3 предсуществующих предупреждения: `unused import menu::StandardItem` в `tray.rs:19` + 2 `unused_mut` в `keymap_editor.rs:308,323`).
+- `cargo test --lib` — **33/33** (+1 `resolve_uniform_frame_accepts_uniform_and_rejects_per_key`).
+- Живое железо: `kbc info` → «да»; `kbc rgb --mode static --color 00FF00` → зелёный загорелся; `kbc battery` → без ошибки.
+
+### ОТЛОЖЕНО (фаза 2)
+
+- ~~Per-key подсветка~~ и ~~батарея~~ — **ЗАКРЫТО в 10.115**: ушли через `0xFF13` (`0x23`/`0x20`, `0x20 0x01`), а не через `0xFF68`. Остаются через `0xFF68`/`0xFF67`: keymap, макросы, TFT. `0xFF67` интерфейса на этом железе нет; `0xFF68` не отвечает. Чтобы оживить — нужен usbmon-захват официального Windows-ПО (или альтернативный ресёрч); без этого — гадание (запрещено политикой «НЕ ГАДАТЬ»).
+- **2.4G-канал НАЙДЕН** (см. сводку A1): донгл `0C45:FDFD`, интерфейс `MI_03` = usage page `0xFF60`, 32 байта; протокол = wsclx-команды + checksum (сумма байтов кадра). GET-команды эхо-отвечают, но `SET_LED_EFFECT` пока не меняет подсветку — не выяснен точный commit/формат payload. Официальный софт извлечён: `DeviceDriver.exe` (C++/SQLite, протокол в нём) + `config.xml` (в `/tmp/opencode/ak820_app/`); дизасм radare2 показал: кадр 33 байта (report id 0 + 32), checksum на [32] = сумма байтов, параметры яркость/скорость max 5. Следующий шаг — декомпиляция функции формирования `SET_LED_EFFECT` (или usbmon-захват).
+- `kbc raw feature-send` не делает handshake → для подсветки через raw не годится (можно добавить флаг handshake отдельно, если понадобится).
+- ~~Уточнение текста `kbc battery` для Ajazz~~ — **ЗАКРЫТО в 10.115**: батарея читается через `0xFF13` (`0x20 0x01`, уровень в `r[3]`), `kbc battery` показывает процент; per-key тоже переведён на `0xFF13` (`0x23` сохранённая таблица / `0x20` живой кадр).
+
+---
+
+## 10.115 ЭТАПЫ 0–2 AJAZZ: ТРАНСПОРТ `0xFF13` В ДРАЙВЕРЕ, БАТАРЕЯ, PER-KEY (сессия 2026-11-11)
+
+> Продолжение 10.114. Владелец разрешил этапы 0–2 (транспорт, батарея, per-key подсветка); этапы 3–7 (keymap, макросы, TFT, 2.4G) — после живого теста. Основа — **реверс официального ПО**, а не догадки: `Twyx22/ak820-center` (`app/src/device.cpp`), `deddroid/ak820-rs` (`src/device.rs`, `src/protocol.rs`), сверено с `gohv/EPOMAKER-Ajazz-AK820-Pro`.
+
+### ЭТАП 0 — ТРАНСПОРТ (`mod ctl` в `src/devices/ajazz_ak820.rs`)
+
+- Константы: `COMMIT=0x02`, `KEY_COLORS=0x23`, `LIVE_COLORS=0x20`, `RGB_READ=0xF5`, `PAUSE_MS=35`, `READ_DELAY_MS=50`, `RETRIES=3`, `TABLE_LEN=576`, `TABLE_SLOTS=144`, `LIVE_LEN=512`, `TABLE_BLOCKS=9`.
+- Примитивы: `ctl_feature`, `ctl_exchange`, `ctl_data`, `ctl_commit_checked`, `upload_table`, `control_count`, `sum16`.
+- Кадр: 65 б на проводе (`0x00` + 64 логических); `[0]=0x04, [1]=cmd, [2]=arg, [8..10]=count` LE.
+- `sum16` — сумма всех байт по `u16` с wrapping (прошивка считает так же; тест `sum16_wraps_and_matches_firmware_expectation`).
+- `upload_table`: `START` → команда с count → блоки по 64 б → `COMMIT` → `FINISH`. `ctl_commit_checked` возвращает `Result<Option<bool>>`: `Some(true)` сумма сошлась, `Some(false)` нет, `None` ответа нет (`Broken pipe`) — **`None` не провал**, запись уже ушла; ретраи до 3 раз по 200 мс.
+- `HID_USAGE_TO_LED` — 79 пар HID usage → light index (Fn=96 отсутствует); `light_index_for_usage`, `color_table_from_rgb` (576 б: 144×`[idx,R,G,B]` + `AA 55` в `[574..575]`; слот пишется, только если `slot*4+4 <= 574`), `live_frame_from_pairs` (512 б).
+- **Путь подсветки (`apply_lighting`/`send_ctl`/`mode_data_packet`) НЕ тронут** — он подтверждён на живом железе (10.112). Новые примитивы добавлены отдельно.
+
+### ЭТАП 1 — БАТАРЕЯ
+
+- `get_battery_level`: пакет `0x20 0x01` через `0xFF13`; ответ валиден при логических `r[0]==0x20 && r[1]==0x01`, уровень — `r[3]` (`0xFF` → 100, `<=100` → значение). Фоллбек — `get_device_info()[17]`; иначе `Ok(None)`.
+- `kbc battery` для Ajazz больше не печатает «—».
+
+### ЭТАП 2 — PER-KEY ПОДСВЕТКА
+
+- `set_rgb_color(key, color)` — read-modify-write: чтение таблицы (`0xF5`, count=9; первый ответ 63 полезных байта, затем 8 блоков по 64, затем COMMIT → 575 б, обрезать до 432 = упакованный RGB 144×3), правка одного слота, запись через `0x23`, затем `apply_lighting(Custom)`.
+- `render_frame`: `uniform_frame_color` (заменил `resolve_uniform_frame`; `None` = per-key) — одноцветный/пустой кадр → Static через `0xFF13`; разноцветный → live-кадры `0x20` (512 б, нулевое дополнение, без `FINISH`).
+- `apply_rgb_persistent(Custom)`: если цвет задан — залить все 144 слота таблицы через `0x23` + `apply_lighting(Custom)`; без цвета — только `apply_lighting(Custom)`.
+- `get_custom_led`/`set_custom_led`/`cmd::SET_CUSTOM_LED_DATA` оставлены как задел с `#[allow(dead_code)]` и комментарием про мёртвый `0xFF68`.
+
+### ЧЕСТНОСТЬ / НЕ ПРОВЕРЕНО
+
+- **На живом железе НЕ проверены:** запись/чтение таблицы `0x23`/`0xF5`, live-кадры `0x20`, заряд АКБ `0x20 0x01`. Проверены только подсветка, синк времени и сон (10.112).
+- `Error::Unsupported` принимает только `&'static str` → для динамических сообщений использовать `Error::Protocol(String)`.
+- `led_count()` для Ajazz не переопределялся (0) и не нужен: `cmd_rgb`/`cmd_daemon` выходят раньше по `apply_rgb_persistent() == Ok(true)`.
+
+### ПРОВЕРКИ
+
+- `cargo test --lib` — **38/38** (новые: `control_count_encodes_le_count`, `color_table_from_rgb_packs_slots_and_trailer`, `light_index_lookup_uses_official_table`, `live_frame_pads_to_512`, `uniform_frame_color_detects_per_key`, `sum16_wraps_and_matches_firmware_expectation`).
+- `cargo check --all-targets` — 0 ошибок (3 предсуществующих предупреждения: `unused import menu::StandardItem` в `src/gui/tray.rs:19`, `unused_mut` в `src/gui/keymap_editor.rs:308,323`).
+- `cargo build --release` — OK; первая попытка падала SIGSEGV в rustc, помогло `RUST_MIN_STACK=16777216 cargo build --release --jobs 2`.
+- Документация: `README.md` (статус, примеры и roadmap по этапам), `docs/ajazz-guide.md` (раздел A — сводная таблица статусов, A1 — план этапов 3–7, A4 — транспорт `0xFF13`), `docs/collect-data.md` (раздел 3 приведён к фактическому статусу: что уже проверено, а что даст `*_error=Protocol`), `AGENTS.md` (сводка + этот блок).
+
+### ЧТО ПРОВЕРИТЬ НА FEDORA (живое железо, `0C45:8009`)
+
+1. `kbc battery 0C45:8009` — должен показать процент (а не «—»).
+2. `kbc rgb 0C45:8009 --mode custom --color FF0000` — все клавиши красным (таблица `0x23` + Custom).
+3. `kbc rgb 0C45:8009 --mode static --color 00FF00` — контроль (путь подтверждён, 10.112).
+4. GUI: RGB Studio → per-key покраска → «Применить» (то же, что п.2 через `set_rgb_color`).
+5. Если per-key не применился — вернуть `--mode static`, зафиксировать вывод и не продолжать до разбора.
