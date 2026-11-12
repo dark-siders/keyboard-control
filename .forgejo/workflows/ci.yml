@@ -1,0 +1,111 @@
+# --- CI для Keyboard-Center (Forgejo Actions, altlinux.space) ---
+# Сборка/тесты Rust-пакета, который собирается Nix Flake + crane.
+# Раннер: общедоступный als-huge (до 5 часов).
+# Локальный прогон: nix develop . --command cargo test --lib / cargo clippy --all-targets
+#
+# Кэш /nix/store намеренно не используется: контейнер эфемерный,
+# а заливать весь стор в кэш дороже, чем скачать заново.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  # sandbox выключен: внутри контейнера Docker user-namespace может быть недоступен
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    sandbox = false
+
+jobs:
+  # --- Тесты (быстрые, на каждый push/PR) --------------------------------
+  test:
+    runs-on: als-huge
+    container:
+      image: nixos/nix:latest
+    steps:
+      # actions/checkout не используем: это JS-действие требует node в контейнере,
+      # а в nixos/nix его нет. Клон делаем обычным git — репозиторий публичный.
+      - name: Клонировать репозиторий
+        run: |
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_REF:-refs/heads/main}"
+          git checkout -q -f FETCH_HEAD
+
+      - name: Версия Nix
+        run: nix --version
+
+      - name: cargo test
+        run: nix develop . --command cargo test --lib
+
+  # --- Lint (clippy, без -D warnings) -------------------------------------
+  clippy:
+    runs-on: als-huge
+    container:
+      image: nixos/nix:latest
+    steps:
+      - name: Клонировать репозиторий
+        run: |
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_REF:-refs/heads/main}"
+          git checkout -q -f FETCH_HEAD
+
+      - name: Версия Nix
+        run: nix --version
+
+      - name: cargo clippy
+        run: nix develop . --command cargo clippy --all-targets
+
+  # --- Сборка пакета (оба бинарника: keyboard-center + kbc) ---------------
+  build:
+    runs-on: als-huge
+    container:
+      image: nixos/nix:latest
+    steps:
+      - name: Клонировать репозиторий
+        run: |
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_REF:-refs/heads/main}"
+          git checkout -q -f FETCH_HEAD
+
+      - name: Версия Nix
+        run: nix --version
+
+      - name: nix build
+        run: nix build .#keyboard-center
+
+  # --- Fedora: проверка, что пакет собирается без nix (dnf + cargo) ------
+  # Свежий Fedora-контейнер: ставим системные dev-пакеты (как это делает
+  # fedora.sh deps), затем обычный cargo build/test.
+  fedora-build:
+    runs-on: als-huge
+    container:
+      image: fedora:latest
+    steps:
+      - name: Клонировать репозиторий
+        run: |
+          dnf install -y git
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_REF:-refs/heads/main}"
+          git checkout -q -f FETCH_HEAD
+
+      - name: Системные зависимости
+        run: dnf install -y rust cargo gcc pkgconf make gtk4-devel libadwaita-devel glib2-devel gdk-pixbuf2-devel cairo-devel pango-devel hidapi-devel libudev-devel pulseaudio-libs-devel
+
+      - name: cargo build + test
+        run: |
+          cargo build --release --all-targets
+          cargo test --lib
+
+      - name: Проверка синтаксиса скриптов
+        run: |
+          bash -n fedora.sh
+          bash -n scripts/collect-data.sh scripts/ajazz-usb-diag.sh scripts/ajazz-usb-rev.sh scripts/f75-usb-rev.sh scripts/f99-usb-rev.sh

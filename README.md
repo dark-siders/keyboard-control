@@ -10,8 +10,7 @@
   <img src="https://img.shields.io/badge/GUI-GTK4_%2B_Libadwaita-orange?style=flat-square" alt="GUI">
   <img src="https://img.shields.io/badge/Lang-Rust-red?logo=rust&logoColor=white&style=flat-square" alt="Rust">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="License">
-  <img src="https://img.shields.io/gitlab/last-commit/dark_siders/keyboard-control?style=flat-square&color=fabd2f&logo=git&logoColor=white" alt="Last Commit">
-  <a href="README_en.md"><img src="https://img.shields.io/badge/%F0%9F%87%AC%F0%9F%87%A7_English-blue?style=flat-square" alt="English"></a>
+  <a href="https://altlinux.space/dark-siders/keyboard-control"><img src="https://img.shields.io/badge/Forgejo-altlinux.space-fabd2f?style=flat-square&logo=gitea&logoColor=white" alt="Репозиторий"></a>
 </p>
 
 ---
@@ -298,7 +297,7 @@ frame_ms = 40        # период кадра host-рендеринга, мс
 ```nix
 inputs = {
   keyboard-center = {
-    url = "gitlab:dark_siders/keyboard-control";
+    url = "git+https://altlinux.space/dark-siders/keyboard-control";
     inputs.nixpkgs.follows = "nixpkgs";   # или "flake-utils.crane.nixpkgs..."
   };
 };
@@ -616,14 +615,14 @@ keyboard-control/
 
 ## Поддержка / обратная связь
 
-Проект персональный (автор — darkside). Проблемы можно репортить в GitLab-репозиторий: [gitlab.com/dark_siders/keyboard-control](https://gitlab.com/dark_siders/keyboard-control).
+Проект персональный (автор — darkside). Проблемы можно репортить в трекер репозитория: [altlinux.space/dark-siders/keyboard-control](https://altlinux.space/dark-siders/keyboard-control).
 
 ### У вас AULA F99 или Ajazz AK820 Pro?
 
 **Ajazz AK820 Pro** уже проверен на живом железе ревизии `0C45:8009`: подсветка (20 режимов), синк времени и сон работают через control-канал `0xFF13`; per-key подсветка (`0x23` сохранённая таблица / `0x20` живой кадр) и заряд АКБ реализованы по реверсу официального ПО и ждут живой проверки. А keymap/макросы/TFT (канал wsclx `0xFF68`) на этой ревизии не отвечают. Оставшиеся этапы (keymap через `0xFF13`, макросы, TFT, 2.4G-донгл) расписаны в [docs/ajazz-guide.md](docs/ajazz-guide.md), раздел A1. Железа других ревизий (`0x800A`, `0x8099`) у проекта нет. F99 проверен на отдельном реальном устройстве, но дополнительные каналы F99 всё ещё требуют подтверждения. Если у вас другая ревизия Ajazz или нужна дополнительная проверка F99, помогите её подтвердить:
 
 ```bash
-git clone https://gitlab.com/dark_siders/keyboard-control && cd keyboard-control
+git clone https://altlinux.space/dark-siders/keyboard-control && cd keyboard-control
 # один раз собрать kbc (см. docs/collect-data.md, раздел 1 — NixOS или Fedora),
 # затем:
 ./scripts/collect-data.sh
