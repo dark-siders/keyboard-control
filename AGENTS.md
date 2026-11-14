@@ -316,11 +316,13 @@ pub trait KeyboardDevice {
 - **Транспорт / ФРЕЙМИНГ (КРИТИЧНО, подтверждено 10.112):** логический пакет — 64 байта; в hidraw/hidapi его надо слать как **65 байт: ведущий `0x00` (report id) + те же 64 байта**. Причина: 0xFF13 — НЕнумерованный feature-report, а `hidapi::send_feature_report` трактует `buf[0]` как НОМЕР report-а. Если послать 64 байта с `buf[0]=0x04`, уйдёт «report id 4» (которого у устройства нет) и прошивка молча игнорирует пакет (transmission при этом без ошибок!). Рабочий вызов: `kbc raw 0C45:8009 --path /dev/hidrawNN feature-send <130 hex = 65 б>`. Проверка `GET_REPORT 0x04` на нашем железе отдаёт `Broken pipe` — хендшейк не нужен (безвреден).
 - **Протокол (MemerGamer / `AjazzAk820ProUnofficialWebdriver`, подтверждён на нашем железе 10.112).** Три шага: `RESET` → `CONFIGURE <команда>` → data-пакет, финал `FINISH (0xF0)`.
   - Преамбула: `p[0]=0x04`, `p[1]=<команда>`, `p[2]=<аргумент>`, `p[8..10]=count` LE (число следующих data-пакетов/блоков) — так устроен транспорт в реверсе официального ПО (10.115).
-  - Команды: `0x18` RESET/START, `0x13` MODE (подсветка), `0x28` TIME (часы), `0x17` SLEEP, `0x02` SAVE/COMMIT, `0x23` KEY_COLORS (сохранённая per-key таблица), `0x20` LIVE_COLORS (живой кадр), `0xF5` чтение таблицы цветов, финал `0xF0` FINISH.
+  - Команды: `0x18` RESET/START, `0x13` MODE (подсветка), `0x28` TIME (часы), `0x17` SLEEP, `0x02` SAVE/COMMIT, `0x23` KEY_COLORS (сохранённая per-key таблица), `0x20` LIVE_COLORS (живой кадр), `0xF5` чтение таблицы цветов, `0x11` KEYMAP_BASE (base-слой), `0x27` KEYMAP_FN (Fn-слой), `0x19` MACRO_SESSION (открыть сессию макросов), `0x15` MACRO_DATA, финал `0xF0` FINISH.
   - **Per-key saved (10.115, НЕ проверено на железе):** `START(0x18,0,0)` → `KEY_COLORS(0x23,0,9)` → 9 блоков по 64 б (576 б: 144 слота × `[index,R,G,B]` + трейлер `AA 55`) → `COMMIT(0x02)` со сверкой 16-битной суммы → `FINISH(0xF0,0,0)`.
   - **Per-key live (10.115, НЕ проверено на железе):** `feature(0x20,0,8)` → 512 б (128 групп `[index,R,G,B]`, нулевое дополнение) → `feature(0x02,0,0)` → `get_feature_report`; `FINISH` не нужен.
   - **Чтение таблицы (`0xF5`, count=9, 10.115):** первый ответ — 63 полезных байта, затем 8 блоков по 64, затем `COMMIT`; итого 575 б → обрезать до 432 (упакованный RGB 144×3).
   - **Заряд АКБ (10.115, НЕ проверено на железе):** пакет `0x20 0x01`; ответ проверять по логическим `r[0]==0x20 && r[1]==0x01`, уровень — `r[3]` (`0xFF` → 100).
+  - **Keymap (реверс `Twyx22/ak820-center` `PROTOCOL.md`, сверен с `deddroid/ak820-rs`; НЕ проверено на железе):** `0x11` = base-слой, `0x27` = Fn-слой; на слой 576 Б = 144 слота × 4 Б + трейлер `AA 55`; в преамбуле `p[8..10]=9` (число блоков). Запись тем же приёмом `START → <0x11|0x27> → 9 блоков × 64 Б → COMMIT → FINISH`. Адресация слотов — по **light-индексу** (как `HID_USAGE_TO_LED`), а не нашими 128 слотами. Одиночная клавиша — T2-кадр `[00 03|0D 04 <slot> <page p1 p2 p3> <csum>]` (`03` = base, `0D` = Fn). **Команд ЧТЕНИЯ keymap НЕТ** — официальное ПО держит состояние на ПК (`config.xml`); **заводская base-раскладка захардкожена** из ассета (`data/ajazz/rgb-keyboard.xml` → `factory_keymap_ak820()`, 81 клавиша), заводского Fn-слоя данных нет, перед первым remap всё равно нужен локальный бэкап (10.117).
+  - **Макросы (тот же реверс; НЕ проверено на железе):** `0x19` открывает сессию, `0x15` (value = число блоков + 1) → 400 Б index (100 слотов × u16 LE offset) + блоки данных + трейлер `AA 55` → `COMMIT`. **Чтения макросов тоже нет.**
   - Data-пакет подсветки: `p[0]=<эффект 0x00..0x13>`, `p[1..3]=RGB`, `p[8]=rainbow`, `p[9]=яркость 0..5`, `p[10]=скорость 0..5`, `p[11]=direction`, `p[14]=0x55`, `p[15]=0xAA`.
   - **Эффекты `0x00..0x13`:** `00` Off, `01` Static, `02` Single On, `03` Single Off, `04` Glittering, `05` Falling, `06` Colourful, `07` Breath, `08` Spectrum, `09` Outward, `0a` Scrolling, `0b` Rolling, `0c` Rotating, `0d` Explode, `0e` Launch, `0f` Ripples, `10` Flowing, `11` Pulsating, `12` Tilt, `13` Shuttle.
   - **Яркость/скорость 0..5, а НЕ 0..255.** `0x05` — максимум. Ошибка «поставил 0xFF» ведёт к нулю на плате.
@@ -329,11 +331,13 @@ pub trait KeyboardDevice {
 
 #### B. Канал `0xFF68` (wsclx fw 1.07) — ресёрч, НА НАШЕМ ЖЕЛЕЗЕ НЕ РАБОТАЕТ
 
+> **Важно:** keymap и макросы **НЕ привязаны** к этому мёртвому каналу. По реверсу официального ПО (`Twyx22/ak820-center`) они живут на рабочем control-канале `0xFF13` — команды `0x11`/`0x27` (keymap base/Fn) и `0x19`/`0x15` (макросы), см. раздел A. `0xFF68` остаётся ресёрчем для TFT и (возможно) части wsclx-команд, недоступных на ревизии 8009.
+
 - Транспорт: output-репорты, report ID 0, кадр `[0xAA, cmd, len, addr_lo, addr_hi, 0, last, 0, payload…]` (64 б), ответ `0x55`, payload от байта 8. **На живом железе — таймаут на `output-send` (10.106).**
 - Причина (вероятная): дескриптор `0668ff0961a1010962150026ff009540750881020963150026ff0096001075089102c0` объявляет **Output Report Count = `96 00` = 4096 байт**, а firmware общается 64-байтными пакетами. Плюс у FF68 **нет Feature report** вообще → `feature-send` даёт EPIPE.
 - Команды: GET_DEVICE_INFO=16 (байт[17] = заряд), GET_LED_EFFECT=19, GET_KEY=18, GET_FN_KEY=22, GET_CUSTOM_LED_DATA=20, GET_MACRO=21, GET_DEFAULT_KEY_MATRIX=31, GET_DEFAULT_FN_KEY_MATRIX=28, SET_KEY=34, SET_FN_KEY=38, SET_LED_EFFECT=35 (режимы `0x00`–`0x13` + Custom `0x80`, payload 16 б, checkCode `AA 55` на [14..15]), SET_CUSTOM_LED_DATA=36, SET_MACRO=37, SET_FACTORY_RESET=15, SET_TFT_USER_ANIMATION=80, SET_TFT_BUILT_IN_INDEX=81.
 - Макросы: index 400 б (100 слотов × 4 б LE offset) + data-блоки; action 4 б (`delay LE u16 + keyCode + flags`; bit7=press, bits6..4=actionType: 3=keyboard 0xB0/0x30, 1=mouse 0x90/0x10, 2=consumer/text). Лимит 320 б/слот.
-- Keymap: слоты 128×4, page: KEYBOARD=2, CONSUMER=3, MACRO=6, TGL=10. Энкодер — firmware-fixed (Volume/Mute).
+- Keymap: слоты 128×4, page: KEYBOARD=2, CONSUMER=3, MACRO=6, TGL=10. Энкодер — firmware-fixed (Volume/Mute). **На ревизии 8009 не работает** — рабочий keymap идёт через `0xFF13` (`0x11`/`0x27`, 144 слота по light-индексу, см. раздел A).
 - TFT-канал `0xFF67`: 128×128 RGB565 LE; заголовок 256 б (`[0]=N кадров, задержки по 1 б (единица 2 мс), terminator 0x00, пад 0xFF`), кадры 32768 б, чанки 4096 б + 8 б chunk-header (magic `0x50 0x06` = 0x0650, критично — баг `0x064F` ломал переключение дисплея). Ack на каждый чанк — cmd 65. `set_screen_not.key` → SET_TFT_BUILT_IN_INDEX [0].
 
 #### C. Грабли Ajazz (НЕ ПОВТОРЯТЬ — все воспроизведены 10.106)
@@ -372,8 +376,8 @@ pub trait KeyboardDevice {
 - Пресеты TOML: `$XDG_CONFIG_HOME/keyboard-center/presets` (по умолч. `~/.config/keyboard-center/presets`), структура `{version, type, color, brightness, speed, frame_ms, audio}`, где `[audio]` содержит `sensitivity`, `color_low`, `color_high`, `style`; пресет `default` неудаляем; встроенные `audio-viz` (`row`) и `cava` (`bars`) также неудаляемы и доступны любой установленной сборке без внешних файлов.
 - Nix-интеграция: `nixos-module.nix` / `home-module.nix` (udev, группы plugdev, systemd-user unit `keyboard-center-daemon`), `99-keyboard-center.rules` → `258a:010c/010b/…`, `3554:fa09`, `0c45:8009/800a/8099/fefe/7140`, `0c45:fdfd` (2.4G-донгл Ajazz, добавлен 10.114), `258a:004e/004f/0050`, `0328:8207/8208/8209`. **В правилах обязательно `ATTRS{}`, не `ATTR{}`** — у hidraw нет своего `idVendor` (он в USB-родителе), `ATTR{}` не срабатывает никогда (10.103). На NixOS ручная установка в `/etc/udev/rules.d` невозможна (EROFS) — только через конфиг: `services.udev.packages` (наш модуль) или `services.udev.extraRules`; модуль постоянно подключён в `~/nixosniri` на хосте `darkside_pc` (10.103).
 - Fedora: `Makefile` (`make release`, `install/install-user/install-udev/update/uninstall/clean/help/install-deps`), единый `fedora.sh` (интерактивное меню + режимы `install [--user|--system|--udev-only]` / `update [--auto|--user|--system]` (пересборка + переустановка по месту) / `uninstall [--purge|--keep-rules]` / `deps`; флаги `--install-deps`/`--dry-run`; заменил `fedora_install.sh` и `fedora_uninstall.sh`, 10.107), CI-джоб `fedora-build` (dnf-пакеты одной строкой в `.gitlab-ci.yml`, без `\`-переносов — иначе YAML-folding склеивает, 10.58; + `bash -n` для всех скриптов, 10.105).
-- Диагностика: `scripts/collect-data.sh` (read-only, `--device f99|ajazz`, `--sg`, `--auto`, результат `~/kbc-diag-ГГГГММДД-ЧЧММСС/{01..37}*.txt` + tar.gz; для F99 `--write-tests` делегирует в `scripts/f99-usb-rev.sh`; для Ajazz добавляет `28-ajazz-diag.txt`), `scripts/ajazz-usb-diag.sh` (Ajazz, read-only, `--device`/`--sg`, архив `~/kbc-diag-ajazz-*.tar.gz`), `docs/collect-data.md`, `docs/f99-guide.md` (для владельцев F99), `docs/ajazz-guide.md` (для владельцев Ajazz). Дамп прошивки F75: `data/firmware/f75_firmware.hex` (61440 б, Intel HEX; read-only, MD5 прошивки `564524ecd3aed509c3bba432f0398aca`).
-- **Открытые вопросы / такие задачи:** 2) ремап F99 W-канал (0x03 не работает, read-only, 10.82); 3) Ajazz — канал `0xFF13` подтверждён (транспорт и фрейминг), подсветка/время/Sleep РАБОТАЮТ (10.112, 10.114); per-key (`0x23`/`0x20`), чтение таблицы (`0xF5`) и заряд АКБ (`0x20 0x01`) реализованы по реверсу официального ПО — **ждут живой проверки** (10.115), план оставшихся этапов 3–7 — в `docs/ajazz-guide.md` (раздел A1); wsclx `0xFF68` (keymap/макросы) и TFT (`0xFF67`) на ревизии 8009 не отвечают/отсутствуют; 2.4G-донгл `0C45:FDFD` — канал `0xFF60` найден, `SET_LED_EFFECT` не применяется (10.114); 4) BT-канал (не тестировался, закрыт по батарее); 5) ~~откат временных правок `~/nixosniri` (10.2) + решение судьбы модуля в системном флейке~~ — **ЗАКРЫТО 10.103**: временных правок не осталось, модуль подключён постоянно (input `keyboard-center` + `nixosModules.default`, хост `darkside_pc`); 6) публикация в GitLab / релиз (по желанию владельца); 7) идеи на будущее (реализуемые, после F99+Ajazz): уведомление о низком заряде 2.4G, D-Bus API (интеграция с Waybar), авто-бэкап/restore перед remap (страховка от инцидентов типа 10.81), расширение host-эффектов (Fire/Matrix/…), горячая смена профилей по окну — по решению владельца. (трей — СДЕЛАНО, см. 10.111; audio-reactive — СДЕЛАНО, см. 10.97–10.97e.)
+- Диагностика: `scripts/collect-data.sh` (read-only, `--device f99|ajazz`, `--sg`, `--auto`, результат `~/kbc-diag-ГГГГММДД-ЧЧММСС/{01..37}*.txt` + tar.gz; для F99 `--write-tests` делегирует в `scripts/f99-usb-rev.sh`; для Ajazz добавляет `28-ajazz-diag.txt`), `scripts/ajazz-usb-diag.sh` (Ajazz, read-only, `--device`/`--sg`, архив `~/kbc-diag-ajazz-*.tar.gz`), `docs/collect-data.md`, `docs/f99-guide.md` (для владельцев F99), `docs/ajazz-guide.md` (для владельцев Ajazz). Дамп прошивки F75: `data/firmware/f75_firmware.hex` (61440 б, Intel HEX; read-only, MD5 прошивки `564524ecd3aed509c3bba432f0398aca`). Заводская раскладка Ajazz: `data/ajazz/rgb-keyboard.xml` (15588 б, 81 клавиша; провенанс `data/ajazz/README.md`, MD5 файла `de2cb8e9158e3d03aa1af8e038f0b63a`).
+- **Открытые вопросы / такие задачи:** 2) ремап F99 W-канал (0x03 не работает, read-only, 10.82); 3) Ajazz — канал `0xFF13` подтверждён (транспорт и фрейминг), подсветка/время/Sleep РАБОТАЮТ (10.112, 10.114); per-key (`0x23`/`0x20`), чтение таблицы (`0xF5`) и заряд АКБ (`0x20 0x01`) реализованы по реверсу официального ПО — **ждут живой проверки** (10.115); **keymap (`0x11`/`0x27`) и макросы (`0x19`/`0x15`) по реверсу официального ПО живут на том же `0xFF13`** (не на мёртвом `0xFF68`) — команды известны, код ещё не переведён, чтения keymap/макросов НЕТ; заводская base-раскладка (81 клавиша) захардкожена из установщика (`data/ajazz/rgb-keyboard.xml` → `factory_keymap_ak820()`, 10.117), заводского Fn-слоя данных нет, перед первым remap нужен локальный бэкап; план оставшихся этапов 3–7 — в `docs/ajazz-guide.md` (раздел A1); TFT (`0xFF67`) на ревизии 8009 отсутствует; 2.4G-донгл `0C45:FDFD` — канал `0xFF60` найден, `SET_LED_EFFECT` не применяется (10.114); 4) BT-канал (не тестировался, закрыт по батарее); 5) ~~откат временных правок `~/nixosniri` (10.2) + решение судьбы модуля в системном флейке~~ — **ЗАКРЫТО 10.103**: временных правок не осталось, модуль подключён постоянно (input `keyboard-center` + `nixosModules.default`, хост `darkside_pc`); 6) публикация в GitLab / релиз (по желанию владельца); 7) идеи на будущее (реализуемые, после F99+Ajazz): уведомление о низком заряде 2.4G, D-Bus API (интеграция с Waybar), авто-бэкап/restore перед remap (страховка от инцидентов типа 10.81), расширение host-эффектов (Fire/Matrix/…), горячая смена профилей по окну — по решению владельца. (трей — СДЕЛАНО, см. 10.111; audio-reactive — СДЕЛАНО, см. 10.97–10.97e.)
 
 
 10.111 — 2026-10-01 — сворачивание GUI в системный трей (SNI). GTK4/Libadwaita трая не имеют; реализация на `ksni 0.3` (feature `blocking`): org.kde.StatusNotifierItem + com.canonical.dbusmenu, чистый D-Bus поверх zbus, работает под Wayland/Niri. Решение владельца: крестик = в трей (но с настройкой), только сворачивание (без заряда/иконки батареи); пункты меню «Скрыть/Выход» даже без трея — НЕ делать; отключение флагом `KEYBOARD_CENTER_NO_TRAY` — ок.
@@ -660,6 +664,10 @@ pub trait KeyboardDevice {
 10.114 — 2026-11-11 — **фаза 1 доработки Ajazz AK820 Pro по живому железу (Fedora, 0C45:8009).** Прислана владельцем архивом `keyboard-center-2.4g-changes` (патч + журнал); в архиве этот пункт пронумерован 10.113, здесь перенумерован, т.к. 10.113 у нас занят (CLI). Диагностика подтвердила: рабочий канал только `0xFF13` (подсветка 20 режимов + время + сон, первоисточник gohv/EPOMAKER-Ajazz-AK820-Pro); `0xFF68` (wsclx) мёртв — пишет в hidraw без ошибок, но НИКОГДА не отвечает (размер output-репорта 64/65/4096/4097 байт не влияет). Исправлено: (1) `is_connected` → `open_control().is_ok()` (0xFF13) вместо `get_device_info()` (0xFF68) — `kbc info` теперь «да»; (2) `kbc rgb --mode/--color` для USB через `apply_rgb_persistent` (0xFF13) вместо host-рендеринга `render_frame` (0xFF68) — `kbc rgb --mode static --color` загорает; (3) `render_frame` одноцветный кадр → Static через 0xFF13, разноцветный per-key → честный `Unsupported`; (4) `apply_rgb_persistent` Custom → Static (per-key buffer через 0xFF68 недоступен); (5) `get_battery_level` → `Ok(None)` при мёртвом 0xFF68 (без 500-мс таймаута наружу). Подтверждено на железе: info «да», static зелёный загорелся, battery без ошибки. Per-key/keymap/macros/TFT/battery (0xFF68/0xFF67) — отложено до фазы 2 (нужен usbmon-захват официального ПО). Подробности — блок «10.114 ФАЗА 1 ДОРАБОТКИ AJAZZ».
 
 10.115 — 2026-11-11 — **этапы 0–2 Ajazz AK820 Pro: транспорт `0xFF13` в драйвере, батарея, per-key.** Основа — реверс официального ПО (`Twyx22/ak820-center` `device.cpp`, `deddroid/ak820-rs` `device.rs`/`protocol.rs`, сверено с `gohv/EPOMAKER-Ajazz-AK820-Pro`), а не гадание. В `src/devices/ajazz_ak820.rs` добавлен `mod ctl`: 65-байтовый feature-транспорт (`ctl_feature`/`ctl_exchange`/`ctl_data`), команды `0x18 START`, `0x23 KEY_COLORS`, `0x20 LIVE_COLORS`, `0xF5 RGB_READ`, `0x02 COMMIT`, `0xF0 FINISH`, `sum16`, `upload_table`, карта `HID_USAGE_TO_LED` (79 пар), `color_table_from_rgb`/`read_key_colors`/`write_key_colors`/`apply_live_frame`/`live_frame_from_pairs`. Батарея — `0x20 0x01` через `0xFF13` (уровень в `r[3]`); `set_rgb_color` — read-modify-write таблицы `0x23` + `apply_lighting(Custom)`; `render_frame` — одноцветный → Static, разноцветный → live-кадры `0x20`; `apply_rgb_persistent(Custom)` заливает все 144 слота цветом. Тесты lib **38/38**, check --all-targets 0 ошибок, release OK (потребовался `RUST_MIN_STACK=16777216 --jobs 2` — SIGSEGV в rustc). **Per-key и батарея на живом железе НЕ проверены** — проверены только подсветка/время/сон (10.112). Подробности — блок «10.115 ЭТАПЫ 0–2 AJAZZ».
+
+10.116 — 2026-11-14 — **документация Ajazz приведена к факту: keymap и макросы — на рабочем `0xFF13`, а не на мёртвом `0xFF68`.** Правки только в доках (код не тронут, коммит не делал). Реверс официального ПО (`Twyx22/ak820-center` `PROTOCOL.md`, сверен с `deddroid/ak820-rs`): keymap base/Fn — `0x11`/`0x27` (576 Б = 144 слота × 4 + `AA 55`, byte8 = 9), макросы — `0x19` (сессия) + `0x15` (400 Б index + блоки + `AA 55`), запись тем же `START → cmd → блоки → COMMIT → FINISH`. Команд ЧТЕНИЯ keymap/макросов НЕТ (офиц. ПО хранит состояние в `config.xml` на ПК) → нужен заводской дефолт + локальный бэкап. Обновлены: `docs/ajazz-guide.md` (шапка, таблица A, A1 этапы 3–4, A2, A3, A4), `README.md` (статус-ноут, таблица устройств, roadmap, раздел про ремап и раздел «владельцам Ajazz»), `docs/collect-data.md` (шапка, раздел 3), `AGENTS.md` (сводка: раздел A — команды `0x11`/`0x27`/`0x19`/`0x15` + подпункты keymap/макросы, раздел B — примечание, keymap-пункт, «Открытые вопросы»; исторический блок 10.114). Подробности — блок «10.116 ДОКУМЕНТАЦИЯ AJAZZ».
+
+10.117 — 2026-11-14 — **заводская base-keymap Ajazz AK820 Pro захардкожена из официального установщика.** Владелец разрешил заход в объёме «ассет + hardcode + Fn» (этап 3 — перенос чтения/записи keymap на `0xFF13` — отложен). Официальный установщик `AJAZZ_AK820_Pro...exe` распакован временной оболочкой `nix-shell -p innoextract` в `/tmp/opencode/ak820_app/` (репозиторий не тронут). В `data/ajazz/rgb-keyboard.xml` (15588 б, 81 клавиша, MD5 `de2cb8e9158e3d03aa1af8e038f0b63a`) `key_index == light_index` (1..=121), `code` = HID usage page 0x07, Fn = вендорский `0xAF`. Сверка XML с `HID_USAGE_TO_LED`: 0 расхождений, не хватало только Fn `0xAF→96`. В `src/devices/ajazz_ak820.rs`: добавлен ассет-провенанс `data/ajazz/README.md`, в `HID_USAGE_TO_LED` добавлен `(0xAF, 96)` (Fn), добавлена `factory_keymap_ak820()` (81 запись `KeyId(light_index)` → `KeyAction::Press(code)`, `fn_layer` пустой — данных нет), `get_factory_keymap()` теперь возвращает её без обращения к мёртвому `0xFF68`. Тесты lib **39/39**, check --all-targets 0 ошибок, release OK (`RUST_MIN_STACK=16777216 --jobs 2`). **На живом железе НЕ проверено** (нет клавиатуры); сама по себе keymap не включает «Сбросить всё» — `remap_key`/`set_base_keymap`/`get_current_keymap`/`set_fn_layer` остаются на `0xFF68` до этапа 3. Версия пакета поднята `0.4.0 → 0.5.0` (`Cargo.toml`/`Cargo.lock`/`flake.nix`/README). Подробности — блок «10.117 ЗАВОДСКАЯ BASE-KEYMAP AJAZZ».
 
 ---
 
@@ -1324,7 +1332,7 @@ Production-код не менялся. Все действия — read-only д�
 
 ### ОТЛОЖЕНО (фаза 2)
 
-- ~~Per-key подсветка~~ и ~~батарея~~ — **ЗАКРЫТО в 10.115**: ушли через `0xFF13` (`0x23`/`0x20`, `0x20 0x01`), а не через `0xFF68`. Остаются через `0xFF68`/`0xFF67`: keymap, макросы, TFT. `0xFF67` интерфейса на этом железе нет; `0xFF68` не отвечает. Чтобы оживить — нужен usbmon-захват официального Windows-ПО (или альтернативный ресёрч); без этого — гадание (запрещено политикой «НЕ ГАДАТЬ»).
+- ~~Per-key подсветка~~ и ~~батарея~~ — **ЗАКРЫТО в 10.115**: ушли через `0xFF13` (`0x23`/`0x20`, `0x20 0x01`), а не через `0xFF68`. Через `0xFF68`/`0xFF67` остаются только TFT и polling/debounce. **Keymap и макросы — уточнено позже (10.116): по реверсу официального ПО они тоже на `0xFF13`** (`0x11`/`0x27`, `0x19`/`0x15`), код ещё не переведён. `0xFF67` интерфейса на этом железе нет; `0xFF68` не отвечает. Чтобы оживить TFT — нужен usbmon-захват официального Windows-ПО (или альтернативный ресёрч); без этого — гадание (запрещено политикой «НЕ ГАДАТЬ»).
 - **2.4G-канал НАЙДЕН** (см. сводку A1): донгл `0C45:FDFD`, интерфейс `MI_03` = usage page `0xFF60`, 32 байта; протокол = wsclx-команды + checksum (сумма байтов кадра). GET-команды эхо-отвечают, но `SET_LED_EFFECT` пока не меняет подсветку — не выяснен точный commit/формат payload. Официальный софт извлечён: `DeviceDriver.exe` (C++/SQLite, протокол в нём) + `config.xml` (в `/tmp/opencode/ak820_app/`); дизасм radare2 показал: кадр 33 байта (report id 0 + 32), checksum на [32] = сумма байтов, параметры яркость/скорость max 5. Следующий шаг — декомпиляция функции формирования `SET_LED_EFFECT` (или usbmon-захват).
 - `kbc raw feature-send` не делает handshake → для подсветки через raw не годится (можно добавить флаг handshake отдельно, если понадобится).
 - ~~Уточнение текста `kbc battery` для Ajazz~~ — **ЗАКРЫТО в 10.115**: батарея читается через `0xFF13` (`0x20 0x01`, уровень в `r[3]`), `kbc battery` показывает процент; per-key тоже переведён на `0xFF13` (`0x23` сохранённая таблица / `0x20` живой кадр).
@@ -1377,3 +1385,83 @@ Production-код не менялся. Все действия — read-only д�
 3. `kbc rgb 0C45:8009 --mode static --color 00FF00` — контроль (путь подтверждён, 10.112).
 4. GUI: RGB Studio → per-key покраска → «Применить» (то же, что п.2 через `set_rgb_color`).
 5. Если per-key не применился — вернуть `--mode static`, зафиксировать вывод и не продолжать до разбора.
+
+---
+
+## 10.116 ДОКУМЕНТАЦИЯ AJAZZ: KEYMAP И МАКРОСЫ — НА `0xFF13` (сессия 2026-11-14)
+
+> Запрос владельца: «обновляй тогда документацию, из того, что устарело». Правки **только в документации**, код не менялся, коммит не делался.
+
+### СУТЬ
+
+- После 10.114/10.115 устарела формулировка «keymap/макросы/TFT — только на мёртвом `0xFF68`». По реверсу официального ПО (`Twyx22/ak820-center` `PROTOCOL.md`, сверено с `deddroid/ak820-rs`):
+  - **keymap** base/Fn — `0xFF13`: `0x11` (base) / `0x27` (Fn), 576 Б на слой (144 слота × 4 Б + `AA 55`), byte8 = 9;
+  - **макросы** — `0xFF13`: `0x19` (открыть сессию) + `0x15` (400 Б index + блоки + `AA 55`) → `COMMIT`;
+  - запись тем же приёмом, что уже реализован: `START → <cmd> → блоки × 64 Б → COMMIT → FINISH`.
+- **Команд чтения keymap/макросов НЕТ** — официальное ПО хранит состояние на ПК (`config.xml`). Поэтому этапы 3–4 требуют локального заводского дефолта + авто-бэкапа перед первым remap (учитывать инцидент 10.81).
+- `0xFF68` остаётся ресёрчем только для TFT и, возможно, части wsclx-команд; `0xFF67` на 8009 отсутствует.
+
+### ЧТО ОБНОВЛЕНО (только .md)
+
+- `docs/ajazz-guide.md`: шапка, вводный абзац раздела A, таблица A (строки Keymap/Fn, Заводские матрицы, Макросы, Запись макроса), таблица A1 (этапы 3 и 4), A2, A3 п.4/6/7, A4 (список команд + пункт про keymap/макросы).
+- `README.md`: статус-ноут (стр. ~46), таблица устройств (Ajazz-строка), roadmap (пункты про keymap/макросы), раздел про ремап, раздел «для владельцев Ajazz».
+- `docs/collect-data.md`: шапка и раздел 3 — keymap/макросы больше не «недоступны», а «живут на `0xFF13`, код не переведён».
+- `AGENTS.md`: сводка протокола (раздел A — команды `0x11`/`0x27`/`0x19`/`0x15` + подпункты keymap/макросы; раздел B — примечание; keymap-пункт; «Открытые вопросы»), исторический блок 10.114 (уточнение про `0xFF13`), эта запись.
+
+### СОСТОЯНИЕ КОДА (не тронут)
+
+- `src/devices/ajazz_ak820.rs`: `get_base_keymap`/`set_base_keymap`/`get_many`/`set_many_at` по-прежнему ходят в `0xFF68`. Перенос на `0xFF13` (`upload_table` уже generic) — этапы 3–4, после живого теста.
+- Проверки не запускались (изменений в коде нет).
+
+---
+
+## 10.117 ЗАВОДСКАЯ BASE-KEYMAP AJAZZ: АССЕТ ИЗ УСТАНОВЩИКА + HARDCODE (сессия 2026-11-14)
+
+> Продолжение 10.116. Владелец дал явное разрешение на правки; объём захода выбран владельцем — **только ассет + hardcode + Fn**, без переноса keymap-записи на рабочий `0xFF13` (этап 3 отложен до живого теста). Коммит/пуш не делались.
+
+### ПРЕДПОСЫЛКА
+
+- По 10.116: команд ЧТЕНИЯ keymap у Ajazz НЕТ — официальное ПО держит состояние на ПК (`config.xml`). Значит перед первым remap нужен **заводской дефолт** (чтобы было куда откатываться) + локальный бэкап. Заводской Fn-слой в установщике отсутствует.
+
+### РАЗВЕДКА УСТАНОВЩИКА
+
+- Установщик распакован **временной оболочкой** `nix-shell -p innoextract` в `/tmp/opencode/ak820_app/` — репозиторий не тронут, ничего не устанавливалось в профиль.
+- Артефакты: `app/config.xml` (keymap НЕТ), `app/layouts/rgb-keyboard.xml` (**81 клавиша**, `key_index == light_index`, Fn `0xAF`), `app/DeviceDriver.exe` (C++/SQLite, таблица `t_key_macro_data`), `app/language/*.lan`, `firmware/` — пусто.
+- Сверка `rgb-keyboard.xml` с `HID_USAGE_TO_LED` (79 пар): **0 расхождений по значениям**; не хватало ровно одного — Fn `0xAF → 96`.
+- Дефолты XML: `default_mode=11`, `default_brightness=5`, `default_speed=3`, `cmd_delaytime=35` (= `ctl::PAUSE_MS`).
+
+### ЧТО СДЕЛАНО
+
+- **Ассет в репозиторий:** `data/ajazz/rgb-keyboard.xml` (15 588 б, 81 клавиша, MD5 `de2cb8e9158e3d03aa1af8e038f0b63a`); провенанс — новый `data/ajazz/README.md` (по образцу `data/firmware/FIRMWARE.md`).
+- **Драйвер `src/devices/ajazz_ak820.rs`:**
+  - в `HID_USAGE_TO_LED` добавлен `(0xAF, 96), // Fn` — теперь таблица совпадает с официальным лейаутом и служит **единым источником** и для per-key, и для заводской keymap (без дублирования);
+  - добавлена `pub fn factory_keymap_ak820()` — 81 запись `KeyId(light_index)` → `KeyAction::Press(code)` (HID usage page 0x07), `fn_layer` **пустой** (данных нет);
+  - `get_factory_keymap()` теперь `Ok(factory_keymap_ak820())` — без обращения к мёртвому `0xFF68`;
+  - обновлены шапка/док-комментарии таблицы и `light_index_for_usage`;
+  - тест `light_index_lookup_uses_official_table` дополнен Fn; добавлен тест `factory_keymap_has_all_81_official_keys`.
+- **Документация:** `docs/ajazz-guide.md` (таблица статуса — строки Keymap/запись, Заводская base-раскладка, Заводской Fn-слой; A1 этап 3; A3 п.4), `README.md` (статус-ноут, таблица устройств, «Известные ограничения»/AULA remap, Roadmap, раздел «владельцам Ajazz», дерево `data/`, таблица документации), `AGENTS.md` (сводка — keymap-пункт + инфраструктура с ассетом, «Открытые вопросы» п.3, индекс, этот блок).
+
+### ЧЕСТНОСТЬ / ОГРАНИЧЕНИЯ
+
+- **На живом железе НЕ проверено** — клавиатуры под рукой нет (Ajazz на Fedora-машине владельца).
+- Захардкоженная keymap **сама по себе НЕ включает «Сбросить всё» на железе**: `remap_key`/`set_base_keymap`/`get_current_keymap`/`set_fn_layer` по-прежнему ходят в мёртвый `0xFF68` — перенос на `0xFF13` (generic `upload_table`) это **этап 3**, отдельно и после живого теста.
+- `KeyAction::Press(0xE0..0xE7)` и `Modifier(m)` дают идентичные слот-байты (`[2,0,0xE0+m,0]`), `slot_decode` всегда возвращает `Press` — зафиксировано ранее (10.96).
+- Заводской Fn-слой — данных нет; лид: официальный софт для USB использует `MI_00` (не проверялось, нужен живой тест).
+
+### ПРОВЕРКИ
+
+- `cargo check --all-targets` — 0 ошибок (те же 3 предсуществующих предупреждения: `unused import menu::StandardItem` в `src/gui/tray.rs:19` + 2 `unused_mut` в `src/gui/keymap_editor.rs:308,323`).
+- `cargo test --lib` — **39/39** (+1 новый `factory_keymap_has_all_81_official_keys`).
+- `RUST_MIN_STACK=16777216 cargo build --release --jobs 2` — OK (без увеличенного стека rustc падал SIGSEGV).
+
+### ВЕРСИЯ
+
+- Пакет поднят `0.4.0 → 0.5.0` (минорный: накопились новые пользовательские фичи — трей SNI, живая поддержка Ajazz (транспорт `0xFF13`, батарея, per-key), заводская base-раскладка — и заметные багфиксы udev/иконки; обратной несовместимости нет).
+- Синхронизировано: `Cargo.toml`, `Cargo.lock` (запись `keyboard-center`), `flake.nix`, `README.md` (бейдж версии + раздел «Что нового в 0.5.0»).
+- Проверено: `target/release/kbc --version` и `result/bin/kbc --version` → `kbc 0.5.0`; `nix build .#keyboard-center` — успешно.
+
+### ДАЛЬШЕ (после живого железа)
+
+- Этап 3: чтение/запись keymap на `0xFF13` (`0x11` base / `0x27` Fn, 576 Б = 144 слота × 4 + `AA 55`) через уже готовый generic `upload_table`; чтения нет → опираться на `factory_keymap_ak820()` + авто-бэкап перед первым remap (учитывать инцидент 10.81).
+- Этап 4: макросы (`0x19` сессия + `0x15` данные).
+- Проверка лида `MI_00` (заводской Fn-слой).

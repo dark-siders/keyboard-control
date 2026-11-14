@@ -5,9 +5,11 @@
 // Подсветка и время/сон — через рабочий control-канал 0xFF13 (feature reports,
 // journal 10.106: подтверждён на нашем железе 0C45:8009).
 // TFT-экран — через 0xFF67 (bulk/interrupt, journal 10.60/10.61).
-// Keymap/macros/battery — через 0xFF68 (wsclx transport, journal 10.53/10.60).
-// На нашем железе 0xFF68 НЕ РАБОТАЕТ (таймаут, Output Report Count=4096 в дескрипторе
-// против 64-байтных пакетов firmware) — только 0xFF13 для подсветки.
+// На нашем железе 0xFF68 НЕ РАБОТАЕТ (таймаут, Output Report Count=4096 в
+// дескрипторе против 64-байтных пакетов firmware). Per-key и батарея переведены
+// на рабочий 0xFF13 (journal 10.115); заводская base-раскладка захардкожена из
+// ассета `data/ajazz/rgb-keyboard.xml`. Keymap-запись/макросы/TFT по 0xFF68 —
+// задел (этап 3, journal 10.116).
 
 use super::hid::HidBridge;
 use super::hidshell;
@@ -132,13 +134,15 @@ const KEYMAP_BYTES: usize = TOTAL_SLOTS * SLOT_BYTES;
 
 /// HID usage (Keyboard/Keypad page 0x07) → индекс LED/слота подсветки AK820 Pro.
 ///
-/// Источник: официальный `rgb-keyboard.xml`, переписанный в `keys.rs` проекта
-/// `deddroid/ak820-rs` (decompiled from DeviceDriver.exe 1.0.0.5). Порядок
-/// индексов НЕ совпадает ни с HID usage, ни с keymap-слотами — поэтому для
-/// per-key нужен именно этот пересчёт.
+/// Источник: официальный `layouts/rgb-keyboard.xml` из установщика
+/// `AJAZZ_AK820_Pro…V1.0.0.5.exe` (копия ассета — `data/ajazz/rgb-keyboard.xml`,
+/// провенанс — `data/ajazz/README.md`), сверен с `keys.rs` проекта
+/// `deddroid/ak820-rs`. Порядок индексов НЕ совпадает ни с HID usage, ни с
+/// keymap-слотами — поэтому для per-key нужен именно этот пересчёт.
 ///
-/// Клавиша Fn (light index 96) в таблицу не входит: у неё нет HID usage, и
-/// адресовать её через `KeyId` невозможно.
+/// Таблица содержит все 81 клавишу официальной раскладки, включая Fn
+/// (вендорский код `0xAF`, light index 96), и служит единым источником как для
+/// `light_index_for_usage`, так и для `factory_keymap_ak820`.
 const HID_USAGE_TO_LED: &[(u16, u8)] = &[
     (0x29, 1),   // Esc
     (0x3A, 2),   // F1
@@ -216,11 +220,32 @@ const HID_USAGE_TO_LED: &[(u16, u8)] = &[
     (0xE2, 93),  // Left Alt
     (0x2C, 94),  // Space
     (0xE6, 95),  // Right Alt
+    (0xAF, 96),  // Fn (вендорский код из официального лейаута)
     (0xE4, 98),  // Right Ctrl
     (0x50, 99),  // Left
     (0x51, 100), // Down
     (0x4F, 102), // Right
 ];
+
+/// Заводская base-раскладка AK820 Pro (81 клавиша) из официального установщика
+/// (`layouts/rgb-keyboard.xml`, ассет `data/ajazz/rgb-keyboard.xml`).
+///
+/// `KeyId` = light index (в XML он же `key_index`), действие — `Press` с HID
+/// usage клавиши; Fn идёт вендорским кодом `0xAF`. Заводской Fn-слой в
+/// установщике отсутствует (только base), поэтому `fn_layer` пустой.
+///
+/// Захардкожена, потому что канал `0xFF68` на ревизии `0C45:8009` мёртв
+/// (журнал 10.106) — прежний путь `GET_DEFAULT_KEY_MATRIX` не отвечает.
+pub fn factory_keymap_ak820() -> Keymap {
+    let base = HID_USAGE_TO_LED
+        .iter()
+        .map(|&(code, led)| (KeyId(led as u16), KeyAction::Press(code)))
+        .collect();
+    Keymap {
+        base,
+        fn_layer: FnLayer::default(),
+    }
+}
 
 /// Режимы подсветки Ajazz (wsclx lighting.rs Mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,7 +861,7 @@ impl AjazzAk820 {
     }
 
     /// Индекс LED/слота подсветки по HID usage клавиши (страница 0x07).
-    /// `None` — клавиша без отдельного LED в таблице (например Fn).
+    /// `None` — usage, которого нет в официальной раскладке.
     fn light_index_for_usage(usage: u16) -> Option<u8> {
         HID_USAGE_TO_LED
             .iter()
@@ -1198,29 +1223,13 @@ impl KeyboardDevice for AjazzAk820 {
         self.set(cmd::SET_FACTORY_RESET, &[0xFF])
     }
 
-    /// Заводская раскладка — read-only, в черновик перед записью
-    /// (GET_DEFAULT_KEY_MATRIX / GET_DEFAULT_FN_KEY_MATRIX, форма как у
-    /// GET_KEY / GET_FN_KEY). wsclx 10.60.
+    /// Заводская base-раскладка из официального установщика (ассет
+    /// `data/ajazz/rgb-keyboard.xml`). Заводской Fn-слой в установщике
+    /// отсутствует. Захардкожено: канал `0xFF68` на ревизии 8009 не отвечает
+    /// (журнал 10.106), а команд чтения keymap на рабочем `0xFF13` нет
+    /// (журнал 10.116).
     fn get_factory_keymap(&self) -> Result<Keymap> {
-        let mut base = Vec::new();
-        let base_raw = self.get_many(cmd::GET_DEFAULT_KEY_MATRIX, KEYMAP_BYTES)?;
-        for slot in 0..TOTAL_SLOTS {
-            let off = slot * SLOT_BYTES;
-            let bytes: [u8; SLOT_BYTES] = base_raw[off..off + SLOT_BYTES].try_into().unwrap();
-            if let Some(action) = Self::slot_decode(bytes) {
-                base.push((KeyId(slot as u16), action));
-            }
-        }
-        let mut fn_layer = FnLayer::default();
-        let fn_raw = self.get_many(cmd::GET_DEFAULT_FN_KEY_MATRIX, KEYMAP_BYTES)?;
-        for slot in 0..TOTAL_SLOTS {
-            let off = slot * SLOT_BYTES;
-            let bytes: [u8; SLOT_BYTES] = fn_raw[off..off + SLOT_BYTES].try_into().unwrap();
-            if let Some(action) = Self::slot_decode(bytes) {
-                fn_layer.bindings.push((KeyId(slot as u16), action));
-            }
-        }
-        Ok(Keymap { base, fn_layer })
+        Ok(factory_keymap_ak820())
     }
 
     // --- Screen (Ajazz-only) -------------------------------------------
@@ -1708,7 +1717,7 @@ impl AjazzAk820 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::KeyAction;
+    use crate::types::{KeyAction, KeyId};
 
     #[test]
     fn slot_encode_decode_roundtrip() {
@@ -1878,8 +1887,31 @@ mod tests {
         assert_eq!(AjazzAk820::light_index_for_usage(0x29), Some(1), "Esc");
         assert_eq!(AjazzAk820::light_index_for_usage(0x3A), Some(2), "F1");
         assert_eq!(AjazzAk820::light_index_for_usage(0x2C), Some(94), "Space");
-        // Fn (light 96) в таблице отсутствует — у неё нет HID usage.
+        assert_eq!(AjazzAk820::light_index_for_usage(0xAF), Some(96), "Fn");
+        // Usage, которого нет в официальной раскладке.
         assert_eq!(AjazzAk820::light_index_for_usage(0xFFFF), None);
+    }
+
+    #[test]
+    fn factory_keymap_has_all_81_official_keys() {
+        let km = factory_keymap_ak820();
+        assert_eq!(km.base.len(), 81, "81 клавиша официального лейаута");
+        assert!(
+            km.fn_layer.bindings.is_empty(),
+            "заводской Fn-слой в установщике отсутствует"
+        );
+        assert!(
+            km.base.contains(&(KeyId(96), KeyAction::Press(0xAF))),
+            "Fn (вендорский 0xAF)"
+        );
+        assert!(km.base.contains(&(KeyId(1), KeyAction::Press(0x29))), "Esc");
+        assert!(km.base.contains(&(KeyId(94), KeyAction::Press(0x2C))), "Space");
+        // KeyId уникальны и лежат в диапазоне слотов keymap (0..128).
+        let mut ids: Vec<u16> = km.base.iter().map(|(k, _)| k.0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 81, "KeyId уникальны");
+        assert!(ids.iter().all(|&id| (id as usize) < TOTAL_SLOTS));
     }
 
     #[test]
