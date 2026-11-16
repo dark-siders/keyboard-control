@@ -472,7 +472,14 @@ fn exec(cmd: Commands) -> anyhow::Result<u8> {
             match dev.get_battery_level()? {
                 Some(l) => println!("батарея: {l}%"),
                 None if dev.connection_type() == ConnectionType::Wireless2_4G => {
-                    println!("батарея: нет ответа (клавиатура спит на линке — нажмите клавишу и повторите)");
+                    if dev.vid_pid() == (0x0C45, 0xFDFD) {
+                        println!(
+                            "батарея: нет данных — ресивер подтвердил кадр (order 0x20), но \
+                             уровень = 0 (клавиатура спит на линке — нажмите клавишу и повторите)"
+                        );
+                    } else {
+                        println!("батарея: нет ответа (клавиатура спит на линке — нажмите клавишу и повторите)");
+                    }
                 }
                 None if dev.connection_type() == ConnectionType::Usb => {
                     println!(
@@ -648,12 +655,24 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
             let hw = parse_hw_effect(hw_hex)?;
             return match dev.apply_rgb_persistent_code(hw, color, brightness, speed)? {
                 true => {
-                    let name = wl_effect_name(hw)
-                        .map(|n| format!(" ({n})"))
-                        .unwrap_or_default();
-                    println!(
-                        "2.4G: аппаратный эффект 0x{hw:02X}{name}, яркость={brightness}, скорость={speed} записаны в память ресивера (держится без приложения)"
-                    );
+                    let name = if dev.vid_pid().0 == 0x0C45 {
+                        keyboard_center::devices::ajazz_ak820::wl_mode_name(hw)
+                    } else {
+                        wl_effect_name(hw)
+                    }
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default();
+                    if dev.vid_pid() == (0x0C45, 0xFDFD) {
+                        println!(
+                            "2.4G (Ajazz): аппаратный эффект 0x{hw:02X}{name}, яркость={brightness}, \
+                             скорость={speed} отправлены через донгл (0xFF60); применение \
+                             проверьте визуально"
+                        );
+                    } else {
+                        println!(
+                            "2.4G: аппаратный эффект 0x{hw:02X}{name}, яркость={brightness}, скорость={speed} записаны в память ресивера (держится без приложения)"
+                        );
+                    }
                     Ok(0)
                 }
                 false => Err(anyhow::anyhow!(
@@ -664,9 +683,17 @@ fn cmd_rgb(args: RgbArgs) -> anyhow::Result<u8> {
         let mode = parse_rgb_mode(args.mode.as_deref())?;
         return match dev.apply_rgb_persistent(mode, color, brightness, speed)? {
             true => {
-                println!(
-                    "2.4G: режим {mode:?}, яркость={brightness}, скорость={speed} записаны в память ресивера (держится без приложения)"
-                );
+                if dev.vid_pid() == (0x0C45, 0xFDFD) {
+                    println!(
+                        "2.4G (Ajazz): режим {mode:?}, яркость={brightness}, скорость={speed} \
+                         отправлены через донгл (order 0x05 LIGHTING, кадр ресивера); \
+                         применение проверьте визуально"
+                    );
+                } else {
+                    println!(
+                        "2.4G: режим {mode:?}, яркость={brightness}, скорость={speed} записаны в память ресивера (держится без приложения)"
+                    );
+                }
                 Ok(0)
             }
             false => Err(anyhow::anyhow!(
@@ -860,10 +887,18 @@ fn audio_style_name(style: AudioStyle) -> &'static str {
 fn cmd_light_persistent(dev: &dyn KeyboardDevice, on: bool) -> anyhow::Result<u8> {
     match dev.apply_light_persistent(on)? {
         true => {
-            println!(
-                "2.4G: свет {} в память ресивера (держится без приложения)",
-                if on { "включён" } else { "выключен" }
-            );
+            if dev.vid_pid() == (0x0C45, 0xFDFD) {
+                println!(
+                    "2.4G (Ajazz): свет {} отправлен через донгл (0xFF60); применение \
+                     проверьте визуально",
+                    if on { "включён" } else { "выключен" }
+                );
+            } else {
+                println!(
+                    "2.4G: свет {} в память ресивера (держится без приложения)",
+                    if on { "включён" } else { "выключен" }
+                );
+            }
             Ok(0)
         }
         false => Err(anyhow::anyhow!(
@@ -1238,10 +1273,17 @@ fn cmd_daemon(args: DaemonArgs) -> anyhow::Result<u8> {
     if !audio_mode
         && dev.apply_rgb_persistent(params.mode, Some(base), params.brightness, params.speed)?
     {
-        println!(
-            "{:?}: эффект записан в память устройства (держится без приложения); daemon завершается",
-            dev.connection_type()
-        );
+        if dev.vid_pid() == (0x0C45, 0xFDFD) {
+            println!(
+                "2.4G (Ajazz): эффект отправлен через донгл (0xFF60); применение проверьте \
+                 визуально; daemon завершается"
+            );
+        } else {
+            println!(
+                "{:?}: эффект записан в память устройства (держится без приложения); daemon завершается",
+                dev.connection_type()
+            );
+        }
         return Ok(0);
     }
 

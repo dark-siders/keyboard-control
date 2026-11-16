@@ -50,13 +50,20 @@ impl HidBridge {
                     continue;
                 }
                 let rank = match d.usage_page() {
+                    // 2.4G-донгл Ajazz (0xFDFD): командный интерфейс usage page
+                    // 0xFF60, MI_03 (interface 3, 32 байта). MI_04 (0xFF59/64 б)
+                    // отвечает фиксированным 0F 01 01 11 — не командный
+                    // (журнал 10.114, aklink docs/DONGLE.md).
+                    0xFF60 if vid == 0x0C45 && pid == 0xFDFD => {
+                        if d.interface_number() == 3 { 5 } else { 2 }
+                    }
                     // Командный канал Ajazz AK820 Pro: control endpoint — usage
                     // page 0xFF68 (wsclx, журнал 10.53). 0xFF67 — это TFT-канал,
                     // он НЕ годится для control-команд.
                     0xFF68 => 4,
                     // Точный командный канал ресивера / вендорских коллекций.
                     0xFF02 => 3,
-                    // Вендорский (командный hidraw6 у AULA USB).
+                    // Вендорский (командный hidraw6 у AULA USB, 0xFF60 у прочих).
                     pp if pp >= 0xFF00 => 2,
                     // Первый не-клавиатурный живой интерфейс (interface 1+).
                     _ if d.interface_number() >= 1 => 1,
@@ -82,6 +89,8 @@ impl HidBridge {
             // 0x8099 — сток fw v1.14 (jdlien, журнал 10.61); 0xFEFE — BT.
             0x8009 | 0x800A | 0x8099 => ConnectionType::Usb,
             0xFEFE => ConnectionType::Bluetooth,
+            // 2.4G-донгл (PID 0xFDFD, usage page 0xFF60, MI_03; журнал 10.114).
+            0xFDFD => ConnectionType::Wireless2_4G,
             // --- AULA ---
             0x004B | 0x004E => ConnectionType::Usb,
             0x004C | 0x004F => ConnectionType::Wireless2_4G,

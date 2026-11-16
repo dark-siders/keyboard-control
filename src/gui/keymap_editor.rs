@@ -18,12 +18,12 @@ pub fn build_keymap_editor(
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.set_margin_top(8);
 
-    let title = gtk::Label::new(Some("Keymap & Fn-Layer Editor"));
+    let title = gtk::Label::new(Some("Переназначение клавиш"));
     title.add_css_class("title-1");
     title.set_halign(gtk::Align::Start);
     panel.append(&title);
 
-    let hint = gtk::Label::new(Some("Кликните по клавише раскладки, чтобы выбрать её слот, затем задайте новое действие справа и нажмите «Назначить». Работает только при подключении по USB. Подробная карта и переназначение доступны и через CLI: `kbc remap <VID:PID> --list`, `--key <слот> --to <usage>` (клавиша), `--media <usage>` (кнопка мультимедиа) или `--modifier 0..7` (модификатор). Кнопка «Показать раскладку» выводит текущую карту Default и FN1 с меткой физической клавиши для каждого слота."));
+    let hint = gtk::Label::new(Some("Кликните по клавише на схеме, выберите новое действие справа и нажмите «Назначить». Работает при подключении по USB. Карту текущих назначений показывает кнопка «Показать раскладку»; подробный список — в терминале: `kbc remap <VID:PID> --list`."));
     hint.add_css_class("dim-label");
     hint.set_wrap(true);
     hint.set_halign(gtk::Align::Start);

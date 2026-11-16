@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::devices::KeyboardDevice;
-use crate::presets::{AudioStyle, ModeParams, Preset, PresetStore};
+use crate::presets::AudioStyle;
 use crate::types::{Color, ConnectionType, KeyId, RgbMode};
 
 // --- Фоновое переподключение HID-канала после кика -------------------
@@ -232,20 +232,20 @@ pub fn build_rgb_studio(
     device_fetcher: impl Fn() -> Option<Rc<dyn KeyboardDevice>> + 'static,
     set_device: impl Fn(Box<dyn KeyboardDevice>) -> String + 'static,
     last_vidpid: impl Fn() -> Option<(u16, u16)> + 'static,
-) -> (gtk::Box, PersistProbe) {
+) -> (gtk::Box, PersistProbe, super::presets_page::PresetCallbacks) {
     let fetcher: std::rc::Rc<dyn Fn() -> Option<Rc<dyn KeyboardDevice>>> = std::rc::Rc::new(device_fetcher);
     let set_device: Rc<dyn Fn(Box<dyn KeyboardDevice>) -> String> = Rc::new(set_device);
     let vidpid: Rc<dyn Fn() -> Option<(u16, u16)>> = Rc::new(last_vidpid);
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.set_margin_top(8);
 
-    let title = gtk::Label::new(Some("RGB & Light Studio"));
+    let title = gtk::Label::new(Some("Подсветка"));
     title.add_css_class("title-1");
     title.set_halign(gtk::Align::Start);
     panel.append(&title);
 
-    // --- Режим ---------------------------------------------------------
-    let mode_label_l = gtk::Label::new(Some("Режим подсветки"));
+    // --- Эффект ---------------------------------------------------------
+    let mode_label_l = gtk::Label::new(Some("Эффект"));
     mode_label_l.set_halign(gtk::Align::Start);
     let mode_dd = gtk::DropDown::builder().build();
     populate_modes(&mode_dd);
@@ -292,13 +292,223 @@ pub fn build_rgb_studio(
     speed_row.append(&speed_pct);
 
     // --- Базовый цвет (общий для всех режимов, в т.ч. аудио) ---------------
-    // Определяем рано, чтобы аудио-секция могла синхронизироваться с ним.
+    // Цвет выбирается из выпадающего списка (имя + hex), рядом — образец
+    // цвета (свотч). Техническое поле ввода hex скрыто, но остаётся
+    // источником истины для внутренней логики (пресеты/аудио/палитра).
     let live_entry = gtk::Entry::builder()
-        .text("#FF5A00")
+        .text("#FF0000")
         .placeholder_text("#RRGGBB")
         .halign(gtk::Align::Start)
         .width_chars(9)
         .build();
+    live_entry.set_visible(false);
+
+    // Расширенная палитра: (имя, hex). Клавиатура показывает любой 24-битный
+    // цвет, поэтому набор широкий — по группам оттенков.
+    const QUICK_COLORS: &[(&str, &str)] = &[
+        // Красные / розовые
+        ("Красный", "#FF0000"),
+        ("Алый", "#FF2400"),
+        ("Малиновый", "#DC143C"),
+        ("Бордовый", "#800000"),
+        ("Томатный", "#FF6347"),
+        ("Коралловый", "#FF7F50"),
+        ("Лососёвый", "#FA8072"),
+        ("Розовый", "#FFC0CB"),
+        ("Горячий розовый", "#FF69B4"),
+        ("Пурпурный", "#FF0066"),
+        ("Маджента", "#FF00FF"),
+        // Оранжевые / жёлтые
+        ("Оранжевый", "#FF8000"),
+        ("Тёмно-оранжевый", "#FF8C00"),
+        ("Морковный", "#ED9121"),
+        ("Янтарный", "#FFBF00"),
+        ("Золотой", "#FFD700"),
+        ("Жёлтый", "#FFFF00"),
+        ("Лимонный", "#FFF44F"),
+        ("Кремовый", "#FFFDD0"),
+        ("Персиковый", "#FFDAB9"),
+        // Зелёные
+        ("Зелёный", "#00FF00"),
+        ("Лаймовый", "#32CD32"),
+        ("Весенний", "#00FF7F"),
+        ("Изумрудный", "#00C864"),
+        ("Мятный", "#98FF98"),
+        ("Морская волна", "#2E8B57"),
+        ("Тёмно-зелёный", "#006400"),
+        ("Оливковый", "#808000"),
+        ("Хаки", "#C3B091"),
+        // Циановые
+        ("Циан", "#00FFFF"),
+        ("Бирюзовый", "#40E0D0"),
+        ("Аквамарин", "#7FFFD4"),
+        ("Тёмный циан", "#008B8B"),
+        // Голубые / синие
+        ("Голубой", "#00A8FF"),
+        ("Небесно-голубой", "#87CEEB"),
+        ("Лазурный", "#007FFF"),
+        ("Синий", "#0000FF"),
+        ("Королевский синий", "#4169E1"),
+        ("Стальной", "#4682B4"),
+        ("Тёмно-синий", "#00008B"),
+        ("Индиго", "#4B0082"),
+        // Фиолетовые / сиреневые
+        ("Фиолетовый", "#8000FF"),
+        ("Орхидея", "#DA70D6"),
+        ("Сливовый", "#DDA0DD"),
+        ("Лавандовый", "#E6E6FA"),
+        ("Сиреневый", "#C8A2C8"),
+        // Коричневые / бежевые
+        ("Коричневый", "#A52A2A"),
+        ("Шоколадный", "#D2691E"),
+        ("Карамельный", "#B8860B"),
+        ("Бежевый", "#F5F5DC"),
+        // Белые / серые / чёрный
+        ("Белый", "#FFFFFF"),
+        ("Снежный", "#FFFAFA"),
+        ("Серебристый", "#C0C0C0"),
+        ("Серый", "#808080"),
+        ("Графитовый", "#696969"),
+        ("Чёрный", "#000000"),
+    ];
+
+    // Образец выбранного цвета (квадрат 24×24 рядом со списком).
+    let swatch_color: Rc<RefCell<String>> = Rc::new(RefCell::new("#FF0000".to_string()));
+    let swatch = gtk::DrawingArea::new();
+    swatch.set_content_width(24);
+    swatch.set_content_height(24);
+    {
+        let swatch_c = swatch_color.clone();
+        swatch.set_draw_func(move |_, cr, w, h| {
+            let hex = swatch_c.borrow().clone();
+            if let Some(c) = Color::from_hex_checked(&hex) {
+                cr.set_source_rgb(
+                    f64::from(c.r) / 255.0,
+                    f64::from(c.g) / 255.0,
+                    f64::from(c.b) / 255.0,
+                );
+                // Круглый образец цвета (не квадрат).
+                let cx = w as f64 / 2.0;
+                let cy = h as f64 / 2.0;
+                let rad = (w.min(h) as f64) / 2.0 - 1.0;
+                cr.arc(cx, cy, rad, 0.0, 2.0 * std::f64::consts::PI);
+                cr.fill().ok();
+            }
+        });
+    }
+
+    // Выпадающий список цветов: «Имя  #RRGGBB».
+    let color_dd = gtk::DropDown::builder().halign(gtk::Align::Start).build();
+    {
+        let names: Vec<String> = QUICK_COLORS
+            .iter()
+            .map(|(n, h)| format!("{n}  {h}"))
+            .collect();
+        let names_s: Vec<&str> = names.iter().map(String::as_str).collect();
+        color_dd.set_model(Some(&gtk::StringList::new(&names_s)));
+        color_dd.set_selected(0);
+    }
+
+    // Фабрика строк списка: цветной кружок + имя (и в самом меню, и в
+    // закрытом поле выбора). Hex-код в строках модели остаётся только для
+    // разбора цвета — пользователю показывается имя без кода.
+    let color_factory = gtk::SignalListItemFactory::new();
+    color_factory.connect_setup(move |_, item: &glib::Object| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let dot = gtk::DrawingArea::new();
+        dot.set_content_width(14);
+        dot.set_content_height(14);
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        row.append(&dot);
+        row.append(&label);
+        item.set_child(Some(&row));
+    });
+    color_factory.connect_bind(move |_, item: &glib::Object| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(obj) = item.item().and_downcast::<gtk::StringObject>() else {
+            return;
+        };
+        let s = obj.string().to_string();
+        let (name, hex) = match s.rsplit_once("  ") {
+            Some((n, h)) if h.starts_with('#') && h.len() == 7 => {
+                (n.to_string(), h.to_string())
+            }
+            _ => (s.clone(), "#FFFFFF".to_string()),
+        };
+        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        if let Some(l) = row.last_child().and_downcast::<gtk::Label>() {
+            l.set_text(&name);
+        }
+        if let Some(d) = row.first_child().and_downcast::<gtk::DrawingArea>() {
+            let hex_d = hex;
+            d.set_draw_func(move |_, cr, w, h| {
+                let (r, g, b) = Color::from_hex_checked(&hex_d)
+                    .map(|c| (c.r, c.g, c.b))
+                    .unwrap_or((255u8, 255u8, 255u8));
+                cr.set_source_rgb(
+                    f64::from(r) / 255.0,
+                    f64::from(g) / 255.0,
+                    f64::from(b) / 255.0,
+                );
+                let cx = w as f64 / 2.0;
+                let cy = h as f64 / 2.0;
+                let rad = (w.min(h) as f64) / 2.0 - 1.0;
+                cr.arc(cx, cy, rad, 0.0, 2.0 * std::f64::consts::PI);
+                cr.fill().ok();
+            });
+        }
+    });
+    color_dd.set_factory(Some(&color_factory));
+    // Синхронизация UI (список + свотч) с заданным hex: цвет из палитры —
+    // выбираем его; незнакомый (например из пресета) — добавляем пунктом.
+    let sync_color_ui: Rc<dyn Fn(&str)> = {
+        let color_dd_c = color_dd.clone();
+        let swatch_c = swatch_color.clone();
+        let swatch_w = swatch.clone();
+        Rc::new(move |hex| {
+            *swatch_c.borrow_mut() = hex.trim().to_uppercase();
+            swatch_w.queue_draw();
+            let upper = hex.trim().to_uppercase();
+            if let Some(idx) = QUICK_COLORS.iter().position(|(_, h)| *h == upper) {
+                color_dd_c.set_selected(idx as u32);
+            } else {
+                let mut names: Vec<String> = QUICK_COLORS
+                    .iter()
+                    .map(|(n, h)| format!("{n}  {h}"))
+                    .collect();
+                names.push(format!("Свой цвет  {upper}"));
+                let names_s: Vec<&str> = names.iter().map(String::as_str).collect();
+                color_dd_c.set_model(Some(&gtk::StringList::new(&names_s)));
+                color_dd_c.set_selected((names.len() - 1) as u32);
+            }
+        })
+    };
+    // Выбор в списке → обновляем hex-поле и образец.
+    {
+        let live_entry_c = live_entry.clone();
+        let sync_c = sync_color_ui.clone();
+        color_dd.connect_selected_notify(move |dd| {
+            let idx = dd.selected() as usize;
+            let hex = QUICK_COLORS.get(idx).map(|(_, h)| *h).unwrap_or("#FF0000");
+            live_entry_c.set_text(hex);
+            sync_c(hex);
+        });
+    }
+
+    // Строка «список цветов + образец».
+    let color_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    color_row.set_halign(gtk::Align::Start);
+    color_row.append(&color_dd);
+    color_row.append(&swatch);
 
     // --- Аудио-реактив (USB): настройки визуализатора --------------------
     let audio_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -403,20 +613,11 @@ pub fn build_rgb_studio(
         });
     }
 
-    // --- Пресеты --------------------------------------------------------
-    let preset_label = gtk::Label::new(Some("Пресеты"));
-    preset_label.set_halign(gtk::Align::Start);
-    let preset_dd = gtk::DropDown::builder().build();
-    {
-        let model = gtk::StringList::new(&["—", "Static", "Дыхание", "Волна", "Спектр", "Дождь"]);
-        preset_dd.set_model(Some(&model));
-    }
-
-    // --- Аппаратный эффект (в память) ------------------------------------
+    // --- Эффект для памяти клавиатуры ------------------------------------
     // Эффекты прошивки F75: селектор `data[10]`, сохраняются в память самой
     // клавиатуры (Fn+\), поэтому держатся БЕЗ запущенного приложения.
     // Host-эффекты выше (режим/яркость/скорость) в память НЕ пишутся.
-    let hw_label = gtk::Label::new(Some("Аппаратный эффект (сохраняется в память)"));
+    let hw_label = gtk::Label::new(Some("Эффект для памяти клавиатуры (работает без приложения)"));
     hw_label.set_halign(gtk::Align::Start);
     let hw_dd = gtk::DropDown::builder().build();
     // Клон для live_off: там сбрасываем выбор эффекта на «—» (фикс 10.35).
@@ -455,14 +656,16 @@ pub fn build_rgb_studio(
     }
 
     // Пометка о сохранении в память: статические цвета и host-эффекты (режим/
-    // яркость/скорость/Живой цвет) транслируются приложением в реальном
+    // яркость/скорость/живой цвет) транслируются приложением в реальном
     // времени и в память клавиатуры НЕ пишутся (во многих прошивках, в т.ч.
     // у AULA, однотонной «статики» в аппаратной таблице нет вообще).
     let hw_note = gtk::Label::new(Some(
-        "В память клавиатуры сохраняются только аппаратные эффекты из списка \
-         выше — они работают и без запущенного приложения. Статические цвета \
-         и эффекты из блоков «Режим/Яркость/Скорость» и «Живой цвет» сохранить \
-         в память невозможно: они живут, пока приложение открыто.",
+        "На USB в память сохраняются только эффекты из списка выше — они работают \
+         без запущенного приложения. Статические цвета и эффекты «Эффект»/«Яркость»/\
+         «Скорость» живут, пока приложение открыто. На 2.4G и Ajazz настройки \
+         сохраняются в клавиатуре автоматически. Все изменения применяются сразу, \
+         без кнопки; при включённом «Сохранить в клавиатуру» память записывается \
+         сама через пару секунд после последнего изменения.",
     ));
     hw_note.add_css_class("dim-label");
     hw_note.set_halign(gtk::Align::Start);
@@ -472,29 +675,158 @@ pub fn build_rgb_studio(
     let apply = gtk::Button::with_label("Применить");
     apply.add_css_class("suggested-action");
     apply.set_halign(gtk::Align::Start);
+    // Кнопка скрыта: все настройки применяются АВТОМАТИЧЕСКИ при изменении
+    // (выпадающие списки — сразу, слайдеры — через 300 мс после последнего
+    // изменения). Её обработчик запускается сигналами через emit_clicked().
+    apply.set_visible(false);
+
+    // Переключатель «Сохранить в клавиатуру»: при включённом тумблере
+    // настройки дополнительно сохраняются в память клавиатуры
+    // (для USB — через список «Эффект для памяти клавиатуры»; для 2.4G/Ajazz
+    // настройки сохраняются и так). Кнопка «Записать в память» ниже скрыта:
+    // её логика переиспользуется через emit_clicked().
+    let persist_switch = gtk::Switch::builder()
+        .valign(gtk::Align::Center)
+        .active(true)
+        .build();
+    let persist_label = gtk::Label::new(Some("Сохранить в клавиатуру"));
+    persist_label.set_halign(gtk::Align::Start);
+    let persist_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    persist_row.set_halign(gtk::Align::Start);
+    persist_row.append(&persist_switch);
+    persist_row.append(&persist_label);
 
     let save_to_board = gtk::Button::with_label("Записать в память");
     save_to_board.add_css_class("suggested-action");
     save_to_board.set_halign(gtk::Align::Start);
+    // Скрыта: сохранение теперь управляется переключателем и происходит
+    // автоматически после применения (с задержкой, чтобы серия изменений
+    // дала одну запись, а не «кик» клавиатуры на каждый тик слайдера).
+    save_to_board.set_visible(false);
 
-    // --- Живой цвет (host-rendering) ------------------------------------
+    // Авто-применение слайдеров/полей с защитой от дребезга: последний
+    // сигнал запускает одно применение после затихания. Для 2.4G задержка
+    // больше (1.5 с): запись на ресивер AULA — двухфазная («flash and
+    // revert»), частые записи дёргают подсветку/ресивер (жалоба владельца
+    // 2026-11-16).
+    let schedule_apply: Rc<dyn Fn()> = {
+        let apply_c = apply.clone();
+        let fetcher_d = fetcher.clone();
+        let gen = Rc::new(Cell::new(0u64));
+        Rc::new(move || {
+            let delay_ms = if fetcher_d()
+                .map(|d| d.connection_type() == ConnectionType::Wireless2_4G)
+                .unwrap_or(false)
+            {
+                1500u64
+            } else {
+                300u64
+            };
+            gen.set(gen.get().wrapping_add(1));
+            let my = gen.get();
+            let gen_t = gen.clone();
+            let apply_t = apply_c.clone();
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(delay_ms), move || {
+                if gen_t.get() != my {
+                    return glib::ControlFlow::Break; // появился более свежий сигнал
+                }
+                apply_t.emit_clicked();
+                glib::ControlFlow::Break
+            });
+        })
+    };
+
+    // Минимальный интервал между записями на ресивер 2.4G — 2 с. Защищает
+    // от спама при быстрых кликах по спискам (эффект/цвет применяются сразу,
+    // без дребезга): каждая запись AULA — двухфазная, ресивер не любит поток.
+    // Пока не прошло 2 с — отправку откладываем.
+    let last_wl_write: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+    let wl_allowed: Rc<dyn Fn() -> bool> = {
+        let last = last_wl_write.clone();
+        Rc::new(move || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let prev = last.get();
+            if prev != 0 && now.saturating_sub(prev) < 2000 {
+                return false;
+            }
+            last.set(now);
+            true
+        })
+    };
+
+    // Авто-сохранение в память с более длинной задержкой (1.5 с): серия
+    // изменений = одна запись во флеш, без «кика» на каждый чих.
+    let schedule_save: Rc<dyn Fn()> = {
+        let save_c = save_to_board.clone();
+        let gen = Rc::new(Cell::new(0u64));
+        Rc::new(move || {
+            gen.set(gen.get().wrapping_add(1));
+            let my = gen.get();
+            let gen_t = gen.clone();
+            let save_t = save_c.clone();
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+                if gen_t.get() != my {
+                    return glib::ControlFlow::Break;
+                }
+                save_t.emit_clicked();
+                glib::ControlFlow::Break
+            });
+        })
+    };
+
+    // --- Авто-применение: сигналы -----------------------------------------
+    // Выпадающие списки применяются сразу, слайдеры и поля — через
+    // schedule_apply (300 мс после последнего изменения).
+    {
+        let apply_m = apply.clone();
+        mode_dd.connect_selected_notify(move |_| apply_m.emit_clicked());
+    }
+    {
+        let apply_c = apply.clone();
+        color_dd.connect_selected_notify(move |_| apply_c.emit_clicked());
+    }
+    {
+        let sched = schedule_apply.clone();
+        bright_scale.connect_value_changed(move |_| sched());
+    }
+    {
+        let sched = schedule_apply.clone();
+        speed_scale.connect_value_changed(move |_| sched());
+    }
+    {
+        let sched = schedule_apply.clone();
+        audio_sens_scale.connect_value_changed(move |_| sched());
+    }
+    {
+        let sched = schedule_apply.clone();
+        audio_style_dd.connect_selected_notify(move |_| sched());
+    }
+    {
+        let sched = schedule_apply.clone();
+        audio_low_entry.connect_changed(move |_| sched());
+    }
+    {
+        let sched = schedule_apply.clone();
+        audio_high_entry.connect_changed(move |_| sched());
+    }
+
+    // --- Цвет подсветки (host-rendering) --------------------------------
     // AULA F75 отображает цвета только пока идёт поток кадров (keepalive).
-    let live_label = gtk::Label::new(Some("Живой цвет (host-rendering)"));
+    let live_label = gtk::Label::new(Some("Цвет подсветки"));
     live_label.add_css_class("heading");
     live_label.set_halign(gtk::Align::Start);
 
-    // Палитра быстрого выбора (без системного цветопикера/portal).
-    let palette_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    palette_row.set_halign(gtk::Align::Start);
-
-    let live_on = gtk::Button::with_label("Включить цвет");
+    let live_on = gtk::Button::with_label("Включить подсветку");
     live_on.add_css_class("suggested-action");
     live_on.set_halign(gtk::Align::Start);
 
-    let live_off = gtk::Button::with_label("Выключить свет");
+    let live_off = gtk::Button::with_label("Выключить подсветку");
     live_off.set_halign(gtk::Align::Start);
 
-    let live_status = gtk::Label::new(Some("Подключите клавиатуру: Устройства → Открыть"));
+    let live_status = gtk::Label::new(Some("Подключите клавиатуру: вкладка «Устройства» → «Подключить»"));
     live_status.add_css_class("dim-label");
     live_status.set_halign(gtk::Align::Start);
     live_status.set_wrap(true);
@@ -517,101 +849,26 @@ pub fn build_rgb_studio(
     // этим флагом.
     let audio_stop: Rc<RefCell<Option<Arc<AtomicBool>>>> = Rc::new(RefCell::new(None));
 
-    // --- Файловые пресеты (kbc preset / TOML) ------------------------------
-    // Те же TOML-пресеты, что использует `kbc preset`/`kbc daemon`
-    // (~/.config/keyboard-center/presets): хранят комбинацию
-    // режим/цвет/яркость/скорость под именем и применяются из GUI.
-    // Встроенный «Пресеты» выше — быстрые пресеты; этот блок — файловые.
-    let pf_label = gtk::Label::new(Some("Файловые пресеты (kbc preset)"));
-    pf_label.add_css_class("heading");
-    pf_label.set_halign(gtk::Align::Start);
-
-    let pf_dd = gtk::DropDown::builder().build();
-    // Модель держим отдельным Rc: gtk::DropDown не отдаёт содержимое своей
-    // модели, а по индексу выбранного пресета нам нужно получить его имя.
-    let pf_model: Rc<RefCell<Option<gtk::StringList>>> = Rc::new(RefCell::new(None));
-
-    let pf_entry = gtk::Entry::builder()
-        .placeholder_text("имя нового пресета")
-        .halign(gtk::Align::Start)
-        .width_chars(20)
-        .build();
-
-    let pf_apply = gtk::Button::with_label("Применить пресет");
-    pf_apply.add_css_class("suggested-action");
-    pf_apply.set_halign(gtk::Align::Start);
-
-    let pf_save_btn = gtk::Button::with_label("Сохранить как…");
-    pf_save_btn.set_halign(gtk::Align::Start);
-
-    let pf_delete = gtk::Button::with_label("Удалить пресет");
-    pf_delete.set_halign(gtk::Align::Start);
-
-    let pf_refresh = gtk::Button::with_label("Обновить");
-    pf_refresh.set_halign(gtk::Align::Start);
-
-    let pf_note = gtk::Label::new(Some(&format!(
-        "Хранилище: {} (создаётся `kbc preset save <имя>`, кнопкой ниже или в CLI)",
-        PresetStore::default_dir().display()
-    )));
-    pf_note.add_css_class("dim-label");
-    pf_note.set_halign(gtk::Align::Start);
-    pf_note.set_wrap(true);
-
-    // Перечитать список пресетов из хранилища и перестроить dropdown.
-    // Возвращает модель, чтобы вызывающий мог (например) найти индекс и
-    // выбрать пресет по имени после сохранения.
-    fn refresh_presets(
-        dd: &gtk::DropDown,
-        store: &Rc<RefCell<Option<gtk::StringList>>>,
-    ) -> gtk::StringList {
-        let names = PresetStore::open().list();
-        let names_s: Vec<&str> = names.iter().map(String::as_str).collect();
-        let model = gtk::StringList::new(&names_s);
-        let prev = dd.selected() as usize;
-        let sel = if names.is_empty() || prev >= names.len() {
-            0
-        } else {
-            prev
-        };
-        *store.borrow_mut() = Some(model.clone());
-        dd.set_model(Some(&model));
-        if !names.is_empty() {
-            dd.set_selected(sel as u32);
-        }
-        model
-    }
-    // Первичное заполнение списка при открытии страницы.
-    let _ = refresh_presets(&pf_dd, &pf_model);
-
     // --- Сборка ------------------------------------------------------------
+    // Логичный порядок: эффект → цвет → яркость/скорость → аудио (если
+    // выбран) → сохранение в память → кнопки → статус.
     panel.append(&mode_label_l);
     panel.append(&mode_dd);
+    panel.append(&live_label);
+    panel.append(&color_row);
     panel.append(&bright_label);
     panel.append(&bright_row);
     panel.append(&speed_label);
     panel.append(&speed_row);
     panel.append(&audio_box);
-    panel.append(&preset_label);
-    panel.append(&preset_dd);
-    panel.append(&pf_label);
-    panel.append(&pf_dd);
-    panel.append(&pf_entry);
-    panel.append(&pf_apply);
-    panel.append(&pf_save_btn);
-    panel.append(&pf_delete);
-    panel.append(&pf_refresh);
-    panel.append(&pf_note);
+    panel.append(&persist_row);
     panel.append(&hw_label);
     panel.append(&hw_dd);
     panel.append(&hw_note);
     panel.append(&apply);
-    panel.append(&save_to_board);
-    panel.append(&live_label);
-    panel.append(&live_entry);
-    panel.append(&palette_row);
     panel.append(&live_on);
     panel.append(&live_off);
+    panel.append(&save_to_board);
     panel.append(&live_status);
 
     // --- Перестройка списка эффектов под подключённое устройство -----------
@@ -659,6 +916,14 @@ pub fn build_rgb_studio(
         #[strong]
         light_off,
         #[strong]
+        persist_switch,
+        #[strong]
+        schedule_save,
+        #[strong]
+        apply,
+        #[strong]
+        wl_allowed,
+        #[strong]
         fetcher2,
         move |_| {
             if let Some(dev) = fetcher2() {
@@ -680,6 +945,24 @@ pub fn build_rgb_studio(
                 // (persistent-хук через независимый handle), чтобы блокирующий
                 // hidapi не вешал GUI, а результат читаем коротким опросом.
                 if dev.connection_type() == ConnectionType::Wireless2_4G {
+                    // Защита ресивера от потока записей (жалоба владельца
+                    // 2026-11-16): не чаще раза в 2 с. Если рано — повторяем
+                    // применение через 2.2 с.
+                    if !wl_allowed() {
+                        let apply_r = apply.clone();
+                        status_a0.set_text(
+                            "Ресивер занят (защита от частых записей) — повторю \
+                             через пару секунд…",
+                        );
+                        gtk::glib::timeout_add_local(
+                            std::time::Duration::from_millis(2200),
+                            move || {
+                                apply_r.emit_clicked();
+                                glib::ControlFlow::Break
+                            },
+                        );
+                        return;
+                    }
                     let Some((vid, pid)) = vidpid_a() else {
                         status_a0.set_text(
                             "Устройство не подключено: откройте его на вкладке «Устройства»",
@@ -708,12 +991,22 @@ pub fn build_rgb_studio(
                                 return glib::ControlFlow::Break;
                             }
                             match rx.try_recv() {
-                                Ok(Ok(_name)) => {
-                                    st.set_text(&format!(
-                                        "Ресивер 2.4G: {mode:?}, яркость={brightness}, \
-                                         скорость={speed} сохранены в память — держатся \
-                                         без приложения"
-                                    ));
+                                Ok(Ok(name)) => {
+                                    // Донгл Ajazz (0C45:FDFD) — честное сообщение:
+                                    // команда ушла, применение подтверждает владелец.
+                                    if name.contains("Ajazz") {
+                                        st.set_text(&format!(
+                                            "2.4G (Ajazz): {mode:?}, яркость={brightness}, \
+                                             скорость={speed} отправлены через донгл — \
+                                             проверьте подсветку визуально"
+                                        ));
+                                    } else {
+                                        st.set_text(&format!(
+                                            "Ресивер 2.4G: {mode:?}, яркость={brightness}, \
+                                             скорость={speed} сохранены в память — держатся \
+                                             без приложения"
+                                        ));
+                                    }
                                     glib::ControlFlow::Break
                                 }
                                 Ok(Err(e)) => {
@@ -904,210 +1197,13 @@ if mode == RgbMode::Audio {
                         glib::ControlFlow::Continue
                     },
                 );
-            }
-        }
-    ));
-
-    // --- Файловые пресеты: применение / сохранение / удаление ------------
-    // Четыре кнопки блока «Файловые пресеты» (виджеты созданы выше, вместе с
-    // `refresh_presets`). Кнопки привязываются ПОСЛЕ блока «Применить» — там
-    // ещё живы оригиналы `mode_dd` / `bright_scale` / `speed_scale` /
-    // `live_entry` / `apply` / `live_status` (apply-блок берёт их клонами через
-    // `clone!`, а `save_to_board` ниже уже их перемещает в move-замыкание).
-    let pf_model_a = pf_model.clone();
-    pf_apply.connect_clicked(clone!(
-        #[strong]
-        pf_dd,
-        #[strong]
-        pf_model_a,
-        #[strong]
-        mode_dd,
-        #[strong]
-        bright_scale,
-        #[strong]
-        speed_scale,
-        #[strong]
-        live_entry,
-        #[strong]
-        audio_low_entry,
-        #[strong]
-        audio_high_entry,
-        #[strong]
-        audio_sens_scale,
-        #[strong]
-        audio_style_dd,
-        #[strong]
-        apply,
-        #[strong]
-        live_status,
-        move |_| {
-            let idx = pf_dd.selected();
-            let name = pf_model_a
-                .borrow()
-                .as_ref()
-                .and_then(|m| m.string(idx))
-                .map(|g| g.to_string())
-                .unwrap_or_default();
-            if name.trim().is_empty() {
-                live_status.set_text("Пресет не выбран — выберите пресет в списке");
-                return;
-            }
-            match PresetStore::open().load(&name) {
-                Ok(preset) => {
-                    mode_dd.set_selected(mode_to_index(preset.params.r#type));
-                    bright_scale.set_value(preset.params.brightness as f64);
-                    speed_scale.set_value(preset.params.speed as f64);
-                    live_entry.set_text(&preset.params.color);
-                    let audio = preset.params.audio_params();
-                    if preset.params.r#type == RgbMode::Audio {
-                        audio_sens_scale.set_value(audio.sensitivity as f64);
-                        audio_low_entry.set_text(&audio.color_low);
-                        audio_high_entry.set_text(&audio.color_high);
-                        audio_style_dd.set_selected(audio_style_to_index(audio.style));
-                    }
-                    apply.emit_clicked();
-                    live_status.set_text(&format!(
-                        "Применён пресет «{}» ({}): цвет {}, яркость {}, скорость {}",
-                        preset.name,
-                        crate::presets::mode_name(preset.params.r#type),
-                        preset.params.color,
-                        preset.params.brightness,
-                        preset.params.speed,
-                    ));
+                // Переключатель «Сохранить в клавиатуру»: на USB сохраняем
+                // выбранный аппаратный эффект (или текущий конфиг) в память —
+                // отложенно (1.5 с после последнего изменения), чтобы серия
+                // правок дала одну запись, а не «кик» на каждый сигнал.
+                if persist_switch.is_active() {
+                    schedule_save();
                 }
-                Err(e) => live_status.set_text(&format!("Не удалось применить пресет: {e}")),
-            }
-        }
-    ));
-
-    pf_save_btn.connect_clicked(clone!(
-        #[strong]
-        pf_dd,
-        #[strong]
-        pf_model,
-        #[strong]
-        pf_entry,
-        #[strong]
-        mode_dd,
-        #[strong]
-        bright_scale,
-        #[strong]
-        speed_scale,
-        #[strong]
-        live_entry,
-        #[strong]
-        audio_low_entry,
-        #[strong]
-        audio_high_entry,
-        #[strong]
-        audio_sens_scale,
-        #[strong]
-        audio_style_dd,
-        #[strong]
-        live_status,
-        move |_| {
-            let raw = pf_entry.text().trim().to_string();
-            let name = crate::presets::sanitize(&raw);
-            if name == crate::presets::DEFAULT_NAME && !raw.is_empty() {
-                live_status.set_text(&format!(
-                    "Имя «{raw}» ненормализуемое — пресет будет сохранён как «default»"
-                ));
-                return;
-            }
-            let color = live_entry.text().trim().to_string();
-            let m = mode_from_index(mode_dd.selected());
-            let audio = if m == RgbMode::Audio {
-                Some(crate::presets::AudioParams {
-                    sensitivity: audio_sens_scale.value() as f32,
-                    color_low: audio_low_entry.text().trim().to_string(),
-                    color_high: audio_high_entry.text().trim().to_string(),
-                    style: audio_style_from_index(audio_style_dd.selected()),
-                })
-            } else { None };
-            let params = ModeParams {
-                version: crate::presets::PRESET_FORMAT_VERSION,
-                r#type: m,
-                color: if color.is_empty() { "#FF5A00".to_string() } else { color },
-                brightness: bright_scale.value().round() as u8,
-                speed: speed_scale.value().round() as u8,
-                frame_ms: crate::presets::DEFAULT_FRAME_MS,
-                audio,
-            };
-            let preset = Preset { name, params };
-            match PresetStore::open().save(&preset) {
-                Ok(path) => {
-                    let _ = refresh_presets(&pf_dd, &pf_model);
-                    if let Some(model) = pf_model.borrow().as_ref() {
-                        for i in 0..model.n_items() {
-                            if model.string(i).map(|g| g.as_str() == preset.name).unwrap_or(false) {
-                                pf_dd.set_selected(i);
-                                break;
-                            }
-                        }
-                    }
-                    live_status.set_text(&format!(
-                        "Пресет «{}» сохранён: {}",
-                        preset.name,
-                        path.display()
-                    ));
-                }
-                Err(e) => live_status.set_text(&format!("Не удалось сохранить пресет: {e}")),
-            }
-        }
-    ));
-
-    pf_delete.connect_clicked(clone!(
-        #[strong]
-        pf_dd,
-        #[strong]
-        pf_model,
-        #[strong]
-        live_status,
-        move |_| {
-            let idx = pf_dd.selected();
-            let name = pf_model
-                .borrow()
-                .as_ref()
-                .and_then(|m| m.string(idx))
-                .map(|g| g.to_string())
-                .unwrap_or_default();
-            if name.trim().is_empty() {
-                live_status.set_text("Пресет не выбран — выберите пресет в списке");
-                return;
-            }
-            if name == crate::presets::DEFAULT_NAME {
-                live_status.set_text("Пресет «default» удалить нельзя");
-                return;
-            }
-            if crate::presets::is_builtin(&name) && !PresetStore::open().path(&name).is_file() {
-                live_status.set_text(&format!(
-                    "Пресет «{name}» встроенный — удалить нельзя (можно переопределить, сохранив свой)"
-                ));
-                return;
-            }
-            match PresetStore::open().remove(&name) {
-                Ok(()) => {
-                    let _ = refresh_presets(&pf_dd, &pf_model);
-                    live_status.set_text(&format!("Пресет «{name}» удалён"));
-                }
-                Err(e) => live_status.set_text(&format!("Не удалось удалить пресет: {e}")),
-            }
-        }
-    ));
-
-    pf_refresh.connect_clicked(clone!(
-        #[strong]
-        pf_dd,
-        #[strong]
-        pf_model,
-        #[strong]
-        live_status,
-        move |_| {
-            let model = refresh_presets(&pf_dd, &pf_model);
-            if model.n_items() == 0 {
-                live_status.set_text("Пресеты не найдены — создайте через «Сохранить как…» или `kbc preset save`");
-            } else {
-                live_status.set_text(&format!("Список пресетов обновлён ({} шт.)", model.n_items()));
             }
         }
     ));
@@ -1120,6 +1216,10 @@ if mode == RgbMode::Audio {
     let set_dev = set_device.clone();
     let vidpid_f = vidpid.clone();
     let hw_wl_save = hw_is_wl.clone();
+    // Клоны слайдеров для move-замыкания сохранения: оригиналы нужны ниже
+    // (колбэки страницы пресетов).
+    let bright_save = bright_scale.clone();
+    let speed_save = speed_scale.clone();
     save_to_board.connect_clicked(move |_| {
         // Фикс 10.27: СНАЧАЛА останавливаем host-поток кадров, иначе keepalive
         // (каждые 400 мс) перезапишет LED и «съест» сохранённый аппаратный
@@ -1138,8 +1238,8 @@ if mode == RgbMode::Audio {
         let is_wl = hw_wl_save.get();
         // Значения слайдеров яркости/скорости — для сохранения ВМЕСТЕ с эффектом
         // (ресивер пишет их в слот активного эффекта; журнал 2026-09-15).
-        let bri = bright_scale.value() as u8;
-        let spd = speed_scale.value() as u8;
+        let bri = bright_save.value() as u8;
+        let spd = speed_save.value() as u8;
         let effects: &[(u8, &str)] = if is_wl {
             crate::devices::aula_f75::WL_EFFECTS
         } else {
@@ -1162,8 +1262,8 @@ if mode == RgbMode::Audio {
         // нечего (0x13 не пишет «текущий конфиг», в отличие от USB data[10]).
         if is_wl && matches!(kind, SaveKind::Config) {
             status_s.set_text(
-                "Ресивер 2.4G: выберите аппаратный эффект (или «Выключить свет»), \
-                 а затем «Записать в память» — запись текущего конфига на ресивере \
+                "Ресивер 2.4G: выберите аппаратный эффект (или «Выключить подсветку»), \
+                 а затем «Применить» — запись текущего конфига на ресивере \
                  не поддерживается.",
             );
             frame_gen_s.set(frame_gen_s.get().wrapping_add(1));
@@ -1360,6 +1460,8 @@ if mode == RgbMode::Audio {
         let status_a = live_status.clone();
         let off_a = light_off.clone();
         let vidpid_c = vidpid.clone();
+        let wl_a = wl_allowed.clone();
+        let sched_a = schedule_apply.clone();
         Rc::new(move || {
             let text = entry_a.text().to_string();
             let Some(color) = Color::from_hex_checked(text.trim()) else {
@@ -1381,6 +1483,20 @@ if mode == RgbMode::Audio {
             // host-keepalive, держится без приложения. Запись — отдельным
             // потоком (persistent-хук), результат — коротким опросом.
             if dev.connection_type() == ConnectionType::Wireless2_4G {
+                // Защита ресивера от потока записей (см. wl_allowed): не чаще
+                // раза в 2 с; если рано — повторяем через пару секунд.
+                if !wl_a() {
+                    let sched = sched_a.clone();
+                    status_a.set_text(
+                        "Ресивер занят (защита от частых записей) — повторю \
+                         через пару секунд…",
+                    );
+                    gtk::glib::timeout_add_local(std::time::Duration::from_millis(2200), move || {
+                        sched();
+                        glib::ControlFlow::Break
+                    });
+                    return;
+                }
                 let Some((vid, pid)) = vidpid_c() else {
                     status_a.set_text(
                         "Устройство не подключено: откройте его на вкладке «Устройства»",
@@ -1469,52 +1585,6 @@ if mode == RgbMode::Audio {
 
     let apply_cur2 = apply_cur.clone();
     live_on.connect_clicked(move |_| apply_cur2());
-
-    // Палитра: кнопка ставит цвет в поле и сразу применяет.
-    for (rgb, name) in [
-        (0xFF0000u32, "Красный"),
-        (0x00FF00u32, "Зелёный"),
-        (0x0000FFu32, "Синий"),
-        (0xFFFFFFu32, "Белый"),
-        (0xFF8000u32, "Оранжевый"),
-    ] {
-        let btn = gtk::Button::with_label(name);
-        btn.add_css_class("flat");
-        let entry_b = live_entry.clone();
-        let apply_b = apply_cur.clone();
-        let hex = format!("#{:06X}", rgb & 0xFF_FFFF);
-        btn.connect_clicked(move |_| {
-            entry_b.set_text(&hex);
-            apply_b();
-        });
-        palette_row.append(&btn);
-    }
-
-    // Пресеты: выбор в списке выставляет соответствующий режим подсветки
-    // (mode_dd), базовый цвет в поле ввода и сразу применяет эффект через
-    // host-движок (фикс 10.23: раньше пресет просто красил статичным цветом,
-    // не меняя режим).
-    {
-        let preset_entry = live_entry.clone();
-        let preset_mode_dd = mode_dd.clone();
-        let preset_apply_btn = apply.clone();
-        preset_dd.connect_selected_notify(move |dd| {
-            // (индекс режима в mode_dd, базовый цвет) по выбору пресета:
-            let sel = match dd.selected() {
-                1 => Some((0, "#FFFFFF")),  // Static   → Рeжим 0
-                2 => Some((1, "#00A8FF")),  // Дыхание  → Рeжим 1
-                3 => Some((2, "#FF8000")),  // Волна    → Рeжим 2
-                4 => Some((3, "#FF0066")),  // Спектр   → Рeжим 3
-                5 => Some((5, "#78C8FF")),  // Дождь    → Рeжим 5
-                _ => None, // «—»: ничего не запускаем
-            };
-            if let Some((mode_idx, hex)) = sel {
-                preset_entry.set_text(hex);
-                preset_mode_dd.set_selected(mode_idx);
-                preset_apply_btn.emit_clicked();
-            }
-        });
-    }
 
     let gen_off = frame_gen.clone();
     let color_c = live_color.clone();
@@ -1631,11 +1701,12 @@ if mode == RgbMode::Audio {
             },
         );
         status_off.set_text(
-            "Свет выключен (host-кадр, не включится, пока приложение открыто). Выбор \
+            "Подсветка выключена (не включится, пока приложение открыто). Выбор \
              аппаратного эффекта сброшен — при закрытии приложения состояние «свет \
              выключен» сохранится автоматически (а=00 во всех слотах эффектов). \
-             Хотите эффект в память — выберите его в списке и нажмите «Записать \
-             в память».",
+             Хотите эффект в память — выберите его в списке «Эффект для памяти \
+             клавиатуры»: при включённом «Сохранить в клавиатуру» он сохранится \
+             автоматически.",
         );
     });
 
@@ -1665,7 +1736,73 @@ if mode == RgbMode::Audio {
         None
     });
 
-    (panel, probe)
+    // --- Колбэки для страницы «Расширенные настройки пресетов» --------------
+    // Страница пресетов выставляет настройки «Подсветки» и применяет их
+    // (apply), а при сохранении берёт текущие значения (current).
+    use crate::presets::AudioParams;
+    use crate::types::RgbMode;
+    let preset_callbacks = super::presets_page::PresetCallbacks {
+        apply: {
+            let mode_dd_c = mode_dd.clone();
+            let bright_c = bright_scale.clone();
+            let speed_c = speed_scale.clone();
+            let entry_c = live_entry.clone();
+            let sync_c = sync_color_ui.clone();
+            let audio_sens_c = audio_sens_scale.clone();
+            let audio_low_c = audio_low_entry.clone();
+            let audio_high_c = audio_high_entry.clone();
+            let audio_style_c = audio_style_dd.clone();
+            let apply_c = apply.clone();
+            Rc::new(move |mode: RgbMode, brightness: u8, speed: u8, color: String, audio: Option<AudioParams>| {
+                mode_dd_c.set_selected(mode_to_index(mode));
+                bright_c.set_value(brightness as f64);
+                speed_c.set_value(speed as f64);
+                entry_c.set_text(&color);
+                sync_c(&color);
+                if let Some(a) = audio {
+                    audio_sens_c.set_value(a.sensitivity as f64);
+                    audio_low_c.set_text(&a.color_low);
+                    audio_high_c.set_text(&a.color_high);
+                    audio_style_c.set_selected(audio_style_to_index(a.style));
+                }
+                // Авто-применение: сигналы уже сработали бы на изменениях, но
+                // если значения совпали с текущими — применяем явно.
+                apply_c.emit_clicked();
+            })
+        },
+        current: {
+            let mode_dd_c = mode_dd.clone();
+            let bright_c = bright_scale.clone();
+            let speed_c = speed_scale.clone();
+            let entry_c = live_entry.clone();
+            let audio_sens_c = audio_sens_scale.clone();
+            let audio_low_c = audio_low_entry.clone();
+            let audio_high_c = audio_high_entry.clone();
+            let audio_style_c = audio_style_dd.clone();
+            Rc::new(move || {
+                let mode = mode_from_index(mode_dd_c.selected());
+                let audio = if mode == RgbMode::Audio {
+                    Some(AudioParams {
+                        sensitivity: audio_sens_c.value() as f32,
+                        color_low: audio_low_c.text().trim().to_string(),
+                        color_high: audio_high_c.text().trim().to_string(),
+                        style: audio_style_from_index(audio_style_c.selected()),
+                    })
+                } else {
+                    None
+                };
+                (
+                    mode,
+                    bright_c.value().round() as u8,
+                    speed_c.value().round() as u8,
+                    entry_c.text().trim().to_string(),
+                    audio,
+                )
+            })
+        },
+    };
+
+    (panel, probe, preset_callbacks)
 }
 
 /// Цветовой пикер: покраска выбранных клавиш в макете одним цветом.

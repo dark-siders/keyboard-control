@@ -7,13 +7,12 @@ use std::sync::{Mutex, OnceLock};
 
 use adw::prelude::*;
 use gtk::glib;
-use gtk::glib::clone;
 
 use crate::devices::scanner::FoundDevice;
 use crate::devices::{KeyboardDevice, Layout};
 use crate::VERSION;
 
-use super::{keymap_editor, rgb_studio, screen_manager, settings_panel, tray};
+use super::{keymap_editor, presets_page, rgb_studio, screen_manager, settings_panel, tray};
 
 /// Текущее устройство в приложении.
 type DeviceSlot = Rc<RefCell<Option<Rc<dyn KeyboardDevice>>>>;
@@ -70,7 +69,7 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&device_page, Some("devices"), "Устройства");
 
     // Страницы функций
-    let (rgb_page, persist_probe) = rgb_studio::build_rgb_studio(
+    let (rgb_page, persist_probe, preset_cb) = rgb_studio::build_rgb_studio(
         make_fetcher(device_slot.clone()),
         make_set_device(device_slot.clone()),
         make_last_vidpid(),
@@ -78,11 +77,15 @@ fn build_ui(app: &adw::Application) {
     let km_page = keymap_editor::build_keymap_editor(make_fetcher(device_slot.clone()));
     let screen_page = screen_manager::build_screen_manager(make_fetcher(device_slot.clone()));
     let settings_page = settings_panel::build_settings_panel(make_fetcher(device_slot.clone()));
+    let presets_page = presets_page::build_presets_page(preset_cb);
+    let sleep_page = settings_panel::build_sleep_page(make_fetcher(device_slot.clone()));
 
-    stack.add_titled(&rgb_page, Some("rgb"), "RGB & Light Studio");
-    stack.add_titled(&km_page, Some("engine"), "Keymap & Fn");
-    stack.add_titled(&screen_page, Some("screen"), "Screen Manager");
+    stack.add_titled(&rgb_page, Some("rgb"), "Подсветка");
+    stack.add_titled(&presets_page, Some("presets"), "Расширенные настройки пресетов");
+    stack.add_titled(&km_page, Some("engine"), "Клавиши");
+    stack.add_titled(&screen_page, Some("screen"), "Экран");
     stack.add_titled(&settings_page, Some("settings"), "Настройки");
+    stack.add_titled(&sleep_page, Some("sleep"), "Таймаут режима сна");
 
     // Сайдбар
     let sidebar = build_sidebar(&stack);
@@ -268,7 +271,7 @@ fn setup_close_autosave(
 /// Сайдбар с навигацией. Переключает страницы стека.
 fn build_sidebar(stack: &gtk::Stack) -> gtk::Box {
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    sidebar.set_width_request(200);
+    sidebar.set_width_request(250);
     sidebar.add_css_class("sidebar");
     sidebar.set_margin_top(12);
     sidebar.set_margin_bottom(12);
@@ -290,10 +293,12 @@ fn build_sidebar(stack: &gtk::Stack) -> gtk::Box {
 
     let pages: Vec<(&str, &str)> = vec![
         ("devices", "Устройства"),
-        ("rgb", "RGB & Light Studio"),
-        ("engine", "Keymap & Fn"),
-        ("screen", "Screen Manager"),
+        ("rgb", "Подсветка"),
+        ("presets", "Расширенные настройки пресетов"),
+        ("engine", "Клавиши"),
+        ("screen", "Экран"),
         ("settings", "Настройки"),
+        ("sleep", "Таймаут режима сна"),
     ];
 
     for (name, label) in pages {
@@ -343,7 +348,7 @@ fn build_device_page(device_slot: DeviceSlot, stack: gtk::Stack) -> gtk::Box {
     page.append(&title);
 
     let hint = gtk::Label::new(Some(
-        "Нажмите «Открыть», чтобы управлять клавиатурой. Устройства определяются автоматически.",
+        "Подключите клавиатуру (USB или 2.4G-донгл) и нажмите «Подключить» на её карточке.",
     ));
     hint.add_css_class("dim-label");
     hint.set_wrap(true);
@@ -354,11 +359,11 @@ fn build_device_page(device_slot: DeviceSlot, stack: gtk::Stack) -> gtk::Box {
     let list: gtk::ListBox = gtk::ListBox::builder().margin_top(4).build();
     page.append(&list);
 
-    // Кнопка открытия
-    let connect_btn = gtk::Button::with_label("Сканировать устройства");
-    connect_btn.add_css_class("suggested-action");
-    connect_btn.set_halign(gtk::Align::Start);
-    page.append(&connect_btn);
+    // Кнопка обновления списка
+    let refresh_btn = gtk::Button::with_label("Обновить список");
+    refresh_btn.add_css_class("suggested-action");
+    refresh_btn.set_halign(gtk::Align::Start);
+    page.append(&refresh_btn);
 
     // Панель подключённого устройства
     let connected_panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -366,56 +371,57 @@ fn build_device_page(device_slot: DeviceSlot, stack: gtk::Stack) -> gtk::Box {
     page.append(&connected_panel);
 
     // Статус
-    let status = gtk::Label::new(Some(""));
+    let status = gtk::Label::new(Some("Поиск устройств…"));
     status.add_css_class("dim-label");
     status.set_halign(gtk::Align::Start);
     page.append(&status);
 
-    // Обработчики
-    connect_btn.connect_clicked(clone!(
-        #[strong]
-        list,
-        #[strong]
-        connected_panel,
-        #[strong]
-        status,
-        #[strong]
-        stack,
-        #[strong]
-        device_slot,
-        move |_| {
-        // Очистка списка
-        remove_all_children_list(&list);
-        remove_all_children_box(&connected_panel);
+    // Общая процедура сканирования: очистка списка + заполнение карточками.
+    let do_scan: Rc<dyn Fn()> = {
+        let list = list.clone();
+        let connected_panel = connected_panel.clone();
+        let status = status.clone();
+        let device_slot = device_slot.clone();
+        let stack = stack.clone();
+        Rc::new(move || {
+            remove_all_children_list(&list);
+            remove_all_children_box(&connected_panel);
 
-        // Сканирование
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let scanner = match crate::devices::scanner::Scanner::new(tx) {
-            Ok(s) => s,
-            Err(_) => {
-                status.set_text("Не удалось инициализировать HID API");
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let scanner = match crate::devices::scanner::Scanner::new(tx) {
+                Ok(s) => s,
+                Err(_) => {
+                    status.set_text("Не удалось инициализировать HID API");
+                    return;
+                }
+            };
+            let found = match scanner.scan() {
+                Ok(f) => f,
+                Err(_) => {
+                    status.set_text("Ошибка сканирования");
+                    return;
+                }
+            };
+
+            if found.is_empty() {
+                status.set_text(
+                    "Устройства не найдены. Подключите клавиатуру и нажмите «Обновить список». \
+                     Если клавиатура подключена — проверьте udev-правила.",
+                );
                 return;
             }
-        };
-        let found = match scanner.scan() {
-            Ok(f) => f,
-            Err(_) => {
-                status.set_text("Ошибка сканирования");
-                return;
+
+            status.set_text(&format!("Найдено устройств: {}", found.len()));
+            for dev in found {
+                let row = build_device_row(&dev, &device_slot, &stack, &status);
+                list.append(&row);
             }
-        };
-
-        if found.is_empty() {
-            status.set_text("Устройства не найдены. Проверьте udev-правила.");
-            return;
-        }
-
-        status.set_text(&format!("Найдено устройств: {}", found.len()));
-        for dev in found {
-            let row = build_device_row(&dev, &device_slot, &stack, &status);
-            list.append(&row);
-        }
-    }));
+        })
+    };
+    // Автопоиск сразу при построении страницы (без отдельной кнопки).
+    let do_scan_initial = do_scan.clone();
+    do_scan_initial();
+    refresh_btn.connect_clicked(move |_| do_scan());
 
     page
 }
@@ -463,8 +469,8 @@ fn build_device_row(
         Layout::L96 => "96%",
     };
     let detail = gtk::Label::new(Some(&format!(
-        "Раскладка: {layout_txt} | VID:PID {:04X}:{:04X} | {:?}",
-        dev.info.vid, dev.info.pid, dev.path
+        "Раскладка {layout_txt} · {:04X}:{:04X}",
+        dev.info.vid, dev.info.pid
     )));
     detail.set_halign(gtk::Align::Start);
     detail.add_css_class("caption");
@@ -473,7 +479,7 @@ fn build_device_row(
     info_col.append(&name);
     info_col.append(&detail);
 
-    let btn = gtk::Button::with_label("Открыть");
+    let btn = gtk::Button::with_label("Подключить");
     btn.add_css_class("suggested-action");
     btn.set_margin_end(6);
 
@@ -486,11 +492,11 @@ fn build_device_row(
         match connect_selected(&slot, &dev_data, paths.as_deref()) {
             Ok(name) => {
                 status2.set_text(&format!("Подключено: {name}"));
-                // Открываем RGB-страницу
+                // Открываем страницу «Подсветка».
                 stack2.set_visible_child_name("rgb");
             }
             Err(e) => {
-                status2.set_text(&format!("Не удалось открыть устройство: {e}"));
+                status2.set_text(&format!("Не удалось подключить устройство: {e}"));
             }
         }
     });

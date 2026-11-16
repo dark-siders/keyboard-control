@@ -17,7 +17,7 @@ pub fn build_settings_panel(
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.set_margin_top(8);
 
-    let title = gtk::Label::new(Some("System & Power"));
+    let title = gtk::Label::new(Some("Настройки"));
     title.add_css_class("title-1");
     title.set_halign(gtk::Align::Start);
     panel.append(&title);
@@ -32,8 +32,8 @@ pub fn build_settings_panel(
     refresh_btn.set_halign(gtk::Align::Start);
     panel.append(&refresh_btn);
 
-    // --- Polling Rate -----------------------------------------------------
-    let poll_header = gtk::Label::new(Some("Частота опроса (Polling Rate)"));
+    // --- Частота опроса ---------------------------------------------------
+    let poll_header = gtk::Label::new(Some("Частота опроса"));
     poll_header.add_css_class("heading");
     poll_header.set_halign(gtk::Align::Start);
     panel.append(&poll_header);
@@ -44,8 +44,8 @@ pub fn build_settings_panel(
     poll_dd.set_selected(3); // 1000 Гц по умолчанию
     panel.append(&poll_dd);
 
-    // --- Debounce ---------------------------------------------------------
-    let debounce_header = gtk::Label::new(Some("Задержка от дребезга (Debounce)"));
+    // --- Задержка нажатий -------------------------------------------------
+    let debounce_header = gtk::Label::new(Some("Задержка нажатий (антидребезг)"));
     debounce_header.add_css_class("heading");
     debounce_header.set_halign(gtk::Align::Start);
     panel.append(&debounce_header);
@@ -60,22 +60,7 @@ pub fn build_settings_panel(
     debounce_row.append(&debounce_unit);
     panel.append(&debounce_row);
 
-    // --- Sleep Timer ------------------------------------------------------
-    let sleep_header = gtk::Label::new(Some("Таймер автовыключения (Sleep)"));
-    sleep_header.add_css_class("heading");
-    sleep_header.set_halign(gtk::Align::Start);
-    panel.append(&sleep_header);
-
-    let sleep_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let sleep_spin = gtk::SpinButton::with_range(0.0, 3600.0, 10.0);
-    sleep_spin.set_value(600.0);
-    let sleep_unit = gtk::Label::new(Some("сек (0 = выкл)"));
-    sleep_unit.add_css_class("dim-label");
-    sleep_row.append(&sleep_spin);
-    sleep_row.append(&sleep_unit);
-    panel.append(&sleep_row);
-
-    // Флаг: показывать ли Polling/Debounce/Sleep (F99 не поддерживает)
+    // Флаг: показывать ли Polling/Debounce (F99 не поддерживает)
     let show_sys_controls: Rc<Cell<bool>> = Rc::new(Cell::new(true));
 
     // --- Применение ------------------------------------------------------
@@ -89,14 +74,12 @@ pub fn build_settings_panel(
     panel.append(&status);
 
     // --- Обработчики --------------------------------------------------------
-let fetcher2 = fetcher.clone();
+    let fetcher2 = fetcher.clone();
     let show_sys_controls_r = show_sys_controls.clone();
     let poll_header_c = poll_header.clone();
     let poll_dd_c = poll_dd.clone();
     let debounce_header_c = debounce_header.clone();
     let debounce_row_c = debounce_row.clone();
-    let sleep_header_c = sleep_header.clone();
-    let sleep_row_c = sleep_row.clone();
     refresh_btn.connect_clicked(clone!(
         #[strong]
         battery_label,
@@ -112,10 +95,6 @@ let fetcher2 = fetcher.clone();
         debounce_header_c,
         #[strong]
         debounce_row_c,
-        #[strong]
-        sleep_header_c,
-        #[strong]
-        sleep_row_c,
         move |_| {
         if let Some(dev) = fetcher2() {
             let mut levels = "нет".to_string();
@@ -145,17 +124,15 @@ let fetcher2 = fetcher.clone();
                     }
                 }
             }
-            // Скрываем Polling/Debounce/Sleep для F99 (не поддерживает)
+            // Скрываем Polling/Debounce для F99 (не поддерживает)
             let is_f99 = dev.name().contains("F99");
             show_sys_controls_r.set(!is_f99);
             poll_header_c.set_visible(!is_f99);
             poll_dd_c.set_visible(!is_f99);
             debounce_header_c.set_visible(!is_f99);
             debounce_row_c.set_visible(!is_f99);
-            sleep_header_c.set_visible(!is_f99);
-            sleep_row_c.set_visible(!is_f99);
             if is_f99 {
-                status.set_text("F99: Polling/Debounce/Sleep не поддерживаются прошивкой");
+                status.set_text("F99: Polling/Debounce не поддерживаются прошивкой");
             } else {
                 status.set_text(&format!("Обновлено. Заряд: {}", levels));
             }
@@ -171,8 +148,6 @@ let fetcher2 = fetcher.clone();
         #[strong]
         debounce_spin,
         #[strong]
-        sleep_spin,
-        #[strong]
         status,
         move |_| {
         let rate = match poll_dd.selected() {
@@ -182,7 +157,6 @@ let fetcher2 = fetcher.clone();
             _ => 1000u16,
         };
         let debounce = debounce_spin.value() as u16;
-        let sleep = sleep_spin.value() as u16;
         if let Some(dev) = fetcher3() {
             let mut errors = Vec::new();
             let is_f99 = dev.name().contains("F99");
@@ -192,9 +166,6 @@ let fetcher2 = fetcher.clone();
                 }
                 if let Err(e) = dev.set_debounce(debounce) {
                     errors.push(format!("debounce: {e}"));
-                }
-                if let Err(e) = dev.set_sleep_timer(sleep) {
-                    errors.push(format!("sleep: {e}"));
                 }
             }
             if errors.is_empty() {
@@ -210,6 +181,95 @@ let fetcher2 = fetcher.clone();
             status.set_text("Устройство не подключено");
         }
     }));
+
+    panel
+}
+/// Страница «Таймаут режима сна» (отдельный пункт сайдбара).
+/// Значение применяется автоматически через 300 мс после последнего
+/// изменения (без кнопки).
+pub fn build_sleep_page(
+    device_fetcher: impl Fn() -> Option<Rc<dyn KeyboardDevice>> + 'static,
+) -> gtk::Box {
+    let fetcher: Rc<dyn Fn() -> Option<Rc<dyn KeyboardDevice>>> = Rc::new(device_fetcher);
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    panel.set_margin_top(8);
+
+    let title = gtk::Label::new(Some("Таймаут режима сна"));
+    title.add_css_class("title-1");
+    title.set_halign(gtk::Align::Start);
+    panel.append(&title);
+
+    let hint = gtk::Label::new(Some(
+        "Через какое время бездействия клавиатура уходит в сон (гаснет подсветка, \
+         разрывается беспроводная связь). Прошивка поддерживает ровно эти ступени. \
+         Значение применяется само после выбора — или нажмите «Применить».",
+    ));
+    hint.add_css_class("dim-label");
+    hint.set_wrap(true);
+    hint.set_halign(gtk::Align::Start);
+    panel.append(&hint);
+
+    // Ступени прошивки: (секунды для драйвера, подпись).
+    const SLEEP_STEPS: &[(u16, &str)] = &[
+        (0, "Не засыпать"),
+        (60, "1 минута"),
+        (300, "5 минут"),
+        (1800, "30 минут"),
+    ];
+
+    let dd = gtk::DropDown::builder().halign(gtk::Align::Start).build();
+    {
+        let names: Vec<&str> = SLEEP_STEPS.iter().map(|(_, n)| *n).collect();
+        dd.set_model(Some(&gtk::StringList::new(&names)));
+        dd.set_selected(2); // «5 минут» по умолчанию
+    }
+    panel.append(&dd);
+
+    let apply_btn = gtk::Button::with_label("Применить");
+    apply_btn.add_css_class("suggested-action");
+    apply_btn.set_halign(gtk::Align::Start);
+    panel.append(&apply_btn);
+
+    let status = gtk::Label::new(Some("Подключите клавиатуру на вкладке «Устройства»."));
+    status.add_css_class("dim-label");
+    status.set_halign(gtk::Align::Start);
+    status.set_wrap(true);
+    panel.append(&status);
+
+    // Общая логика применения (кнопка «Применить» и авто-применение).
+    let do_apply: Rc<dyn Fn()> = {
+        let dd_c = dd.clone();
+        let status_c = status.clone();
+        let fetcher_c = fetcher.clone();
+        Rc::new(move || {
+            let seconds = SLEEP_STEPS
+                .get(dd_c.selected() as usize)
+                .map(|(s, _)| *s)
+                .unwrap_or(300);
+            let label = SLEEP_STEPS
+                .iter()
+                .find(|(s, _)| *s == seconds)
+                .map(|(_, n)| *n)
+                .unwrap_or("");
+            let Some(dev) = fetcher_c() else {
+                status_c.set_text("Устройство не подключено: вкладка «Устройства» → «Подключить»");
+                return;
+            };
+            match dev.set_sleep_timer(seconds) {
+                Ok(()) => status_c.set_text(&format!("Таймаут сна: {label} — применено")),
+                Err(e) => status_c.set_text(&format!("Не удалось применить: {e}")),
+            }
+        })
+    };
+    {
+        let do_apply_btn = do_apply.clone();
+        apply_btn.connect_clicked(move |_| do_apply_btn());
+    }
+    // Авто-применение: выбор в списке сразу отправляется на клавиатуру.
+    {
+        let do_apply_dd = do_apply.clone();
+        dd.connect_selected_notify(move |_| do_apply_dd());
+    }
 
     panel
 }

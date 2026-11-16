@@ -196,9 +196,9 @@ pub const HW_EFFECTS: &[(u8, &str)] = &[
 /// штатное поведение записи LED-config (flash-and-revert у dnviti), не «выкл».
 /// Эмпирические названия (совпадающих кодов) имеют приоритет.
 pub const WL_EFFECTS: &[(u8, &str)] = &[
-    (0x01, "Радужная статика"),
+    (0x01, "Solid (однотонный цвет)"),
     (0x02, "Радуга (офиц. список, не подтверждено)"),
-    (0x03, "Смена цветов (статично)"),
+    (0x03, "Радуга / перелив по палитре"),
     (0x04, "Линия"),
     (0x05, "Дождь"),
     (0x06, "Дыхание"),
@@ -421,7 +421,7 @@ impl AulaF75 {
             RgbMode::Ripple => 0x0A,         // пульсация (совпадает с ресивером)
             RgbMode::SpectrumCycle => 0x08,  // Радуга
             RgbMode::Wave => 0x0B,           // Перелив-волна
-            RgbMode::Static | RgbMode::Custom => 0x03, // Смена цветов (статично)
+            RgbMode::Static | RgbMode::Custom => 0x03, // Смена цветов
             // Аудио-реактив host-фича; аппаратно записать звуковой спектр нельзя —
             // ближайший статичный (0x03). До daemon-ветки аудио не доходит.
             RgbMode::Audio => 0x03,
@@ -564,7 +564,28 @@ impl AulaF75 {
         Ok(())
     }
 
-    /// Прочитать LED config ресивера (128 байт).
+    /// Проверить подпись `5A A5` в LED config ресивера (последние 2 байта).
+    /// keylux (реверс офиц. драйвера): прошивка бывает отдаёт усечённый/нулевой
+    /// блок, а его запись обнуляет весь конфиг (вплоть до «кирпича», лечится
+    /// рефлешем). Поэтому ЛЮБУЮ read-modify-write-запись защищаем проверкой
+    /// подписи — не пишем то, что не прочитали валидным.
+    fn check_led_config_signature(data: &[u8]) -> Result<()> {
+        if data.len() < 128 {
+            return Err(Error::Protocol(format!(
+                "LED config короче 128 байт: {}",
+                data.len()
+            )));
+        }
+        if data[126] != 0x5A || data[127] != 0xA5 {
+            return Err(Error::Protocol(format!(
+                "LED config без подписи 5A A5 (получено {:02X} {:02X}) — запись запрещена",
+                data[126], data[127]
+            )));
+        }
+        Ok(())
+    }
+
+    /// Прочитать LED config ресивера (128 байт) с обязательной проверкой подписи.
     fn wl_led_config(&self) -> Result<Vec<u8>> {
         let d = self.wl_read_pages(0x44, 128)?;
         if d.len() < 128 {
@@ -573,7 +594,9 @@ impl AulaF75 {
                 d.len()
             )));
         }
-        Ok(d[..128].to_vec())
+        let led = d[..128].to_vec();
+        Self::check_led_config_signature(&led)?;
+        Ok(led)
     }
 
     /// Прочитать RGB-таблицу ресивера (~490 байт: 20 эффектов × 7 цветов × 3).
@@ -588,20 +611,26 @@ impl AulaF75 {
         Ok(d)
     }
 
-    /// Маппинг host-режима на HW-эффект ресивера (селектор `led[10]`,
-    /// эмпирическая карта 2026-09-15).
+    /// Маппинг host-режима на HW-эффект ресивера (селектор `led[10]`).
+    ///
+    /// Коды `0x01`/`0x03` — по keylux (реверс офиц. драйвера, `docs/PROTOCOL.md`):
+    /// у конфиг-блока ТРИ режимных байта `[9] [10] [59]`, где `[10]=0x01` = Solid
+    /// (однотонный), `[10]=0x03` = радуга/перелив. Прежняя эмпирическая карта
+    /// (2026-09-15) держала их инвертированно: `Static` уходил в `0x03` (радуга),
+    /// отсюда «клавиатура сбрасывается и начинает переливаться цветами».
     fn wl_effect_for_mode(mode: RgbMode) -> u8 {
         match mode {
-            RgbMode::Static => 0x03,       // Смена цветов (статично)
-            RgbMode::Breathing => 0x06,    // Дыхание
-            RgbMode::Wave => 0x10,         // Волны вправо-влево от центра
-            RgbMode::SpectrumCycle => 0x01, // Радужная статика
-            RgbMode::Ripple => 0x0A,       // Пульсация из центра
-            RgbMode::Rain => 0x05,         // Дождь
-            RgbMode::Reactive => 0x07,     // Мерцание разных букв (отклик)
-            RgbMode::Custom => 0x03,       // Ближайший статичный
-            // Аудио-реактив флеш-записью не реализуем (host-фича), ближайший.
-            RgbMode::Audio => 0x03,        // Смена цветов (статично)
+            RgbMode::Static => 0x01,        // Solid: однотонный цвет из палитры
+            RgbMode::Breathing => 0x06,     // Дыхание
+            RgbMode::Wave => 0x10,          // Волны вправо-влево от центра
+            RgbMode::SpectrumCycle => 0x03, // Смена цветов (перелив по палитре)
+            RgbMode::Ripple => 0x0A,        // Пульсация из центра
+            RgbMode::Rain => 0x05,          // Дождь
+            RgbMode::Reactive => 0x07,      // Мерцание разных букв (отклик)
+            RgbMode::Custom => 0x01,        // Ближайший однотонный (Solid)
+            // Аудио-реактив флеш-записью не реализуем (host-фича), ближайший —
+            // однотонный Solid, а не радуга.
+            RgbMode::Audio => 0x01,         // Solid (однотонный)
         }
     }
 
@@ -622,30 +651,52 @@ impl AulaF75 {
         speed: u8,
     ) -> Result<()> {
         let mut led = self.wl_led_config()?;
-        // Селектор эффекта на ресивере — led[10] (эмпирика 2026-09-15).
+        // Селектор эффекта на ресивере — led[10] (эмпирика 2026-09-15;
+        // коды 0x01=Solid / 0x03=радуга подтверждены keylux).
         led[10] = hw_effect;
         // Яркость/скорость ЖИВУТ В СЛОТАХ ЭФФЕКТОВ: слот активного эффекта =
         // [58 + 2*(led[10]-1)], пара (a=яркость, b=(speed<<4)|color). Записываем
         // туда, НЕ трогая led[3]/led[4] (они на ресивере не используются,
         // журнал 10.49, эмпирика 2026-09-15).
         let slot = 58 + 2 * ((led[10] as usize).saturating_sub(1));
+        if slot + 1 >= led.len() {
+            return Err(Error::Protocol(format!(
+                "слот активного эффекта {slot} вне LED config (len {})",
+                led.len()
+            )));
+        }
         // UI-масштаб (0..=255) → шкала прошивки: яркость 0..=9, скорость 0..=4.
         let b = (((brightness as u16) * 9) / 255).min(9) as u8;
         let s = (((speed as u16) * 4) / 255).min(4) as u8;
         led[slot] = b;
-        // Сохраняем младшую тетраду b-байта (цвет) при перезаписи скорости.
-        led[slot + 1] = (s << 4) | (led[slot + 1] & 0x0F);
-        self.last_wl_brightness.set(b);
         let want_color = color.is_some();
+        // Младшая тетрада b-байта — индекс цвета в палитре эффекта.
+        // keylux: `7` = перебор всей палитры (радуга/перелив), `0..6` = конкретный
+        // цвет. Для однотонного режима (задан цвет) ставим индекс 0: палитра
+        // заливается выбранным цветом, поэтому любой индекс даёт тот же тон, а
+        // вот сохранённый `7` оставлял «статичную радугу» вместо однотонного
+        // (живой тест 2026-11-16). Без цвета — сохраняем прежний индекс.
+        let colour_nibble = if want_color { 0x00 } else { led[slot + 1] & 0x0F };
+        led[slot + 1] = (s << 4) | colour_nibble;
+        self.last_wl_brightness.set(b);
         if let Some(c) = color {
-            led[6] = 0; // режим «одиночный цвет» (0=single)
+            // Режимные байты Solid по keylux: [9]=0x00, [10]=0x01 (Solid) — оба
+            // важны (только 9+10 → доска гаснет). [6]=0 — «одиночный цвет».
+            led[9] = 0x00;
+            led[6] = 0;
             let mut rgb = self.wl_rgb_table()?;
-            // Правим первый цветовой слот (offsets 0..2) у каждого эффекта —
-            // это и есть «выбранный цвет» для Steady/Breathing/… (dnviti).
-            for off in (0..rgb.len().saturating_sub(2)).step_by(21) {
-                rgb[off] = c.r;
-                rgb[off + 1] = c.g;
-                rgb[off + 2] = c.b;
+            // Палитра ресивера — блоки по 7 цветов (21 байт = 7 × RGB). Заливаем
+            // ВСЕ 7 слотов каждого полного блока выбранным цветом, чтобы любой
+            // индекс палитры давал ровный тон. Хвост после последнего полного
+            // блока (7 байт, похож на трейлер) НЕ трогаем — цикл идёт до
+            // `len - 20`, т.е. только по 21-байтным блокам.
+            for off in (0..rgb.len().saturating_sub(20)).step_by(21) {
+                for k in 0..7 {
+                    let p = off + k * 3;
+                    rgb[p] = c.r;
+                    rgb[p + 1] = c.g;
+                    rgb[p + 2] = c.b;
+                }
             }
             self.wl_write_pages(0x09, &rgb)?;
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1777,7 +1828,7 @@ pub fn factory_keymap_f75() -> crate::types::Keymap {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::KeyAction;
+    use crate::types::{KeyAction, RgbMode};
     use super::*;
 
     #[test]
@@ -1820,5 +1871,34 @@ mod tests {
         }
         assert!(AulaF75::check_writable_slot(127).is_err(), "трейлер 5A A5");
         assert!(AulaF75::check_writable_slot(44).is_ok(), "обычный слот писать можно");
+    }
+
+    #[test]
+    fn wl_effect_for_mode_static_is_solid_not_rainbow() {
+        // keylux (реверс офиц. драйвера): [10]=0x01 = Solid (однотонный),
+        // [10]=0x03 = радуга/перелив. Статика НЕ должна уходить в радугу —
+        // иначе клавиатура «сбрасывается и переливается цветами».
+        assert_eq!(AulaF75::wl_effect_for_mode(RgbMode::Static), 0x01);
+        assert_eq!(AulaF75::wl_effect_for_mode(RgbMode::Custom), 0x01);
+        assert_eq!(AulaF75::wl_effect_for_mode(RgbMode::Audio), 0x01);
+        // Перелив по палитре — это спектр-цикл, а не статика.
+        assert_eq!(AulaF75::wl_effect_for_mode(RgbMode::SpectrumCycle), 0x03);
+        // Остальные режимы не затронуты правкой.
+        assert_eq!(AulaF75::wl_effect_for_mode(RgbMode::Breathing), 0x06);
+        assert_eq!(AulaF75::wl_effect_for_mode(RgbMode::Wave), 0x10);
+    }
+
+    #[test]
+    fn check_led_config_signature_requires_5a_a5() {
+        // Валидный блок: 128 байт с подписью 5A A5 на конце.
+        let mut led = vec![0u8; 128];
+        led[126] = 0x5A;
+        led[127] = 0xA5;
+        assert!(AulaF75::check_led_config_signature(&led).is_ok());
+        // Без подписи — запись запрещена (риск обнулить весь конфиг).
+        let bad = vec![0u8; 128];
+        assert!(AulaF75::check_led_config_signature(&bad).is_err());
+        // Усечённый блок — тоже отказ.
+        assert!(AulaF75::check_led_config_signature(&[0u8; 10]).is_err());
     }
 }

@@ -29,12 +29,12 @@ pub fn build_screen_manager(
     panel.set_margin_bottom(8);
 
     // Заголовок
-    let title = gtk::Label::new(Some("Screen Manager — Ajazz AK820 Pro"));
+    let title = gtk::Label::new(Some("Экран клавиатуры — Ajazz AK820 Pro"));
     title.add_css_class("title-1");
     title.set_halign(gtk::Align::Start);
     panel.append(&title);
 
-    let subtitle = gtk::Label::new(Some("Загрузите изображение или GIF-анимацию для TFT-экрана 0.85\" (128×128)"));
+    let subtitle = gtk::Label::new(Some("Загрузите картинку или GIF-анимацию на экранчик клавиатуры (128×128)"));
     subtitle.add_css_class("dim-label");
     subtitle.set_halign(gtk::Align::Start);
     panel.append(&subtitle);

@@ -10,6 +10,15 @@
 // на рабочий 0xFF13 (journal 10.115); заводская base-раскладка захардкожена из
 // ассета `data/ajazz/rgb-keyboard.xml`. Keymap-запись/макросы/TFT по 0xFF68 —
 // задел (этап 3, journal 10.116).
+//
+// 2.4G-донгл (PID 0xFDFD, usage page 0xFF60, MI_03/input3, journal 10.118):
+// протокол РЕСИВЕРА, а НЕ wsclx AA-кадры 0xFF68 (они лишь эхо-подтверждались).
+// Кадр 32 б `[order, len, chunk#, data(≤28), checksum = sum[0..30] & 0xFF]`;
+// ресивер подтверждает кадр эхом первых 3 байт, BEGIN/COMMIT/SAVE НЕТ.
+// Orders: 0x05 подсветка, 0x07 сон, 0x0C часы, 0x20 батарея. Донгл НЕ релеит
+// payload ответов, поэтому запись без чтения (keymap/макросы/per-key) —
+// честный Unsupported. Источники: deddroid/ak820-rs (PROTOCOL.md, работает на
+// железе) + SignalRGB-плагин kshitizwagle (захват трафика офиц. ПО).
 
 use super::hid::HidBridge;
 use super::hidshell;
@@ -123,6 +132,43 @@ mod ctl {
     pub const LIVE_LEN: usize = 512;
     /// Сколько блоков по 64 б занимает таблица (576/64 = 9).
     pub const TABLE_BLOCKS: usize = TABLE_LEN / PACKET_LEN;
+}
+
+/// 2.4G-донгл (PID 0xFDFD, usage page 0xFF60, MI_03) — протокол ресивера.
+/// Кадр 32 байта: `[0]=order, [1]=len, [2]=chunk#, [3..31)=data (до 28 б),
+/// [31]=checksum` (сумма байтов [0..30] & 0xFF). Ресивер подтверждает кадр
+/// ЭХОМ ПЕРВЫХ ТРЁХ БАЙТОВ (order, len, chunk#); BEGIN/COMMIT/SAVE НЕТ.
+/// Это НЕ wsclx AA/55-кадры 0xFF68! Источники: deddroid/ak820-rs (PROTOCOL.md,
+/// работает на железе), SignalRGB-плагин kshitizwagle (захват трафика
+/// официального ПО), gha-projects/ak820-mac (дизасм DeviceDriver.exe).
+mod rf {
+    /// Длина кадра донгла (32 байта + report id 0x00 = 33 в hidapi).
+    pub const FRAME: usize = 32;
+    /// Полезная нагрузка одного кадра: байты [3..31).
+    pub const CHUNK: usize = 28;
+    /// Подсветка: 16 б `[mode, RGB, rainbow, brightness, speed, direction, AA 55]`.
+    pub const LIGHTING: u8 = 0x05;
+    /// Система (сон/блокировки/response): 16 б + `AA 55`.
+    /// На живой клавиатуре владельца order 0x07 НЕ применяет таймер сна
+    /// (проверено 2026-11-16) — константа оставлена как справочная.
+    #[allow(dead_code)]
+    pub const SYSTEM: u8 = 0x07;
+    /// Макросы: блок, дополненный до кратного 28; длина последнего = len % 28.
+    #[allow(dead_code)]
+    pub const MACROS: u8 = 0x09;
+    /// Часы: 16 б `[0, 1, 5A, YY, MM, DD, hh, mm, ss, 0, weekday, 0, 0, 0, AA 55]`.
+    pub const CLOCK: u8 = 0x0C;
+    /// Keymap base: 21 чанк × 28 б (576 б таблицы).
+    #[allow(dead_code)]
+    pub const KEYMAP: u8 = 0x10;
+    /// Keymap Fn: тот же формат, что KEYMAP.
+    #[allow(dead_code)]
+    pub const KEYMAP_FN: u8 = 0x12;
+    /// Per-key цвета (SignalRGB: пишет прямо во флеш, износ ~20k стираний).
+    #[allow(dead_code)]
+    pub const PER_KEY: u8 = 0x14;
+    /// Батарея: len 1, data [0]; ответ — эхо 3 б + проценты в байте [3].
+    pub const BATTERY: u8 = 0x20;
 }
 
 /// 128-LED матрица (один слот на клавишу keymap'а).
@@ -292,6 +338,63 @@ impl AjazzMode {
             RgbMode::Audio => Self::Custom,
         }
     }
+
+    /// Код аппаратного эффекта (0x00..0x13, тот же enum, что у wsclx) → режим.
+    /// Используется для `--hw-effect` на 2.4G-донгле, где коды эффектов
+    /// совпадают с таблицей wsclx (0x14+ не существуют).
+    fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0x00 => Self::Off,
+            0x01 => Self::Static,
+            0x02 => Self::SingleOn,
+            0x03 => Self::SingleOff,
+            0x04 => Self::Glittering,
+            0x05 => Self::Falling,
+            0x06 => Self::Colourful,
+            0x07 => Self::Breath,
+            0x08 => Self::Spectrum,
+            0x09 => Self::Outward,
+            0x0A => Self::Scrolling,
+            0x0B => Self::Rolling,
+            0x0C => Self::Rotating,
+            0x0D => Self::Explode,
+            0x0E => Self::Launch,
+            0x0F => Self::Ripples,
+            0x10 => Self::Flowing,
+            0x11 => Self::Pulsating,
+            0x12 => Self::Tilt,
+            0x13 => Self::Shuttle,
+            _ => return None,
+        })
+    }
+}
+
+/// Человекочитаемое имя аппаратного кода эффекта (таблица wsclx 0x00..0x13)
+/// — для вывода `kbc rgb --hw-effect` на 2.4G-донгле Ajazz.
+pub fn wl_mode_name(code: u8) -> Option<&'static str> {
+    Some(match code {
+        0x00 => "Off",
+        0x01 => "Static",
+        0x02 => "Single On",
+        0x03 => "Single Off",
+        0x04 => "Glittering",
+        0x05 => "Falling",
+        0x06 => "Colourful",
+        0x07 => "Breath",
+        0x08 => "Spectrum",
+        0x09 => "Outward",
+        0x0A => "Scrolling",
+        0x0B => "Rolling",
+        0x0C => "Rotating",
+        0x0D => "Explode",
+        0x0E => "Launch",
+        0x0F => "Ripples",
+        0x10 => "Flowing",
+        0x11 => "Pulsating",
+        0x12 => "Tilt",
+        0x13 => "Shuttle",
+        _ => return None,
+    })
 }
 
 /// Тип события макроса (wsclx macros.rs MacroActionKind).
@@ -478,6 +581,95 @@ impl AjazzAk820 {
         Ok(())
     }
 
+    // --- Транспорт 2.4G-донгла (usage page 0xFF60, MI_03) ------------------
+    // Протокол РЕСИВЕРА, не wsclx-кадры 0xFF68 (журнал 10.114/A1 + deddroid/
+    // ak820-rs): кадр 32 б `[order, len, chunk#, data(≤28), checksum]`,
+    // ресивер эхо-подтверждает первые 3 байта. См. комментарий модуля `rf`.
+
+    /// Донгл 2.4G? (PID 0xFDFD → ConnectionType::Wireless2_4G).
+    fn is_wireless(&self) -> bool {
+        self.bridge.connection == ConnectionType::Wireless2_4G
+    }
+
+    /// Собрать 32-байтный кадр ресивера: order, len, chunk#, data, checksum
+    /// (сумма байтов [0..30] & 0xFF на [31]).
+    fn build_rf_frame(order: u8, len: u8, chunk: u8, data: &[u8]) -> [u8; rf::FRAME] {
+        let mut f = [0u8; rf::FRAME];
+        f[0] = order;
+        f[1] = len;
+        f[2] = chunk;
+        let n = data.len().min(rf::CHUNK);
+        f[3..3 + n].copy_from_slice(&data[..n]);
+        let sum: u32 = f[..rf::FRAME - 1].iter().map(|&b| u32::from(b)).sum();
+        f[rf::FRAME - 1] = (sum & 0xFF) as u8;
+        f
+    }
+
+    /// Отправить кадр ресиверу (hidapi-буфер 33 б: report id 0x00 + 32-б кадр).
+    fn send_rf_frame(&self, frame: &[u8; rf::FRAME]) -> Result<()> {
+        let mut buf = [0u8; rf::FRAME + 1];
+        buf[0] = REPORT_ID;
+        buf[1..].copy_from_slice(frame);
+        self.bridge.send_output(&buf)?;
+        Ok(())
+    }
+
+    /// Прочитать эхо ресивера: первые 3 байта кадра (order, len, chunk#).
+    /// Возвращает полный 32-байтный эхо-кадр (для батареи — проценты в [3]).
+    fn read_rf_echo(&self, frame: &[u8; rf::FRAME], timeout_ms: i32) -> Result<Option<[u8; rf::FRAME]>> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        let mut buf = [0u8; rf::FRAME + 1];
+        loop {
+            let remaining_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(i32::MAX as u128) as i32;
+            if remaining_ms <= 0 {
+                return Ok(None);
+            }
+            let n = self.bridge.read_input(&mut buf, remaining_ms)?;
+            if n == 0 {
+                continue;
+            }
+            // hidapi кладёт report id первым байтом (0x00 для unnumbered).
+            let echo: [u8; rf::FRAME] = if n >= rf::FRAME + 1 && buf[0] == REPORT_ID {
+                buf[1..=rf::FRAME].try_into().unwrap()
+            } else if n >= rf::FRAME {
+                buf[..rf::FRAME].try_into().unwrap()
+            } else {
+                continue;
+            };
+            if echo[..3] != frame[..3] {
+                continue;
+            }
+            return Ok(Some(echo));
+        }
+    }
+
+    /// Отправить кадр и дождаться эха. Пробуем до 3 раз: первый ответ после
+    /// открытия канала может прийти со СЛЕДУЮЩИМ запросом (aklink DONGLE.md),
+    /// а т.к. кадр идентичен, «чужой» отложенный ack тоже засчитывается.
+    /// `Ok(None)` на третьей попытке — клавиатура спит на линке.
+    fn rf_send(
+        &self,
+        order: u8,
+        len: u8,
+        chunk: u8,
+        data: &[u8],
+    ) -> Result<Option<[u8; rf::FRAME]>> {
+        let frame = Self::build_rf_frame(order, len, chunk, data);
+        for attempt in 0..3 {
+            self.send_rf_frame(&frame)?;
+            std::thread::sleep(Duration::from_millis(5));
+            match self.read_rf_echo(&frame, DEFAULT_TIMEOUT_MS)? {
+                Some(echo) => return Ok(Some(echo)),
+                None if attempt < 2 => std::thread::sleep(Duration::from_millis(50)),
+                None => return Ok(None),
+            }
+        }
+        unreachable!()
+    }
+
     // --- Подсветка ----------------------------------------------------
 
     /// 64-байтный mode-data пакет (gohv protocol::mode_data_packet).
@@ -509,7 +701,11 @@ impl AjazzAk820 {
     /// Применить подсветку через рабочий control-канал 0xFF13 (feature reports).
     /// Полная транзакция (gohv usb.rs::transaction):
     /// START (0x18) → MODE (0x13) → mode-data → FINISH (0xF0).
+    /// На 2.4G-донгле 0xFF13 отсутствует — маршрутизируем в apply_lighting_wl.
     fn apply_lighting(&self, mode: AjazzMode) -> Result<()> {
+        if self.is_wireless() {
+            return self.apply_lighting_wl(mode);
+        }
         let dev = self.open_control()?;
 
         // 1) START
@@ -530,6 +726,61 @@ impl AjazzAk820 {
         self.send_ctl(&dev, &Self::control_packet(ctl::FINISH, 0x00, 0x01))?;
         std::thread::sleep(Duration::from_millis(100));
 
+        self.last_mode.set(mode as u8);
+        Ok(())
+    }
+
+    /// 16-байтный payload подсветки ресивера (deddroid/ak820-rs `rf_short` от
+    /// проводного lighting-пакета): первые 14 байт проводного пакета
+    /// `[mode, RGB, 0,0,0,0, rainbow, brightness, speed, direction, 0,0]` +
+    /// `AA 55` на [14..15]. На донгле ложится в кадр order 0x05.
+    fn rf_lighting_data(
+        mode: AjazzMode,
+        rgb: [u8; 3],
+        rainbow: bool,
+        brightness: u8,
+        speed: u8,
+        direction: u8,
+    ) -> [u8; 16] {
+        let mut d = [0u8; 16];
+        d[0] = mode as u8;
+        if mode != AjazzMode::Off {
+            d[1] = rgb[0];
+            d[2] = rgb[1];
+            d[3] = rgb[2];
+            d[8] = rainbow as u8;
+            d[9] = brightness.min(5);
+            d[10] = speed.min(5);
+            d[11] = direction;
+        }
+        d[14] = 0xAA;
+        d[15] = 0x55;
+        d
+    }
+
+    /// Применить подсветку через 2.4G-донгл: кадр ресивера order 0x05
+    /// (LIGHTING) с 16-байтным payload. Протокол — deddroid/ak820-rs
+    /// (работает на железе) + SignalRGB-захват официального ПО; БЕЗ
+    /// BEGIN/COMMIT/SAVE — ресивер подтверждает кадр эхом первых 3 байт.
+    fn apply_lighting_wl(&self, mode: AjazzMode) -> Result<()> {
+        let data = Self::rf_lighting_data(
+            mode,
+            self.last_color.get(),
+            false,
+            self.last_brightness.get(),
+            self.last_speed.get(),
+            0,
+        );
+        match self.rf_send(rf::LIGHTING, 16, 0, &data)? {
+            Some(_) => {}
+            None => {
+                return Err(Error::Protocol(
+                    "ресивер 2.4G не ответил: клавиатура спит на линке — \
+                     нажмите клавишу и повторите"
+                        .into(),
+                ))
+            }
+        }
         self.last_mode.set(mode as u8);
         Ok(())
     }
@@ -1062,6 +1313,11 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn is_connected(&self) -> bool {
+        // 2.4G-донгл: пинг батареи (order 0x20) — эхо первых 3 байт
+        // подтверждает, что транспорт жив (deddroid/ak820-rs `rf_echo`).
+        if self.is_wireless() {
+            return self.rf_send(rf::BATTERY, 1, 0, &[0]).is_ok();
+        }
         // Раньше проверялось через get_device_info() → канал 0xFF68, который на
         // живом железе таймаутит (журнал 10.106/10.112), поэтому всегда было
         // «нет». Проверяем через рабочий control-канал 0xFF13: если он открылся
@@ -1080,6 +1336,15 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn set_rgb_color(&self, key: KeyId, color: Color) -> Result<()> {
+        if self.is_wireless() {
+            // Донгл не релеит payload ответов (эхо пустое) — прочитать текущую
+            // per-key таблицу нельзя, а запись поверх чужого содержимого
+            // небезопасна (затёрли бы всю карту). Честный отказ.
+            return Err(Error::Unsupported(
+                "per-key подсветка по 2.4G: таблицу нельзя прочитать (донгл не релеит данные ответов); \
+                 используйте одноцветный режим (kbc rgb --mode static --color RRGGBB)",
+            ));
+        }
         // `KeyId` для Ajazz — HID usage (страница 0x07), а таблица цветов
         // адресуется собственными light-индексами (порядок другой!). Для CLI
         // `--color` этот путь недостижим (ранний выход в apply_rgb_persistent),
@@ -1174,6 +1439,15 @@ impl KeyboardDevice for AjazzAk820 {
     // --- Keymap / Fn ----------------------------------------------------
 
     fn remap_key(&self, from: KeyId, to: KeyAction) -> Result<()> {
+        if self.is_wireless() {
+            // Ремап — запись всей таблицы слоя: без чтения текущей раскладки
+            // (донгл не релеит payload) запись затёрла бы все слоты дефолтами.
+            // Честный отказ до захвата официального ПО.
+            return Err(Error::Unsupported(
+                "keymap по 2.4G: запись требует чтения текущей раскладки, а донгл не передаёт \
+                 данные ответов (эхо только заголовок)",
+            ));
+        }
         if from.0 as usize >= TOTAL_SLOTS {
             return Err(Error::Protocol("слот keymap вне диапазона 0..128".into()));
         }
@@ -1185,6 +1459,12 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn set_fn_layer(&self, layer: FnLayer) -> Result<()> {
+        if self.is_wireless() {
+            return Err(Error::Unsupported(
+                "Fn-слой по 2.4G: запись требует чтения текущего слоя, а донгл не передаёт \
+                 данные ответов (эхо только заголовок)",
+            ));
+        }
         let mut slots = self.get_fn_keymap()?;
         for (key, action) in &layer.bindings {
             if let Some(pos) = slots.iter_mut().find(|(s, _)| *s == key.0 as u8) {
@@ -1195,6 +1475,12 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn get_current_keymap(&self) -> Result<Keymap> {
+        if self.is_wireless() {
+            // Эхо донгла не содержит payload → карта клавиш недоступна.
+            return Err(Error::Unsupported(
+                "чтение keymap по 2.4G недоступно (донгл не релеит данные ответов)",
+            ));
+        }
         let mut base = Vec::new();
         for (slot, bytes) in self.get_base_keymap()? {
             if let Some(action) = Self::slot_decode(bytes) {
@@ -1213,6 +1499,11 @@ impl KeyboardDevice for AjazzAk820 {
     /// Текущий аппаратный эффект подсветки (GET_LED_EFFECT, 16-байтный
     /// payload в формате SET_LED_EFFECT; режим — первый байт). wsclx 10.60.
     fn get_current_effect(&self) -> Result<u8> {
+        if self.is_wireless() {
+            return Err(Error::Unsupported(
+                "чтение текущего эффекта по 2.4G недоступно (эхо донгла без payload)",
+            ));
+        }
         let payload = self.get(cmd::GET_LED_EFFECT, 16)?;
         Ok(payload.first().copied().unwrap_or(0))
     }
@@ -1220,6 +1511,14 @@ impl KeyboardDevice for AjazzAk820 {
     /// Полный заводской сброс (SET_FACTORY_RESET с аргументом 0xFF).
     /// wsclx 10.60: опциональный аргумент 0xFF = полный сброс.
     fn factory_reset(&self) -> Result<()> {
+        if self.is_wireless() {
+            // По deddroid/ak820-rs команды сброса у ресивера НЕТ (драйвер
+            // перезаписывает дефолтный профиль); на клавиатуре — зажать
+            // Fn+Space на 3–5 с. Честный отказ.
+            return Err(Error::Unsupported(
+                "сброс к заводским по 2.4G: команды нет (зажмите Fn+Space на 3–5 с на клавиатуре)",
+            ));
+        }
         self.set(cmd::SET_FACTORY_RESET, &[0xFF])
     }
 
@@ -1297,6 +1596,14 @@ impl KeyboardDevice for AjazzAk820 {
 
     /// Один кадр на TFT — частный случай анимации из одного кадра.
     fn set_screen_image(&self, frame: ScreenFrame) -> Result<()> {
+        if self.is_wireless() {
+            // У донгла нет интерфейсов 0xFF67/0xFF68 (TFT) — экран по 2.4G
+            // недоступен (aklink docs/DONGLE.md: iface 0..4 = kb/mouse/consumer/
+            // 0xFF60/0xFF59).
+            return Err(Error::Unsupported(
+                "TFT-экран по 2.4G недоступен (у донгла нет канала 0xFF67/0xFF68)",
+            ));
+        }
         self.set_screen_animation(&[frame], &[0])
     }
 
@@ -1322,6 +1629,33 @@ impl KeyboardDevice for AjazzAk820 {
             now.minute() as u8,
             now.second() as u8,
         );
+
+        // 2.4G-донгл: кадр ресивера order 0x0C (CLOCK), 16 б данных —
+        // как проводной пакет часов, но weekday в [10] (Sunday = 0)
+        // (deddroid/ak820-rs `rf_clock_data`).
+        if self.is_wireless() {
+            let weekday = now.weekday().num_days_from_sunday() as u8;
+            let mut data = [0u8; 16];
+            data[1] = 0x01;
+            data[2] = 0x5A;
+            data[3] = y as u8;
+            data[4] = mo;
+            data[5] = d;
+            data[6] = h;
+            data[7] = mi;
+            data[8] = s;
+            data[10] = weekday;
+            data[14] = 0xAA;
+            data[15] = 0x55;
+            return match self.rf_send(rf::CLOCK, 16, 0, &data)? {
+                Some(_) => Ok(()),
+                None => Err(Error::Protocol(
+                    "ресивер 2.4G не ответил: клавиатура спит на линке — \
+                     нажмите клавишу и повторите"
+                        .into(),
+                )),
+            };
+        }
 
         let dev = self.open_control()?;
         self.send_ctl(&dev, &Self::control_packet(ctl::START, 0x00, 0x01))?;
@@ -1372,6 +1706,15 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn set_macro(&self, id: u8, actions: Vec<KeyAction>) -> Result<()> {
+        if self.is_wireless() {
+            // Двухфазная запись макроса требует перестроения index-страницы
+            // (400 б) по текущему содержимому — без чтения (эхо пустое)
+            // перезапись небезопасна. Честный отказ.
+            return Err(Error::Unsupported(
+                "макросы по 2.4G: запись требует чтения index-страницы, а донгл не передаёт \
+                 данные ответов",
+            ));
+        }
         if id as usize >= 100 {
             return Err(Error::Protocol("макрос-слот вне диапазона 0..99".into()));
         }
@@ -1402,6 +1745,11 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn get_macros(&self) -> Result<Vec<Macro>> {
+        if self.is_wireless() {
+            return Err(Error::Unsupported(
+                "чтение макросов по 2.4G недоступно (донгл не релеит данные ответов)",
+            ));
+        }
         // wsclx read path (PROTOCOL.md «Macros — read path»): сначала index —
         // 400 байт (100 слотов × 4 байта LE/offset в firmware-памяти). Затем для
         // каждого слота с ненулевым offset: блок = заголовок 4 б (LE u16 —
@@ -1455,6 +1803,28 @@ impl KeyboardDevice for AjazzAk820 {
             self.bridge.vid, self.bridge.pid
         ));
         out.push_str(&format!("connection={}\n", self.bridge.connection.label()));
+
+        // 2.4G-донгл: read-only пинги протокола ресивера (order/len/chunk# +
+        // checksum). Команд чтения настроек нет; батарея (order 0x20) — живой
+        // read-only канал, возвращающий проценты в байте [3] эха.
+        if self.is_wireless() {
+            out.push_str(
+                "transport=0xFF60 (2.4G донгл, кадр [order,len,chunk#,data≤28,checksum])\n",
+            );
+            out.push_str("read_only=да (команд чтения настроек нет; только батарея)\n");
+            match self.rf_send(rf::BATTERY, 1, 0, &[0]) {
+                Ok(Some(echo)) => {
+                    out.push_str(&format!("battery_ping={}\n", hidshell::hex_dump(&echo)));
+                    out.push_str(&format!(
+                        "battery={}\n",
+                        echo.get(3).copied().unwrap_or(0)
+                    ));
+                }
+                Ok(None) => out.push_str("battery_ping_error=нет эха (клавиатура спит на линке)\n"),
+                Err(e) => out.push_str(&format!("battery_ping_error={e}\n")),
+            }
+            return Ok(out);
+        }
 
         // device-info (48 байт; [17] — заряд).
         match self.get(cmd::GET_DEVICE_INFO, 48) {
@@ -1555,6 +1925,17 @@ impl KeyboardDevice for AjazzAk820 {
     /// (0x17, byte2=0x01, b8=1) → data(!report id 0x00!, [8]=ступень, trailer AA 55).
     /// FINISH (0xF0) по gohv для сна НЕ нужен.
     fn set_sleep_timer(&self, seconds: u16) -> Result<()> {
+        if self.is_wireless() {
+            // Order 0x07 (SYSTEM) отправлялся по ресёрчу deddroid, но на живой
+            // клавиатуре владельца (2026-11-16) таймер НЕ применяется — эхо
+            // приходит, эффекта нет. Честный отказ: сон работает только по USB
+            // (0xFF13, подтверждено 10.112). Не перебираем варианты вслепую
+            // (политика «НЕ ГАДАТЬ»).
+            return Err(Error::Unsupported(
+                "таймер сна по 2.4G: команда (order 0x07) на этой ревизии не применяется \
+                 (проверено на железе 2026-11-16); сон работает при подключении по USB",
+            ));
+        }
         let step = if seconds == 0 {
             0
         } else if seconds <= 60 {
@@ -1581,6 +1962,15 @@ impl KeyboardDevice for AjazzAk820 {
     }
 
     fn get_battery_level(&self) -> Result<Option<u8>> {
+        // 2.4G-донгл: кадр order 0x20 (BATTERY), len 1, data [0]; ресивер
+        // отвечает эхом первых 3 байт + проценты в байте [3]
+        // (deddroid/ak820-rs `battery`; 0 = неизвестно, 1..=100 — проценты).
+        if self.is_wireless() {
+            return match self.rf_send(rf::BATTERY, 1, 0, &[0])? {
+                Some(echo) => Ok(echo.get(3).copied().filter(|v| (1..=100).contains(v))),
+                None => Ok(None), // спит на линке
+            };
+        }
         // Заряд читается по control-каналу 0xFF13 (Twyx22 `Device::battery`:
         // пакет `[1]=0x20 [2]=0x01` в 65-байтном буфере, ответ `0x20 0x01`,
         // уровень в 4-м байте, 0xFF = «на проводе»/100%, <=100 — проценты).
@@ -1659,6 +2049,34 @@ impl KeyboardDevice for AjazzAk820 {
         }
 
         self.apply_lighting(AjazzMode::from_our_mode(mode))?;
+        Ok(true)
+    }
+
+    fn apply_rgb_persistent_code(
+        &self,
+        hw_effect: u8,
+        color: Option<Color>,
+        brightness: u8,
+        speed: u8,
+    ) -> Result<bool> {
+        // Коды hw-эффектов (0x00..0x13) поддерживает только 2.4G-донгл:
+        // на USB кодировка эффектов своя (0xFF13-транзакция, mapping из
+        // RgbMode), а не wsclx-код.
+        if !self.is_wireless() {
+            return Ok(false);
+        }
+        let Some(mode) = AjazzMode::from_code(hw_effect) else {
+            return Err(Error::Protocol(format!(
+                "неизвестный код эффекта Ajazz: 0x{hw_effect:02X} (диапазон 0x00..0x13)"
+            )));
+        };
+        if let Some(c) = color {
+            self.last_color.set([c.r, c.g, c.b]);
+        }
+        self.last_brightness
+            .set((brightness as u16 * 5 / 255).min(5) as u8);
+        self.last_speed.set((speed as u16 * 5 / 255).min(5) as u8);
+        self.apply_lighting_wl(mode)?;
         Ok(true)
     }
 
@@ -1925,5 +2343,55 @@ mod tests {
         // Больше 128 пар — лишние отбрасываются, длина всё равно 512.
         let many: Vec<(u8, [u8; 3])> = (0..200).map(|i| (i as u8, red)).collect();
         assert_eq!(AjazzAk820::live_frame_from_pairs(&many).len(), ctl::LIVE_LEN);
+    }
+
+    #[test]
+    fn rf_frame_layout_and_checksum() {
+        // Кадр ресивера: [order, len, chunk#, data, checksum] — checksum =
+        // сумма [0..30] & 0xFF на [31] (deddroid/ak820-rs `rf_frames`).
+        let payload = [0x11, 0x22, 0x33];
+        let pkt = AjazzAk820::build_rf_frame(0x05, 16, 2, &payload);
+        assert_eq!(pkt.len(), 32);
+        assert_eq!(pkt[0], 0x05, "order");
+        assert_eq!(pkt[1], 16, "len");
+        assert_eq!(pkt[2], 2, "chunk#");
+        assert_eq!(&pkt[3..6], &payload, "data с offset 3");
+        let sum: u32 = pkt[..31].iter().map(|&b| u32::from(b)).sum();
+        assert_eq!(pkt[31], (sum & 0xFF) as u8, "checksum = сумма [0..30]");
+        // Данные больше 28 байт режутся, лишнего не пишется.
+        let big = [0xAAu8; 40];
+        let clipped = AjazzAk820::build_rf_frame(0x10, 28, 0, &big);
+        assert_eq!(&clipped[3..31], &[0xAAu8; 28], "чанк = ровно 28 б");
+    }
+
+    #[test]
+    fn rf_lighting_data_layout() {
+        // 16 б: mode, RGB, rainbow[8], brightness[9], speed[10], direction[11],
+        // AA 55 на [14..15] (deddroid `rf_short` от проводного пакета).
+        let p = AjazzAk820::rf_lighting_data(AjazzMode::Static, [0x10, 0x20, 0x30], false, 4, 3, 0);
+        assert_eq!(p[0], AjazzMode::Static as u8);
+        assert_eq!(&p[1..4], &[0x10, 0x20, 0x30]);
+        assert_eq!(p[8], 0, "rainbow");
+        assert_eq!(p[9], 4, "brightness");
+        assert_eq!(p[10], 3, "speed");
+        assert_eq!(p[11], 0, "direction");
+        assert_eq!(p[14], 0xAA, "делимитер AA");
+        assert_eq!(p[15], 0x55, "делимитер 55");
+        // Яркость/скорость ограничены 0..5.
+        let clamped = AjazzAk820::rf_lighting_data(AjazzMode::Static, [0; 3], false, 250, 9, 0);
+        assert_eq!(clamped[9], 5, "яркость clamped до 5");
+        assert_eq!(clamped[10], 5, "скорость clamped до 5");
+        // Off: RGB не заполняется (как deddroid `Lighting::packet`).
+        let off = AjazzAk820::rf_lighting_data(AjazzMode::Off, [0xAA; 3], false, 5, 0, 0);
+        assert_eq!(&off[1..4], &[0, 0, 0], "Off без RGB");
+    }
+
+    #[test]
+    fn wl_mode_names_and_codes_cover_full_range() {
+        assert_eq!(wl_mode_name(0x00), Some("Off"));
+        assert_eq!(wl_mode_name(0x13), Some("Shuttle"));
+        assert_eq!(wl_mode_name(0x14), None);
+        assert!(AjazzMode::from_code(0x01).is_some());
+        assert!(AjazzMode::from_code(0x14).is_none(), "коды >0x13 не существуют");
     }
 }

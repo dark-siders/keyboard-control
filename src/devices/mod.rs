@@ -350,6 +350,20 @@ pub const DEVICES: &[DeviceInfo] = &[
         has_encoder: true,
         has_indicators: false,
     },
+    // 2.4G-донгл (PID 0xFDFD, командный интерфейс usage page 0xFF60, MI_03).
+    // Протокол РЕСИВЕРА (32-байтные кадры `[order,len,chunk#,data≤28,checksum]`,
+    // эхо первых 3 байт): подсветка/сон/время/батарея — проверено живьём (10.118);
+    // per-key/keymap/макросы/TFT на 2.4G — честный Unsupported. См. AGENTS.md A1.
+    DeviceInfo {
+        model: "Ajazz AK820 Pro (2.4G Dongle)",
+        vid: 0x0C45,
+        pid: 0xFDFD,
+        connection: ConnectionType::Wireless2_4G,
+        layout: Layout::L75,
+        has_screen: false,
+        has_encoder: true,
+        has_indicators: false,
+    },
     // --- AULA F75 ---
     DeviceInfo {
         model: "AULA F75",
