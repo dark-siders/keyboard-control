@@ -8,8 +8,9 @@
 // На нашем железе 0xFF68 НЕ РАБОТАЕТ (таймаут, Output Report Count=4096 в
 // дескрипторе против 64-байтных пакетов firmware). Per-key и батарея переведены
 // на рабочий 0xFF13 (journal 10.115); заводская base-раскладка захардкожена из
-// ассета `data/ajazz/rgb-keyboard.xml`. Keymap-запись/макросы/TFT по 0xFF68 —
-// задел (этап 3, journal 10.116).
+// ассета `data/ajazz/rgb-keyboard.xml`. Макросы перенесены на 0xFF13 по рамке
+// официального DeviceDriver.exe V1.0.0.5 (`04 19` → `04 15` → `04 02`),
+// keymap-запись и TFT по 0xFF68 остаются заделом (journal 10.116).
 //
 // 2.4G-донгл (PID 0xFDFD, usage page 0xFF60, MI_03/input3, journal 10.118):
 // протокол РЕСИВЕРА, а НЕ wsclx AA-кадры 0xFF68 (они лишь эхо-подтверждались).
@@ -47,8 +48,6 @@ mod cmd {
     pub const GET_LED_EFFECT: u8 = 19;
     pub const GET_FN_KEY: u8 = 22;
     pub const GET_CUSTOM_LED_DATA: u8 = 20;
-    /// Чтение макросов (wsclx macros read path: index 400 б + data-блоки).
-    pub const GET_MACRO: u8 = 21;
     /// Заводская раскладка Fn-слоя, read-only (форма как у GET_FN_KEY).
     pub const GET_DEFAULT_FN_KEY_MATRIX: u8 = 28;
     /// Заводская раскладка базового слоя, read-only (форма как у GET_KEY).
@@ -68,7 +67,6 @@ mod cmd {
     /// per-key идёт live-кадрами `0x20`/таблицей `0x23` через 0xFF13.
     #[allow(dead_code)]
     pub const SET_CUSTOM_LED_DATA: u8 = 36;
-    pub const SET_MACRO: u8 = 37;
     pub const SET_FN_KEY: u8 = 38;
     /// Сброс к заводским настройкам. Опциональный аргумент `0xFF` = полный сброс.
     pub const SET_FACTORY_RESET: u8 = 15;
@@ -111,6 +109,10 @@ mod ctl {
     pub const LIVE_COLORS: u8 = 0x20;
     /// Чтение сохранённой таблицы цветов (Twyx22 `CMD_RGB_READ`).
     pub const RGB_READ: u8 = 0xF5;
+    /// Макросы: открыть сессию записи (official DeviceDriver.exe: `04 19`).
+    pub const MACRO_SESSION: u8 = 0x19;
+    /// Макросы: таблица index+data (official DeviceDriver.exe: `04 15`).
+    pub const MACRO_DATA: u8 = 0x15;
     /// Трейлер data-пакета (в последних двух байтах).
     pub const DELIM: (u8, u8) = (0xAA, 0x55);
     /// Usage page control-интерфейса, на котором живут эти команды.
@@ -426,6 +428,10 @@ pub struct AjazzAk820 {
     last_brightness: std::cell::Cell<u8>,
     last_speed: std::cell::Cell<u8>,
     last_color: std::cell::Cell<[u8; 3]>,
+    /// Кэш записанных макросов (100 слотов). Чтения макросов из прошивки нет,
+    /// поэтому при записи одного слота остальные сохраняются отсюда. Кэш живёт
+    /// до пересоздания объекта (перезапуска процесса).
+    macro_cache: std::sync::Mutex<Vec<Option<Vec<KeyAction>>>>,
 }
 
 impl AjazzAk820 {
@@ -437,6 +443,7 @@ impl AjazzAk820 {
             last_brightness: std::cell::Cell::new(0),
             last_speed: std::cell::Cell::new(0),
             last_color: std::cell::Cell::new([255, 255, 255]),
+            macro_cache: std::sync::Mutex::new(vec![None; 100]),
         }
     }
 
@@ -1111,6 +1118,69 @@ impl AjazzAk820 {
         )))
     }
 
+    const MACRO_SLOTS: usize = 100;
+    const MACRO_INDEX_LEN: usize = Self::MACRO_SLOTS * 4; // 400 б
+
+    /// Собрать таблицу макросов в формате официального драйвера
+    /// (`DeviceDriver.exe`, команда `04 15`; сверено с дизассемблером V1.0.0.5):
+    /// 100 слотов × 4 байта index (u16 LE смещения записи, пустой = FF FF FF FF),
+    /// затем записи: u16 LE `events*2`, 6 байт reserved, события по 4 б
+    /// `[delay_lo, delay_hi, key_code, wire_flags]`. Задержка минимум 10 мс.
+    fn build_macro_table(macros: &[Option<Vec<KeyAction>>]) -> Vec<u8> {
+        let mut table = vec![0xFFu8; Self::MACRO_INDEX_LEN];
+        let mut offset = Self::MACRO_INDEX_LEN;
+        for (id, actions) in macros.iter().enumerate().take(Self::MACRO_SLOTS) {
+            let Some(actions) = actions else { continue };
+            let events = Self::actions_from_keys(actions);
+            if events.is_empty() {
+                continue;
+            }
+            table[id * 4] = (offset & 0xFF) as u8;
+            table[id * 4 + 1] = ((offset >> 8) & 0xFF) as u8;
+            // Официальный драйвер пишет u16 LE = events*2 и 6 зарезервированных
+            // байт (заголовок записи занимает 8 байт).
+            let n = events.len();
+            let count = (n as u16) * 2;
+            table.extend_from_slice(&count.to_le_bytes());
+            table.extend_from_slice(&[0u8; 6]);
+            for (delay, code, family, press) in events {
+                let delay = delay.max(10);
+                table.extend_from_slice(&delay.to_le_bytes());
+                table.push(code);
+                table.push(family.wire_flags(press));
+            }
+            offset += 8 + n * 4;
+        }
+        // Официальный драйвер выравнивает длину до 64-байтных блоков, добавляя
+        // один блок, если длина кратна 64, иначе два; AA 55 — в конце.
+        let blocks = offset.div_ceil(ctl::PACKET_LEN)
+            + if offset % ctl::PACKET_LEN == 0 { 1 } else { 2 };
+        table.resize(blocks * ctl::PACKET_LEN, 0);
+        let len = table.len();
+        table[len - 2] = ctl::DELIM.0;
+        table[len - 1] = ctl::DELIM.1;
+        table
+    }
+
+    /// Записать таблицу макросов на рабочий control-канал 0xFF13:
+    /// `04 19` (сессия) → `04 15` (count = число 64-байтных блоков) → данные →
+    /// `04 02` (COMMIT). FINISH не отправляется: в официальном драйвере после
+    /// COMMIT сессия закрывается сама.
+    fn upload_macro_table(&self, table: &[u8]) -> Result<()> {
+        let dev = self.open_control()?;
+        let blocks = (table.len() / ctl::PACKET_LEN) as u16;
+        Self::ctl_exchange(&dev, &Self::control_packet(ctl::MACRO_SESSION, 0, 0))?;
+        Self::ctl_exchange(
+            &dev,
+            &Self::control_count(ctl::MACRO_DATA, 0, blocks),
+        )?;
+        std::thread::sleep(Duration::from_millis(30));
+        Self::ctl_data(&dev, table, Duration::from_millis(5))?;
+        std::thread::sleep(Duration::from_millis(30));
+        Self::ctl_exchange(&dev, &Self::control_packet(ctl::COMMIT, 0, 0))?;
+        Ok(())
+    }
+
     /// Индекс LED/слота подсветки по HID usage клавиши (страница 0x07).
     /// `None` — usage, которого нет в официальной раскладке.
     fn light_index_for_usage(usage: u16) -> Option<u8> {
@@ -1707,83 +1777,63 @@ impl KeyboardDevice for AjazzAk820 {
 
     fn set_macro(&self, id: u8, actions: Vec<KeyAction>) -> Result<()> {
         if self.is_wireless() {
-            // Двухфазная запись макроса требует перестроения index-страницы
-            // (400 б) по текущему содержимому — без чтения (эхо пустое)
-            // перезапись небезопасна. Честный отказ.
             return Err(Error::Unsupported(
-                "макросы по 2.4G: запись требует чтения index-страницы, а донгл не передаёт \
-                 данные ответов",
+                "макросы по 2.4G: донгл не релеит данные ответов и не поддерживает \
+                 загрузку таблицы макросов",
             ));
         }
-        if id as usize >= 100 {
+        if id as usize >= Self::MACRO_SLOTS {
             return Err(Error::Protocol("макрос-слот вне диапазона 0..99".into()));
         }
-        // Собираем index + data, как wsclx macros::encode_macros.
-        let events = Self::actions_from_keys(&actions);
-        if events.is_empty() {
-            return Ok(()); // пустой макрос не пишем
-        }
-        let header = ((events.len() as u16) * 2).to_le_bytes();
-        let mut data = Vec::new();
-        data.extend_from_slice(&header);
-        data.extend_from_slice(&[0, 0]);
-        for (delay, code, family, press) in &events {
-            data.extend_from_slice(&delay.to_le_bytes());
-            data.push(*code);
-            data.push(family.wire_flags(*press));
-        }
-        if data.len() > 320 {
+        // Официальный драйвер ограничивает запись одного макроса 320 байтами
+        // (8-байтный заголовок + события по 4 байта с учётом press/release).
+        if Self::actions_from_keys(&actions).len() * 4 + 8 > 320 {
             return Err(Error::Protocol("макрос превышает лимит 320 байт".into()));
         }
-
-        // Двухфазная запись: index (без commit) → data (с commit).
-        let mut index = vec![0u8; 100 * 4];
-        index[id as usize * 4..id as usize * 4 + 4].copy_from_slice(&400u32.to_le_bytes());
-        self.set_many_at(cmd::SET_MACRO, 0, &index, false)?;
-        self.set_many_at(cmd::SET_MACRO, 400, &data, true)?;
-        Ok(())
+        // Прошивка не отдаёт таблицу макросов на чтение, поэтому храним уже
+        // записанные слоты в кэше и пересобираем ВСЮ таблицу при каждой записи —
+        // иначе запись одного макроса стёрла бы остальные 99.
+        let mut cache = self.macro_cache.lock().map_err(|_| {
+            Error::Protocol("кэш макросов повреждён (mutex poisoned)".into())
+        })?;
+        cache[id as usize] = if actions.is_empty() {
+            None
+        } else {
+            Some(actions)
+        };
+        let table = Self::build_macro_table(&cache);
+        self.upload_macro_table(&table)
     }
 
     fn get_macros(&self) -> Result<Vec<Macro>> {
-        if self.is_wireless() {
-            return Err(Error::Unsupported(
-                "чтение макросов по 2.4G недоступно (донгл не релеит данные ответов)",
-            ));
-        }
-        // wsclx read path (PROTOCOL.md «Macros — read path»): сначала index —
-        // 400 байт (100 слотов × 4 байта LE/offset в firmware-памяти). Затем для
-        // каждого слота с ненулевым offset: блок = заголовок 4 б (LE u16 —
-        // событий×2, два байта reserved) + события по 4 б (delay LE u16,
-        // key_code, flags: bit7=press, bits6..4=actionType). Декодируем в
-        // MacroEvent как есть (family = actionType, задержки внутри макроса).
-        let index = self.get_many(cmd::GET_MACRO, 400)?;
+        // Прошивка НЕ отдаёт макросы на чтение (wsclx-путь 0xFF68 у нас мёртв,
+        // а по 0xFF13 команды чтения макросов нет). Возвращаем кэш записанных
+        // этим процессом слотов; пустые слоты не включаем. Важно: это НЕ дамп
+        // содержимого клавиатуры — после перезапуска кэш пуст.
+        let cache = self.macro_cache.lock().map_err(|_| {
+            Error::Protocol("кэш макросов повреждён (mutex poisoned)".into())
+        })?;
         let mut macros = Vec::new();
-        for (id, slot) in index.chunks_exact(4).enumerate() {
-            let offset = u32::from_le_bytes(slot.try_into().unwrap()) as usize;
-            if offset == 0 {
-                continue; // слот пуст
-            }
-            let header = self.get_many_at(cmd::GET_MACRO, offset as u16, 4)?;
-            if header.len() < 4 {
+        for (id, slot) in cache.iter().enumerate() {
+            let Some(actions) = slot else { continue };
+            let events = Self::actions_from_keys(actions);
+            if events.is_empty() {
                 continue;
-            }
-            let count = u16::from_le_bytes([header[0], header[1]]) as usize / 2;
-            if count == 0 {
-                continue;
-            }
-            let payload = self.get_many_at(cmd::GET_MACRO, offset as u16 + 4, count * 4)?;
-            let mut events = Vec::with_capacity(count);
-            for chunk in payload.chunks_exact(4) {
-                events.push(MacroEvent {
-                    delay_ms: u16::from_le_bytes([chunk[0], chunk[1]]),
-                    key_code: chunk[2],
-                    family: (chunk[3] >> 4) & 0x07,
-                    is_press: chunk[3] & 0x80 != 0,
-                });
             }
             macros.push(Macro {
                 id: id as u8,
-                events,
+                events: events
+                    .into_iter()
+                    .map(|(delay, code, family, press)| MacroEvent {
+                        delay_ms: delay.max(10),
+                        key_code: code,
+                        family: match family {
+                            MacroFamily::Keyboard => 3,
+                            MacroFamily::Mouse => 1,
+                        },
+                        is_press: press,
+                    })
+                    .collect(),
             });
         }
         Ok(macros)
@@ -1875,13 +1925,11 @@ impl KeyboardDevice for AjazzAk820 {
             }
         }
 
-        // Макросы: index (400 б) + декодированные события.
-        match self.get_many(cmd::GET_MACRO, 400) {
-            Ok(b) => out.push_str(&format!("macros_index={}\n", hidshell::hex_dump(&b))),
-            Err(e) => out.push_str(&format!("macros_index_error={e}\n")),
-        }
+        // Макросы: прошивка не отдаёт их на чтение (0xFF68 у нас мёртв, чтения
+        // по 0xFF13 нет). Показываем только кэш текущего процесса.
         match self.get_macros() {
             Ok(ms) => {
+                out.push_str("macros_source=кэш текущего процесса (прошивка не читается)\n");
                 out.push_str(&format!("macros_count={}\n", ms.len()));
                 for m in &ms {
                     let ev: Vec<String> = m
@@ -2384,6 +2432,40 @@ mod tests {
         // Off: RGB не заполняется (как deddroid `Lighting::packet`).
         let off = AjazzAk820::rf_lighting_data(AjazzMode::Off, [0xAA; 3], false, 5, 0, 0);
         assert_eq!(&off[1..4], &[0, 0, 0], "Off без RGB");
+    }
+
+    #[test]
+    fn macro_table_layout() {
+        let mut macros: Vec<Option<Vec<KeyAction>>> = vec![None; 100];
+        macros[2] = Some(vec![KeyAction::Press(4), KeyAction::Press(5)]);
+        macros[7] = Some(vec![KeyAction::Press(6)]);
+        let table = AjazzAk820::build_macro_table(&macros);
+
+        // 100×4 index + записи + выравнивание до 64-байтных блоков + AA 55.
+        assert_eq!(table.len() % ctl::PACKET_LEN, 0, "таблица кратна 64 б");
+        assert_eq!(&table[0..4], &[0xFF; 4], "пустой слот = FF FF FF FF");
+        assert_eq!(&table[4..8], &[0xFF; 4], "пустой слот 1 = FF FF FF FF");
+
+        // Слот 2: offset = 400 (0x0190), events*2 = 8 (4 события × 2).
+        assert_eq!(&table[2 * 4..2 * 4 + 2], &400u16.to_le_bytes());
+        assert_eq!(&table[2 * 4 + 2..2 * 4 + 4], &[0xFF, 0xFF], "upper offset");
+        assert_eq!(&table[400..402], &8u16.to_le_bytes(), "events*2");
+        assert_eq!(&table[402..408], &[0; 6], "reserved");
+        // press(4) + release(4), press(5) + release(5), delay = max(10).
+        assert_eq!(&table[408..412], &[10, 0, 4, 0xB0]);
+        assert_eq!(&table[412..416], &[10, 0, 4, 0x30]);
+        assert_eq!(&table[416..420], &[10, 0, 5, 0xB0]);
+        assert_eq!(&table[420..424], &[10, 0, 5, 0x30]);
+        // Следующий слот начинается сразу после записи слота 2.
+        assert_eq!(&table[7 * 4..7 * 4 + 2], &424u16.to_le_bytes());
+        assert_eq!(&table[424..426], &4u16.to_le_bytes(), "events*2 слота 7");
+
+        let len = table.len();
+        assert_eq!(
+            &table[len - 2..],
+            &[ctl::DELIM.0, ctl::DELIM.1],
+            "трейлер AA 55"
+        );
     }
 
     #[test]

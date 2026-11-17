@@ -10,6 +10,7 @@
 //   kbc reset <vid:pid>               — сброс раскладки к заводской (Default+FN1)
 //   kbc macro <vid:pid> --record 1    — начать запись макроса (Ajazz)
 //   kbc macro <vid:pid> --stop        — остановить запись макроса
+//   kbc macro <vid:pid> --set 0 --keys 04,1E,2C — прошить макрос (Ajazz, USB)
 //   kbc time  <vid:pid>
 //   kbc battery <vid:pid>
 //   kbc set-poll <vid:pid> 1000
@@ -440,6 +441,12 @@ struct MacroArgs {
     /// Остановить запись макроса
     #[arg(long)]
     stop: bool,
+    /// Прошить макрос N (0..99) из --keys (Ajazz AK820 Pro, USB)
+    #[arg(long, value_name = "N")]
+    set: Option<u8>,
+    /// Клавиши макроса: HID usage в hex через запятую, например 04,1E,2C
+    #[arg(long, value_name = "04,1E,...")]
+    keys: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -1069,8 +1076,44 @@ fn cmd_reset(device: &str) -> anyhow::Result<u8> {
 }
 
 fn cmd_macro(a: MacroArgs) -> anyhow::Result<u8> {
+    use keyboard_center::types::KeyAction;
+
     let (vid, pid) = parse_id(&a.device)?;
+    if a.set.is_some() && (a.record.is_some() || a.stop) {
+        return Err(anyhow::anyhow!("--set нельзя сочетать с --record/--stop"));
+    }
     let dev = open(vid, pid)?;
+    if let Some(id) = a.set {
+        let raw = a
+            .keys
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("для --set укажите --keys 04,1E,2C"))?;
+        let actions: Vec<KeyAction> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| parse_usage(s).map(KeyAction::Press))
+            .collect::<anyhow::Result<_>>()?;
+        if actions.is_empty() {
+            return Err(anyhow::anyhow!("--keys: список клавиш пуст"));
+        }
+        println!(
+            "внимание: прошивка не отдаёт макросы на чтение — слоты, не записанные \
+             в этом процессе, будут очищены"
+        );
+        dev.set_macro(id, actions.clone())?;
+        println!(
+            "макрос {id} записан ({} клавиш: {})",
+            actions.len(),
+            actions
+                .iter()
+                .map(action_short)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!("записанные в этом процессе слоты сохранены в таблице");
+        return Ok(0);
+    }
     if let Some(id) = a.record {
         dev.record_macro(id)?;
         println!("запись макроса {id} начата — нажмите клавиши на клавиатуре, затем остановите (--stop)");
@@ -1081,7 +1124,7 @@ fn cmd_macro(a: MacroArgs) -> anyhow::Result<u8> {
         println!("запись макроса остановлена");
         return Ok(0);
     }
-    Err(anyhow::anyhow!("укажите --record <N> или --stop"))
+    Err(anyhow::anyhow!("укажите --set <N> --keys ..., --record <N> или --stop"))
 }
 
 fn cmd_profile(p: ProfileArgs) -> anyhow::Result<u8> {
