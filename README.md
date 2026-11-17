@@ -5,7 +5,7 @@
 <h1 align="center">⌨️ Keyboard-Center ⌨️</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.6.2-blue?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Version-0.6.3-blue?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/OS-Linux-blue?logo=linux&logoColor=white&style=flat-square" alt="OS">
   <img src="https://img.shields.io/badge/GUI-GTK4_%2B_Libadwaita-orange?style=flat-square" alt="GUI">
   <img src="https://img.shields.io/badge/Lang-Rust-red?logo=rust&logoColor=white&style=flat-square" alt="Rust">
@@ -32,7 +32,7 @@
 |---|---|---|---|
 | **AULA F75** | ✅ | ✅ | есть железо, полный рабочий сценарий |
 | **AULA F99** | ✅ | ✅ | проверено на чужом железе; ремап/индикаторы/poll/debounce/sleep — открыто |
-| **Ajazz AK820 Pro** | ✅ подсветка/время/сон | ✅ донгл `0C45:FDFD`: подсветка/эффекты/время/батарея | per-key и заряд ждут живой проверки; TFT на ревизии `0C45:8009` отсутствует |
+| **Ajazz AK820 Pro** | ✅ подсветка/время/сон; 🟡 TFT-загрузка | ✅ донгл `0C45:FDFD`: подсветка/эффекты/время/батарея | per-key и заряд ждут живой проверки; TFT портирован по hardware-verified протоколу (`0C45:800A`), на `0C45:8009` ждёт live-теста |
 
 Частые идентификаторы: `258A:010C` (F75/F99 USB), `3554:FA09` (общий 2.4G-ресивер), `0C45:8009` / `0C45:FDFD` (Ajazz USB/донгл). VID/PID зависят от ревизии — полная таблица и статус в [docs/devices.md](docs/devices.md).
 
@@ -45,7 +45,7 @@
 - **Однотонный цвет на 2.4G** — Solid применяется ровным цветом (с 0.6.1, проверено на железе), перед записью проверяется подпись конфига `5A A5`.
 - **Батарея** — процент заряда через 2.4G-ресивер; у Ajazz — через USB/донгл (реализовано, живой проверки ждёт).
 - **Ремап клавиш** — F75 по USB: Default/FN1, клик-редактор в GUI и `kbc remap` (Press/Media/Modifier).
-- **Экран Ajazz** — загрузка GIF/картинки на TFT и синхронизация времени (на доступной ревизии TFT-интерфейса нет).
+- **Экран Ajazz** — загрузка картинки/GIF на TFT (control `0xFF13` + data `0xFF68`, ACK на чанк) и синхронизация времени; протокол подтверждён на ревизии `0C45:800A`, на `0C45:8009` — без live-проверки.
 - **Пресеты и демон** — TOML-пресеты, фоновый `kbc daemon` (в т.ч. systemd user unit), автозапуск аудио-визуализации без GUI.
 - **Трей (SNI)** — крестик сворачивает окно, выход — из меню трея, с автосохранением. Отключается через `KEYBOARD_CENTER_NO_TRAY=1`.
 
@@ -97,7 +97,7 @@ kbc daemon --preset cava                                # аудио-столб�
 
 - **USB-батареи у AULA нет** — канал заряда работает только через 2.4G; BT закрыт.
 - **Статика по USB** — host-эффект (живёт, пока запущено приложение); в память пишутся аппаратные эффекты. На 2.4G Solid теперь пишется в память.
-- **Ajazz** — per-key и заряд реализованы по реверсу, но живой проверки ждут; макросы записываются через `0xFF13` (`kbc macro --set`, пока не проверено на железе); keymap не переведён с мёртвого `0xFF68`; сон по 2.4G не применяется (`Unsupported`).
+- **Ajazz** — per-key и заряд реализованы по реверсу, но живой проверки ждут; макросы записываются через `0xFF13` (`kbc macro --set`, пока не проверено на железе); keymap не переведён с SET-канала на `0xFF13`; TFT (`0xFF13` + `0xFF68`) проверен на `0C45:800A`, на ревизии `0C45:8009` живой записи ещё не было; сон по 2.4G не применяется (`Unsupported`).
 - **F99** — ремап и дополнительные каналы (poll/debounce/sleep) пока не доведены.
 - **Энкодер** — у F75 и Ajazz firmware-fixed, у F99 ролика нет; GUI не предлагает его настройку.
 

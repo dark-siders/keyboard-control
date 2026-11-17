@@ -27,8 +27,8 @@ kbc remap 258A:010C --key 68 --to 2E --layer 1   # правим FN1-слой (в
 kbc remap 258A:010C --key 73 --modifier 1     # ВНИМАНИЕ: тест только на неиспользованных слотах! После теста — readback (--list)
 kbc reset 258A:010C                           # сбросить раскладку к заводской (Default + FN1) — как «Сбросить всё» в GUI
 # --- экран Ajazz AK820 Pro (TFT) и макросы ---
-# На ревизии 0C45:8009 интерфейса TFT (0xFF67) нет — screen вернёт Unsupported.
-kbc screen 0C45:8009 --image anim.gif         # картинка или GIF (анимация уходит целиком, все кадры)
+# TFT: control 0xFF13 + data 0xFF68, ACK на каждый чанк (протокол Hardware-verified на 0C45:800A, PR #2).
+kbc screen 0C45:8009 --image anim.gif         # картинка или GIF до 20 кадров (анимация уходит целиком)
 kbc screen 0C45:8009 --brightness 200         # яркость TFT-экрана (можно вместе с --image)
 kbc macro 0C45:8009 --set 0 --keys 04,05,06   # прошить макрос №0: «A», «B», «C» (press+release)
 kbc macro 0C45:8009 --record 1                # начать запись макроса №1 (набираем клавиши на клавиатуре)
@@ -70,7 +70,7 @@ kbc raw 3554:FA09 output-send "13 05 00 ..."
 | `kbc list` | список подключённых устройств | — |
 | `kbc info <VID:PID>` | детали устройства (тип, модель) | — |
 | `kbc rgb <VID:PID>` | подсветка: host-эффект (USB) или запись в память ресивера (2.4G) | `--mode` (вкл. `audio` — спектр системного звука, USB-only), `--style row\|bars` (аудио), `--color RRGGBB`, `--brightness`, `--speed`, `--hold ms`, `--light-on`, `--light-off` (2.4G), `--hw-effect HEX`*, `--color-low RRGGBB`, `--color-high RRGGBB`, `--sensitivity 0.1..2.0` (аудио)* |
-| `kbc screen <VID:PID>` | TFT-экран Ajazz: кадр/GIF-анимация и/или яркость | `--image <path>` (GIF → анимация целиком), `--brightness 0..255` |
+| `kbc screen <VID:PID>` | TFT-экран Ajazz: кадр/GIF-анимация и/или яркость | `--image <path>` (картинка или GIF до 20 кадров), `--brightness 0..255` |
 | `kbc time <VID:PID>` | синхронизация времени ПК с экраном (Ajazz) | — |
 | `kbc battery <VID:PID>` | заряд 0..100% (только 2.4G; USB/BT — инфо-сообщение) | — |
 | `kbc save <VID:PID>` | эффект/конфиг в память клавиатуры (держится без приложения) | `--effect HEX`, `--brightness`, `--speed` |

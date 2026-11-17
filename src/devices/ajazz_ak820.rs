@@ -4,13 +4,18 @@
 // barneygaumer-dot/ajazz820p_utils, fpb/ajazz-ak820-pro.
 // Подсветка и время/сон — через рабочий control-канал 0xFF13 (feature reports,
 // journal 10.106: подтверждён на нашем железе 0C45:8009).
-// TFT-экран — через 0xFF67 (bulk/interrupt, journal 10.60/10.61).
-// На нашем железе 0xFF68 НЕ РАБОТАЕТ (таймаут, Output Report Count=4096 в
-// дескрипторе против 64-байтных пакетов firmware). Per-key и батарея переведены
-// на рабочий 0xFF13 (journal 10.115); заводская base-раскладка захардкожена из
-// ассета `data/ajazz/rgb-keyboard.xml`. Макросы перенесены на 0xFF13 по рамке
-// официального DeviceDriver.exe V1.0.0.5 (`04 19` → `04 15` → `04 02`),
-// keymap-запись и TFT по 0xFF68 остаются заделом (journal 10.116).
+// TFT-экран — ДВА канала (2026-11-17, PR Beattrey/ajazz-ak820-config#2):
+// control 0xFF13 (`04 18` START → `04 72` IMAGE_CFG → `04 F0`/`04 02`) и
+// data 0xFF68 (output-репорты ровно 4096 б + обязательный ACK `01 5A 02 …`).
+// Прежний поиск `0xFF67` был неверным: этого интерфейса нет ни на 8009, ни в
+// референсах; `0xFF68` «не отвечал» только на GET — это write-only data-канал.
+// Статика: без 256-байтного заголовка, sub=0x02, 9×4096 б, FINISH 0xF0.
+// Анимация: 256-байтный заголовок, sub=0x03, SAVE 0x02 (без FINISH).
+// Железно подтверждено на ревизии 0C45:800A (PR #2); наша 0C45:8009 ожидает
+// живой проверки. Per-key и батарея — на 0xFF13 (журнал 10.115); заводская
+// base-раскладка захардкожена из ассета `data/ajazz/rgb-keyboard.xml`. Макросы
+// перенесены на 0xFF13 по рамке официального DeviceDriver.exe V1.0.0.5
+// (`04 19` → `04 15` → `04 02`, журнал 10.121); keymap-запись — задел.
 //
 // 2.4G-донгл (PID 0xFDFD, usage page 0xFF60, MI_03/input3, journal 10.118):
 // протокол РЕСИВЕРА, а НЕ wsclx AA-кадры 0xFF68 (они лишь эхо-подтверждались).
@@ -74,7 +79,11 @@ mod cmd {
     /// cmd известно из wsclx PROTOCOL.md) — задел.
     #[allow(dead_code)]
     pub const SET_LED_BOOT_ANIMATION: u8 = 64;
+    /// Исторические константы wsclx-канала 0xFF67 — после порта TFT на
+    /// control 0xFF13 + data 0xFF68 не используются (журнал 10.122).
+    #[allow(dead_code)]
     pub const SET_TFT_USER_ANIMATION: u8 = 80;
+    #[allow(dead_code)]
     pub const SET_TFT_BUILT_IN_INDEX: u8 = 81;
     /// TFT-ack: прошивка подтверждает каждый загруженный чанк командой 65,
     /// а НЕ 80 (wsclx PROTOCOL.md; при синхронном чтении ответов фильтровать
@@ -113,6 +122,9 @@ mod ctl {
     pub const MACRO_SESSION: u8 = 0x19;
     /// Макросы: таблица index+data (official DeviceDriver.exe: `04 15`).
     pub const MACRO_DATA: u8 = 0x15;
+    /// Загрузка картинки на TFT (gohv `CMD_IMAGE`; Beattrey IMAGE_CFG):
+    /// `04 72 <sub>`, sub=0x02 — статика, sub=0x03 — анимация, count в [8..10].
+    pub const IMAGE: u8 = 0x72;
     /// Трейлер data-пакета (в последних двух байтах).
     pub const DELIM: (u8, u8) = (0xAA, 0x55);
     /// Usage page control-интерфейса, на котором живут эти команды.
@@ -134,6 +146,34 @@ mod ctl {
     pub const LIVE_LEN: usize = 512;
     /// Сколько блоков по 64 б занимает таблица (576/64 = 9).
     pub const TABLE_BLOCKS: usize = TABLE_LEN / PACKET_LEN;
+}
+
+/// TFT-экран 128×128 (протокол gohv/AKS075, hardware-verified на 0C45:800A
+/// в PR Beattrey/ajazz-ak820-config#2). Управление идёт по `ctl`, пиксели —
+/// output-репортами data-интерфейса 0xFF68.
+mod tft {
+    /// usage page data-интерфейса (EP3 OUT, interface 2).
+    pub const DATA_USAGE_PAGE: u16 = 0xFF68;
+    /// Preferred interface number data-канала.
+    pub const DATA_INTERFACE: i32 = 2;
+    /// Размер output-репорта объявлен в дескрипторе (4096 б). Именно он,
+    /// а не 4123 из gohv: WebHID на железе отверг 4123, 4096 работает.
+    pub const CHUNK_SIZE: usize = 4096;
+    /// 32768 б пикселей + 4096 б 0xFF-пада = 9 чанков на кадр (как в gohv).
+    pub const CHUNKS_PER_FRAME: usize = 9;
+    /// 128×128 RGB565 = 32768 б.
+    pub const FRAME_BYTES: usize = 128 * 128 * 2;
+    /// Заголовок анимации (frame count + задержки + 0xFF-пад).
+    pub const HEADER_BYTES: usize = 256;
+    /// консервативный лимит PR #2 (прошивка поддерживает больше, но первые
+    /// загрузки маленькими кадрами безопаснее).
+    pub const MAX_FRAMES: usize = 20;
+    /// Таймаут ожидания ACK одного чанка (300 мс в AKS075/PR #2).
+    pub const ACK_TIMEOUT_MS: i32 = 300;
+    /// sub-команда IMAGE_CFG: статика (без 256-б заголовка, FINISH).
+    pub const SUB_STATIC: u8 = 0x02;
+    /// sub-команда IMAGE_CFG: анимация (256-б заголовок, SAVE).
+    pub const SUB_ANIMATED: u8 = 0x03;
 }
 
 /// 2.4G-донгл (PID 0xFDFD, usage page 0xFF60, MI_03) — протокол ресивера.
@@ -1288,79 +1328,181 @@ impl AjazzAk820 {
         d
     }
 
-    /// Загрузить payload (256-байтный заголовок + пиксельные кадры LE) на
-    /// TFT-интерфейс 0xFF67 чанками по 4096, затем переключить дисплей на
-    /// user-содержимое. Общий хвост для `set_screen_image`/`set_screen_animation`.
-    fn upload_tft_payload(&self, payload: &[u8]) -> Result<()> {
-        if payload.len() < 256 || payload.len() % 2 != 0 {
-            return Err(Error::Protocol(
-                "TFT payload: ожидается заголовок 256 б + чётные пиксельные данные".into(),
-            ));
-        }
-        // Открываем интерфейс TFT-загрузки (usage page 0xFF67, большой output report).
+    /// Открыть data-интерфейс TFT (usage page 0xFF68, предпочтительно iface 2)
+    /// свежим HID-дескриптором. Это НЕ control-канал: он write-only, output
+    /// report объявлен длиной 4096 байт (PR #2, hardware-verified на 800A).
+    fn open_tft_data(&self) -> Result<hidapi::HidDevice> {
         let api = hidapi::HidApi::new().map_err(Error::from)?;
-        let tft = api.device_list().find(|d| {
-            d.vendor_id() == self.bridge.vid
-                && d.product_id() == self.bridge.pid
-                && d.usage_page() == 0xFF67
-        });
-        let dev = match tft {
-            Some(info) => {
-                let path = std::ffi::CString::new(info.path().to_bytes().to_vec())
-                    .map_err(|_| Error::Protocol("TFT путь содержит NUL".into()))?;
-                api.open_path(&path).map_err(Error::from)?
+        let mut best_rank = 0u8;
+        let mut best_path: Option<Vec<u8>> = None;
+        for d in api.device_list() {
+            if d.vendor_id() != self.bridge.vid || d.product_id() != self.bridge.pid {
+                continue;
             }
-            None => return Err(Error::Protocol("интерфейс 0xFF67 (TFT) не найден".into())),
-        };
+            let p = d.path();
+            if p.to_bytes().is_empty() {
+                continue;
+            }
+            let rank = if d.usage_page() == tft::DATA_USAGE_PAGE {
+                2
+            } else if d.interface_number() == tft::DATA_INTERFACE {
+                1
+            } else {
+                0
+            };
+            if rank > best_rank {
+                best_rank = rank;
+                best_path = Some(p.to_bytes().to_vec());
+            }
+        }
+        let path = best_path.ok_or_else(|| {
+            Error::Protocol(format!(
+                "data-интерфейс TFT (usage 0x{:04X} / iface {}) не найден",
+                tft::DATA_USAGE_PAGE,
+                tft::DATA_INTERFACE
+            ))
+        })?;
+        let cstr = std::ffi::CString::new(path)
+            .map_err(|_| Error::Protocol("TFT путь содержит NUL".into()))?;
+        api.open_path(&cstr).map_err(Error::from)
+    }
 
-        const TFT_REPORT_LEN: usize = 4104;
-        const TFT_PAYLOAD_LEN: usize = TFT_REPORT_LEN - HEADER_LEN; // 4096
-        let total_chunks = payload.len().div_ceil(TFT_PAYLOAD_LEN).max(1);
-        let mut report = vec![0u8; 1 + TFT_REPORT_LEN];
-        for i in 0..total_chunks {
-            let start = i * TFT_PAYLOAD_LEN;
-            let end = (start + TFT_PAYLOAD_LEN).min(payload.len());
-            // Специфический per-chunk заголовок TFT: [0xAA, 80, idx_lo, idx_hi, total_lo, total_hi, 0x50, 0x06].
-            report[0] = REPORT_ID;
-            report[1] = MAGIC_OUTGOING;
-            report[2] = cmd::SET_TFT_USER_ANIMATION;
-            report[3] = (i & 0xFF) as u8;
-            report[4] = ((i >> 8) & 0xFF) as u8;
-            report[5] = (total_chunks & 0xFF) as u8;
-            report[6] = ((total_chunks >> 8) & 0xFF) as u8;
-            report[7] = 0x50;
-            report[8] = 0x06;
-            report[9..9 + (end - start)].copy_from_slice(&payload[start..end]);
-            dev.write(&report).map_err(Error::from)?;
-            // Ack-фильтр (wsclx 10.60): прошивка подтверждает каждый загруженный
-            // чанк командой 65 (SET_LED_USER_ANIMATION), а НЕ 80. Читаем ответ
-            // неблокирующе (короткий таймаут, 2 попытки): если 65 получен —
-            // чанк принят; если ответа нет — продолжаем (fire-and-forget),
-            // чтобы не вешать синхронную загрузку на живом железе без ack.
-            for _ in 0..2 {
-                let mut ack = vec![0u8; 1 + TFT_REPORT_LEN];
-                let n = match dev.read_timeout(&mut ack, 150) {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                // Смещение отчёт id: [0]=report id(0), [1]=0xAA… либо [0]=0x55.
-                let cmd_byte = if ack.first() == Some(&MAGIC_INCOMING) {
-                    ack[1]
-                } else {
-                    ack[2]
-                };
-                if ack.contains(&MAGIC_INCOMING) && cmd_byte == cmd::SET_LED_USER_ANIMATION {
-                    break; // чанк подтверждён
-                }
-                if n == 0 {
-                    break;
-                }
+    /// Пиксели `ScreenFrame` приходят big-endian, прошивка ждёт little-endian
+    /// (PR #2: `00 F8` = красный). Меняем местами байты каждой пары RGB565.
+    fn tft_pixels_le(data_be: &[u8]) -> Result<Vec<u8>> {
+        if data_be.len() != tft::FRAME_BYTES {
+            return Err(Error::Protocol(format!(
+                "TFT: ожидается {} байт кадра, получено {}",
+                tft::FRAME_BYTES,
+                data_be.len()
+            )));
+        }
+        let mut out = Vec::with_capacity(tft::FRAME_BYTES);
+        for pair in data_be.chunks_exact(2) {
+            out.push(pair[1]);
+            out.push(pair[0]);
+        }
+        Ok(out)
+    }
+
+    /// Статическая картинка: чистые 32768 б RGB565 LE + 0xFF-пад до 9×4096.
+    /// **Без** 256-байтного заголовка — он нужен только анимации (PR #2,
+    /// gohv-framing, hardware-verified: `sub=0x02` → 9 чанков → `FINISH 0xF0`).
+    fn build_tft_static_payload(pixels_le: &[u8]) -> Result<Vec<u8>> {
+        if pixels_le.len() != tft::FRAME_BYTES {
+            return Err(Error::Protocol(format!(
+                "TFT: статический кадр должен быть {} байт, получено {}",
+                tft::FRAME_BYTES,
+                pixels_le.len()
+            )));
+        }
+        let mut payload = vec![0xFFu8; tft::CHUNKS_PER_FRAME * tft::CHUNK_SIZE];
+        payload[..tft::FRAME_BYTES].copy_from_slice(pixels_le);
+        Ok(payload)
+    }
+
+    /// Анимация: 256-байтный заголовок `[N, delay/2 … , 0xFF-пад]` + кадры LE
+    /// + 0xFF-пад до границы 4096 б (AKS075, PR #2: `sub=0x03` → `SAVE 0x02`).
+    fn build_tft_animated_payload(frames_le: &[Vec<u8>], delays_ms: &[u16]) -> Result<Vec<u8>> {
+        let n = frames_le.len();
+        if n == 0 || n > tft::MAX_FRAMES || n != delays_ms.len() {
+            return Err(Error::Protocol(format!(
+                "TFT: анимация ожидает 1..={} кадров и столько же задержек, получено {} кадров / {} задержек",
+                tft::MAX_FRAMES,
+                n,
+                delays_ms.len()
+            )));
+        }
+        let mut header = vec![0xFFu8; tft::HEADER_BYTES];
+        header[0] = n as u8;
+        for (i, delay) in delays_ms.iter().enumerate() {
+            // Единица — 2 мс, минимум 1 (2 мс), максимум 255 (510 мс).
+            header[1 + i] = (delay / 2).clamp(1, 255) as u8;
+        }
+        let mut payload = vec![0xFFu8; (tft::HEADER_BYTES + n * tft::FRAME_BYTES)
+            .div_ceil(tft::CHUNK_SIZE)
+            * tft::CHUNK_SIZE];
+        payload[..tft::HEADER_BYTES].copy_from_slice(&header);
+        for (i, frame) in frames_le.iter().enumerate() {
+            if frame.len() != tft::FRAME_BYTES {
+                return Err(Error::Protocol(format!(
+                    "TFT: кадр {} должен быть {} байт, получено {}",
+                    i,
+                    tft::FRAME_BYTES,
+                    frame.len()
+                )));
+            }
+            let base = tft::HEADER_BYTES + i * tft::FRAME_BYTES;
+            payload[base..base + tft::FRAME_BYTES].copy_from_slice(frame);
+        }
+        Ok(payload)
+    }
+
+    /// Загрузить готовый payload на TFT: control 0xFF13 задаёт транзакцию,
+    /// data 0xFF68 принимает 4096-байтные чанки. После КАЖДОГО чанка ждём ACK;
+    /// если его нет — прерываемся, не отправляя финальный `FINISH`/`SAVE`
+    /// (fail-fast из PR #2: иначе прошивка может зафиксировать битый кадр).
+    fn upload_tft_payload(&self, payload: &[u8], animated: bool) -> Result<()> {
+        if payload.is_empty() || payload.len() % tft::CHUNK_SIZE != 0 {
+            return Err(Error::Protocol(format!(
+                "TFT: payload должен быть кратен {} байтам, получено {}",
+                tft::CHUNK_SIZE,
+                payload.len()
+            )));
+        }
+        let chunks = payload.len() / tft::CHUNK_SIZE;
+        if chunks > u16::MAX as usize {
+            return Err(Error::Protocol("TFT: слишком много чанков".into()));
+        }
+        let ctl_dev = self.open_control()?;
+        let data_dev = self.open_tft_data()?;
+
+        // START: у статики enable=1 (gohv), у анимации enable=0 (AKS075).
+        // IMAGE_CFG: sub и count младшим байтом в [8], старшим в [9].
+        let start = Self::control_packet(ctl::START, 0, if animated { 0 } else { 1 });
+        Self::ctl_exchange(&ctl_dev, &start)?;
+        let sub = if animated {
+            tft::SUB_ANIMATED
+        } else {
+            tft::SUB_STATIC
+        };
+        let cfg = Self::control_count(ctl::IMAGE, sub, chunks as u16);
+        Self::ctl_exchange(&ctl_dev, &cfg)?;
+
+        for (i, chunk) in payload.chunks(tft::CHUNK_SIZE).enumerate() {
+            // У data-интерфейса НЕТ report id: на hidraw уходит ровно 4096 б
+            // (ведущий 0x00 добавлять нельзя — это Rocks-detail из PR #2).
+            let written = data_dev.write(chunk).map_err(Error::from)?;
+            if written != chunk.len() {
+                return Err(Error::Protocol(format!(
+                    "TFT: чанк {} записан частично ({}/{} байт)",
+                    i + 1,
+                    written,
+                    chunk.len()
+                )));
+            }
+            let mut ack = [0u8; ctl::PACKET_LEN];
+            let got = match data_dev.read_timeout(&mut ack, tft::ACK_TIMEOUT_MS) {
+                Ok(n) => n,
+                Err(_) => 0, // таймаут hidapi тоже считаем отсутствием ACK
+            };
+            if got == 0 {
+                return Err(Error::Protocol(format!(
+                    "TFT: нет ACK на чанк {}/{} за {} мс — передача прервана (FINISH/SAVE не отправлены)",
+                    i + 1,
+                    chunks,
+                    tft::ACK_TIMEOUT_MS
+                )));
             }
         }
 
-        // Переключение дисплея на user-содержимое. wsclx: «try index 0, если не
-        // показывает — перебрать до ~10». На железе подберём.
-        self.set(cmd::SET_TFT_BUILT_IN_INDEX, &[0])?;
+        std::thread::sleep(Duration::from_millis(20));
+        let finish = if animated {
+            Self::control_packet(ctl::SAVE, 0, 0)
+        } else {
+            Self::control_packet(ctl::FINISH, 0, 1)
+        };
+        Self::ctl_exchange(&ctl_dev, &finish)?;
         Ok(())
     }
 }
@@ -1603,83 +1745,68 @@ impl KeyboardDevice for AjazzAk820 {
 
     // --- Screen (Ajazz-only) -------------------------------------------
 
-    /// Мультикадровая анимация на TFT. Кадры от нашего конвертера — RGB565
-    /// big-endian; TFT ждёт little-endian — при загрузке пиксели переставляются.
-    /// Задержки — в единицах 2 мс (журнал 10.61: kabelklaus/Beattrey/aks075), в
-    /// отличие от wsclx (5 мс). На железе подобрать точную единицу.
+    /// Анимация на TFT по AKS075-рамке (PR #2, hardware-verified на 800A):
+    /// 256-байтный заголовок, `IMAGE_CFG sub=0x03`, `SAVE 0x02`, ACK на чанк.
+    /// Задержки в единицах 2 мс; кадры конвертера big-endian → little-endian.
     fn set_screen_animation(&self, frames: &[ScreenFrame], delays_ms: &[u16]) -> Result<()> {
-        const FRAME_BYTES: usize = 128 * 128 * 2;
-        const MAX_FRAMES: usize = 30; // wsclx: tftMaxFrames (~30) на одну загрузку
+        if self.is_wireless() {
+            return Err(Error::Unsupported(
+                "TFT-экран по 2.4G недоступен (у донгла нет data-канала 0xFF68)",
+            ));
+        }
         if frames.is_empty() || frames.len() != delays_ms.len() {
             return Err(Error::Protocol("TFT: кадры и задержки не совпадают по длине".into()));
         }
-        if frames.len() > MAX_FRAMES {
+        if frames.len() > tft::MAX_FRAMES {
             return Err(Error::Protocol(format!(
-                "TFT Ajazz: анимация из {} кадров больше лимита {MAX_FRAMES} (децимируйте GIF)",
-                frames.len()
+                "TFT Ajazz: анимация из {} кадров больше лимита {} (децимируйте GIF)",
+                frames.len(),
+                tft::MAX_FRAMES
             )));
         }
         for f in frames {
-            if f.width != 128 || f.height != 128 {
+            if f.width != crate::screen::converter::SCREEN_WIDTH
+                || f.height != crate::screen::converter::SCREEN_HEIGHT
+            {
                 return Err(Error::Protocol(format!(
                     "TFT Ajazz: ожидается 128×128, получено {}×{}",
                     f.width, f.height
                 )));
             }
-            if f.data_rgb565.len() != FRAME_BYTES {
-                return Err(Error::Protocol(format!(
-                    "TFT Ajazz: ожидается {FRAME_BYTES} байт кадра, получено {}",
-                    f.data_rgb565.len()
-                )));
-            }
         }
-
-        // 256-байтный заголовок анимации:
-        //   [0] = N (число кадров)
-        //   [1..1+N) = задержки каждого кадра, единица 2 мс (clamp 0..=255)
-        //   [1+N] = 0x00 terminator
-        //   [2+N..256] = 0xFF pad
-        let n = frames.len();
-        let mut payload = vec![0u8; 256 + n * FRAME_BYTES];
-        payload[0] = n as u8;
-        for (i, d) in delays_ms.iter().enumerate() {
-            payload[1 + i] = (d / 2).min(255) as u8;
-        }
-        payload[1 + n] = 0x00;
-        for i in (2 + n)..256 {
-            payload[i] = 0xFF;
-        }
-        // Кадры: big-endian → little-endian.
-        for (fi, f) in frames.iter().enumerate() {
-            let base = 256 + fi * FRAME_BYTES;
-            for (dst, src) in payload[base..base + FRAME_BYTES]
-                .chunks_exact_mut(2)
-                .zip(f.data_rgb565.chunks_exact(2))
-            {
-                dst[0] = src[1];
-                dst[1] = src[0];
-            }
-        }
-
-        self.upload_tft_payload(&payload)
+        let frames_le: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|f| Self::tft_pixels_le(&f.data_rgb565))
+            .collect::<Result<_>>()?;
+        let payload = Self::build_tft_animated_payload(&frames_le, delays_ms)?;
+        self.upload_tft_payload(&payload, true)
     }
 
-    /// Один кадр на TFT — частный случай анимации из одного кадра.
+    /// Статическая картинка: gohv-рамка без 256-байтного заголовка,
+    /// `IMAGE_CFG sub=0x02` → 9×4096 б → `FINISH 0xF0` (PR #2). Раньше был
+    /// частный случай анимации — на живом железе это другой протокол.
     fn set_screen_image(&self, frame: ScreenFrame) -> Result<()> {
         if self.is_wireless() {
-            // У донгла нет интерфейсов 0xFF67/0xFF68 (TFT) — экран по 2.4G
-            // недоступен (aklink docs/DONGLE.md: iface 0..4 = kb/mouse/consumer/
-            // 0xFF60/0xFF59).
             return Err(Error::Unsupported(
-                "TFT-экран по 2.4G недоступен (у донгла нет канала 0xFF67/0xFF68)",
+                "TFT-экран по 2.4G недоступен (у донгла нет data-канала 0xFF68)",
             ));
         }
-        self.set_screen_animation(&[frame], &[0])
+        if frame.width != crate::screen::converter::SCREEN_WIDTH
+            || frame.height != crate::screen::converter::SCREEN_HEIGHT
+        {
+            return Err(Error::Protocol(format!(
+                "TFT Ajazz: ожидается 128×128, получено {}×{}",
+                frame.width, frame.height
+            )));
+        }
+        let pixels_le = Self::tft_pixels_le(&frame.data_rgb565)?;
+        let payload = Self::build_tft_static_payload(&pixels_le)?;
+        self.upload_tft_payload(&payload, false)
     }
 
     fn set_screen_brightness(&self, _level: u8) -> Result<()> {
         Err(Error::Unsupported(
-            "яркость TFT-экрана Ajazz: отдельная команда не декодирована в wsclx",
+            "яркость TFT-экрана Ajazz: отдельная команда не декодирована",
         ))
     }
 
@@ -2475,5 +2602,79 @@ mod tests {
         assert_eq!(wl_mode_name(0x14), None);
         assert!(AjazzMode::from_code(0x01).is_some());
         assert!(AjazzMode::from_code(0x14).is_none(), "коды >0x13 не существуют");
+    }
+
+    // --- TFT (PR Beattrey/ajazz-ak820-config#2) -------------------------
+
+    #[test]
+    fn tft_static_payload_is_pure_rgb565_le_plus_ff_padding() {
+        // Наш конвертер отдаёт красный как F8 00 (big-endian), прошивка ждёт 00 F8.
+        let frame_be = vec![0xF8u8, 0x00].repeat(tft::FRAME_BYTES / 2);
+        let le = AjazzAk820::tft_pixels_le(&frame_be).unwrap();
+        assert_eq!(&le[..4], &[0x00, 0xF8, 0x00, 0xF8]);
+
+        let payload = AjazzAk820::build_tft_static_payload(&le).unwrap();
+        assert_eq!(payload.len(), 9 * 4096, "статика = 9 чанков по 4096 б");
+        assert_eq!(&payload[..4], &[0x00, 0xF8, 0x00, 0xF8]);
+        assert_eq!(payload[tft::FRAME_BYTES], 0xFF, "пад после пикселей");
+        assert!(payload[tft::FRAME_BYTES..].iter().all(|b| *b == 0xFF));
+    }
+
+    #[test]
+    fn tft_animated_header_and_chunk_math() {
+        let frames = vec![vec![0x11u8; tft::FRAME_BYTES]; 2];
+        let payload = AjazzAk820::build_tft_animated_payload(&frames, &[200, 100]).unwrap();
+        // 256 + 2*32768 = 65792 → 17 чанков по 4096 = 69632.
+        assert_eq!(payload.len(), 17 * 4096);
+        assert_eq!(payload[0], 2, "число кадров");
+        assert_eq!(payload[1], 100, "200 мс / 2");
+        assert_eq!(payload[2], 50, "100 мс / 2");
+        assert_eq!(payload[3], 0xFF, "остаток заголовка — FF, не 00");
+        assert_eq!(payload[255], 0xFF);
+        assert_eq!(payload[256], 0x11, "первый кадр сразу после заголовка");
+        assert_eq!(payload[256 + tft::FRAME_BYTES], 0x11, "второй кадр");
+        // Задержки меньше 2 мс клампятся в 1, больше 510 — в 255.
+        let capped = AjazzAk820::build_tft_animated_payload(&frames[..1], &[0]).unwrap();
+        assert_eq!(capped[1], 1);
+        let capped = AjazzAk820::build_tft_animated_payload(&frames[..1], &[5000]).unwrap();
+        assert_eq!(capped[1], 255);
+    }
+
+    #[test]
+    fn tft_control_packets_use_gohv_and_aks075_variants() {
+        // Статика: START byte8=1, IMAGE_CFG sub=0x02, count=9, FINISH byte8=1.
+        let start = AjazzAk820::control_packet(ctl::START, 0, 1);
+        assert_eq!(&start[..3], &[0x04, 0x18, 0x00]);
+        assert_eq!(start[8], 1);
+        let cfg = AjazzAk820::control_count(ctl::IMAGE, tft::SUB_STATIC, 9);
+        assert_eq!(&cfg[..3], &[0x04, 0x72, 0x02]);
+        assert_eq!(&cfg[8..10], &[9, 0]);
+        let finish = AjazzAk820::control_packet(ctl::FINISH, 0, 1);
+        assert_eq!(&finish[..2], &[0x04, 0xF0]);
+        assert_eq!(finish[8], 1);
+
+        // Анимация: START byte8=0, sub=0x03, SAVE 0x02, FINISH не шлётся.
+        let start = AjazzAk820::control_packet(ctl::START, 0, 0);
+        assert_eq!(start[8], 0);
+        let cfg = AjazzAk820::control_count(ctl::IMAGE, tft::SUB_ANIMATED, 17);
+        assert_eq!(&cfg[..3], &[0x04, 0x72, 0x03]);
+        assert_eq!(&cfg[8..10], &[17, 0]);
+        let save = AjazzAk820::control_packet(ctl::SAVE, 0, 0);
+        assert_eq!(&save[..2], &[0x04, 0x02]);
+        assert_eq!(save[8], 0);
+    }
+
+    #[test]
+    fn tft_builders_reject_bad_input() {
+        assert!(AjazzAk820::tft_pixels_le(&[0u8; 10]).is_err());
+        assert!(AjazzAk820::build_tft_static_payload(&[0u8; 10]).is_err());
+        let frames = vec![vec![0u8; tft::FRAME_BYTES]; 1];
+        assert!(AjazzAk820::build_tft_animated_payload(&[], &[]).is_err());
+        assert!(AjazzAk820::build_tft_animated_payload(&frames, &[100, 100]).is_err());
+        assert!(AjazzAk820::build_tft_animated_payload(
+            &vec![frames[0].clone(); tft::MAX_FRAMES + 1],
+            &vec![100; tft::MAX_FRAMES + 1]
+        )
+        .is_err());
     }
 }

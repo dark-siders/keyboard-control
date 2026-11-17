@@ -57,9 +57,10 @@ impl HidBridge {
                     0xFF60 if vid == 0x0C45 && pid == 0xFDFD => {
                         if d.interface_number() == 3 { 5 } else { 2 }
                     }
-                    // Командный канал Ajazz AK820 Pro: control endpoint — usage
-                    // page 0xFF68 (wsclx, журнал 10.53). 0xFF67 — это TFT-канал,
-                    // он НЕ годится для control-команд.
+                    // Ajazz AK820 Pro: 0xFF68 — write-only data-канал TFT
+                    // (журнал 10.122). Control-команды идут через 0xFF13 и
+                    // открываются отдельно (open_control), здесь ранг просто
+                    // предпочитает вендорский интерфейс при обычном open().
                     0xFF68 => 4,
                     // Точный командный канал ресивера / вендорских коллекций.
                     0xFF02 => 3,
